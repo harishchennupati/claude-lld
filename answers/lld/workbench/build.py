@@ -363,7 +363,7 @@ class W:
 
     def fig(self, svg_html, title=None, caption=None, cls=''):
         t = f'<div class="ft">{title}</div>' if title else ''
-        c = f'<figcaption>{caption}</figcaption>' if caption else ''
+        c = f'<figcaption>{inline(caption)}</figcaption>' if caption else ''
         return f'<figure class="{cls}">{t}{svg_html}{c}</figure>'
 
     def asks(self, pairs, title='If the interviewer asks'):
@@ -452,9 +452,10 @@ class W:
             key = '<span class="ok">green</span> new · <span class="warn">yellow</span> changed'
         return f'<div class="strip">{"".join(out)}<span class="key">{key}</span></div>'
 
-    def drill(self, title, minutes, body):
+    def drill(self, title, minutes, body, extra=''):
         t = self.timer(minutes) if minutes else ''
-        return f'<div class="drill"><div class="dh"><b>{inline(title)}</b>{t}</div>{md(body)}</div>'
+        return (f'<div class="drill"><div class="dh"><b>{inline(title)}</b>{t}</div>{md(body)}'
+                f'{extra}</div>')
 
     def checks(self, key, items):
         li = ''.join(f'<li><label><input type="checkbox" data-key="{key}-{k}">{inline(x)}</label></li>'
@@ -525,6 +526,55 @@ def render(cfg, pages, figs, out_path):
     return page
 
 
+POM = """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>lld</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>1</version>
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+</project>
+"""
+
+
+def export_projects(runs, cfg, out_dir):
+    """Runnable copies of the code next to the page: core, complete (every follow-up and its
+    demo) and practice (only the tests). Each is checked here before it is written."""
+    import shutil
+    t = runs.tree
+    last = cfg['SNAPS'][-1]
+    demos = [d for d in cfg['DEMOS'].values()]
+    projects = {
+        'core': {f: t.text(f, 'core') for f in t.names('core')},
+        'complete': dict({f: t.text(f, last) for f in t.names(last)},
+                         **{d + '.java': runs.demo(d) for d in demos + ['Check']}),
+        'practice': {'RateLimiterTest.java': t.text('RateLimiterTest.java', 'core')}
+                    if 'RateLimiterTest.java' in t.files else {},
+    }
+    ok, comp, res = snap.compile_run(projects['complete'], mains=demos)
+    if not ok:
+        raise SystemExit('the complete project does not compile:\n' + comp)
+    for d, r in res.items():
+        if r[0][0] != 0:
+            raise SystemExit(f'{d} fails in the complete project:\n{r[0][1]}')
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    for name, files in projects.items():
+        src = os.path.join(out_dir, name, 'src', 'main', 'java')
+        os.makedirs(src)
+        for f, text in files.items():
+            with open(os.path.join(src, f), 'w', encoding='utf-8') as fh:
+                fh.write(text)
+        with open(os.path.join(out_dir, name, 'pom.xml'), 'w', encoding='utf-8') as fh:
+            fh.write(POM.format(artifact=cfg['SLUG'] + '-' + name))
+    readme = cfg['EXPORT_README'].format(demos=', '.join(demos))
+    with open(os.path.join(out_dir, 'README.md'), 'w', encoding='utf-8') as fh:
+        fh.write(readme)
+    print(f'  exported core, complete and practice projects to {os.path.relpath(out_dir, HERE)}')
+
+
 def main(slug):
     pdir = os.path.join(HERE, slug)
     problem = load(os.path.join(pdir, 'problem.py'), 'problem_' + slug.replace('-', '_'))
@@ -535,6 +585,8 @@ def main(slug):
     pages = problem.pages(w)
     out = os.path.join(os.path.dirname(HERE), f'{slug}-workbench.html')
     page = render(cfg, pages, None, out)
+    if cfg.get('EXPORT_README'):
+        export_projects(runs, cfg, os.path.join(os.path.dirname(HERE), f'{slug}-code'))
     words = len(re.sub(r'<[^>]+>', ' ', re.sub(r'<(script|style|svg|pre)[\s\S]*?</\1>', ' ', page)).split())
     print(f'wrote {out}: {len(page):,} bytes, {len(pages)} steps, about {words:,} words outside code')
 

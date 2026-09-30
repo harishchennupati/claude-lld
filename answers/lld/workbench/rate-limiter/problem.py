@@ -11,10 +11,10 @@ def problem(w):
     return dict(id='problem', group=U, nav='The problem', title='A rate limiter for a cricket-score API', body=
         w.ask('Each customer may make X requests every Y seconds. Implement '
               '`rateLimit(customerId)`. Keep the code simple, but extensible: we will add to it.',
-              src="Atlassian's wording (2024). Freshworks and Postman (2024) and Swiggy (2025) ask "
-                  'it as a machine-coding round; in 2026 OpenAI, Anthropic, Cursor, xAI and '
-                  'Databricks asked versions of it, usually with one of the follow-ups at the end '
-                  'of this page.', label='The interviewer')
+              src="Atlassian's version, as a candidate reported it (2024). Freshworks and Postman "
+                  '(2024) ask it as a machine-coding round, Swiggy (2025) in a bar-raiser round; in '
+                  '2026 OpenAI, Anthropic, Cursor, xAI and Databricks asked versions of it, usually '
+                  'with one of the follow-ups at the end of this page.', label='The interviewer')
         + w.md('''
         ## The situation
 
@@ -72,7 +72,7 @@ def problem(w):
           for each other.
         - Testable without sleeping: time is handed in.
 
-        **Left out, and said out loud:** many servers sharing one budget, limits per endpoint,
+        **Left out on purpose:** many servers sharing one budget, limits per endpoint,
         changing limits while running, saving anything to disk. Each is a follow-up at the end,
         built on this same design.
 
@@ -158,7 +158,7 @@ def counting(w):
             ['2,200 ms', '5 (10 earned, capped at 5)', '7 at once', '5 allowed, 2 refused', '0'],
         ], cls='trace')
         + w.box('why', 'Is it exact?',
-                'No, and it is worth saying so before they ask. In any 200 ms at most 6 requests '
+                'No. In any 200 ms at most 6 requests '
                 'pass (5 saved, 1 earned), where a fixed window lets 10 through across an edge. But '
                 'over a whole second a client can get **10**: a full bucket, then the 5 it earns '
                 'during that second. A token bucket limits the burst and the average rate, not "at '
@@ -321,6 +321,9 @@ def b1(w):
              'The API is written against `RateLimiter`, so follow-ups swap in a Redis limiter (8) '
              'or a shadow limiter (5) without touching the API. That is dependency inversion: the '
              'caller depends on the question, not on who answers it.'),
+            ('They asked for `boolean rateLimit(customerId)`. Why return a `Decision`?',
+             'Give them both. `rateLimit` is one line on top: `return tryAcquire(id).allowed();`. '
+             'The `Decision` is what lets the API send Retry-After, which a boolean cannot carry.'),
             ('Why not return a boolean and throw when refused?',
              'A refusal is a normal answer, not an error: during a retry storm most answers are '
              'refusals. Exceptions are slow to build, and a boolean cannot carry the retry time.'),
@@ -505,8 +508,10 @@ def b5(w):
                    "only on a client's first request."))
         + w.asks([
             ('Does `computeIfAbsent` lock the whole map?',
-             "No. It locks one bin of the table (the key's slot), and only while creating. For a "
-             'client that already has a bucket, it is a plain read with no lock at all.'),
+             "No, at most one bin of the table (the key's slot). For a client that already has a "
+             'bucket it usually takes no lock at all: since Java 9 it returns at once when the key '
+             'is the first entry in its bin, which it nearly always is. (Java 8 locked the bin '
+             'every time, so code written for it calls `get` first.)'),
             ("Why read the clock outside the bucket's lock?",
              'Reading the time is not part of check-and-take, so it stays out of the lock. A '
              'thread that read the clock earlier but gets the lock later passes an older time; the '
@@ -761,8 +766,8 @@ def f2(w):
                 'the constant 5: different plans could get different maximums the same way.')],
         asks=[('Is this different from a bigger token bucket?',
                'Barely. A token bucket with capacity 10 that refills 5 a second behaves much the '
-               'same: saved tokens are credits. Say so; it shows you see the general idea. '
-               "Credits over fixed windows is simply how Atlassian's question is phrased."),
+               'same: its saved tokens are credits. Credits over fixed windows is how Atlassian '
+               'phrases the question; the token bucket is the general idea.'),
               ('What if a new window starts while a request is being counted?',
                'It cannot: `roll` and the spending happen inside one `synchronized` call.')])
 
@@ -979,8 +984,8 @@ def f8(w):
     return followup(w, 'f8', 8, 'redis', 'Many servers', 'Many servers, one budget: Redis',
         "We now run 10 API servers behind a load balancer. fantasy-app's 50 a second must hold "
         'across all of them, not per server.',
-        'OpenAI (2026): implement a distributed rate limiter. Anthropic (2026): design one. The '
-        "technique, a Lua script in Redis, is in Stripe's engineering blog (2017).",
+        'OpenAI (2026): implement a distributed rate limiter. Anthropic (2026): design one. A Lua '
+        "script in Redis is the standard way to do it, as in Hello Interview's breakdown.",
         '''
         With a map in each server, each server grants the full 50: ten servers, 500 a second. The
         budget has to live in one place every server can reach, Redis, and refill-check-take must
@@ -1105,15 +1110,15 @@ def practise(w):
         answers stay hidden until you ask. Write in your own editor, not on this page.
         ''')
         + w.drill('Drill 1 · The core, from a blank file', 35, '''
-        Type it in this order. Tick each part as it compiles.
-        ''')
-        + w.checks('core', [
+        Type it in this order, and skip the comments: they are for learning, not for the room.
+        Tick each part as it compiles.
+        ''', w.checks('core', [
             '`Decision`, `Limit` with its check, `RateLimiter`',
             '`Clock`, `SystemClock`, `ManualClock`',
             '`Bucket`, `TokenBucket`: refill, take, and the wait',
             '`Plan`, `Plans`, `BucketFactory`',
             '`ClientRateLimiter` with `computeIfAbsent`',
-            '`Main`: the wiring, a burst, and the 100-thread race'])
+            '`Main`: the wiring, a burst, and the 100-thread race']))
         + w.md('''
         Then run the tests against your code. A failing test's name tells you which promise you
         broke. (In a single file, only one class may be `public`: remove `public` from
@@ -1125,14 +1130,14 @@ def practise(w):
         + w.drill('Drill 2 · Follow-ups, 10 minutes each', 10, '''
         Pick one, write the change against your core, then compare with its step:
 
-        1. Exact counts for logins (sliding window log): the **Exact counts** step
-        2. Credits for unused requests: **Credits**
-        3. Requests that cost more: **Costs**
-        4. Three rules, all or nothing: **Several rules**
-        5. Change a limit while running: **Live limits**
-        6. Forget idle clients: **Idle clients**
-        7. Wait instead of refusing: **Waiting**
-        8. Ten servers, one budget: **Many servers**
+        1. Logins: 5 a minute, exactly. <a href="#exact">Exact counts</a>
+        2. Unused requests become credits, up to 5. <a href="#credits">Credits</a>
+        3. A history request costs 5. <a href="#costs">Costs</a>
+        4. Plan, 2 searches a second, 100 a second overall: all or nothing. <a href="#rules">Several rules</a>
+        5. Cut FREE to 3 a second without a restart, after a dry run. <a href="#live">Live limits</a>
+        6. A million clients, most idle. <a href="#idle">Idle clients</a>
+        7. A batch job that waits instead of getting 429. <a href="#waiting">Waiting</a>
+        8. Ten servers, one budget. <a href="#redis">Many servers</a>
         ''')
         + w.drill('Drill 3 · Out loud, one minute each', 5, '''
         Why a lock per bucket and not one for the limiter? What goes wrong without
@@ -1178,8 +1183,8 @@ def check(w):
                    'shows the 3 whole tokens that are there.\n\n<pre class="asc">'
                    + qc.strip() + '</pre>')
         + w.md('## Spot the bug')
-        + w.reveal('Bug 1',
-                   w.snippet('''
+        + w.md('### Bug 1')
+        + w.snippet('''
 public Decision tryAcquire(String clientId) {
     long now = clock.nowMillis();
     Bucket bucket = buckets.get(clientId);
@@ -1188,11 +1193,12 @@ public Decision tryAcquire(String clientId) {
         buckets.put(clientId, bucket);
     }
     return bucket.tryConsume(now);
-}''') + '\n\nTwo threads that meet a new client both see `null`, both create a bucket, and the '
+}''')
+        + w.reveal('What is wrong, and the fix', 'Two threads that meet a new client both see `null`, both create a bucket, and the '
                    'client gets more than its limit. Fix: `computeIfAbsent`. Build step 7\'s '
                    '"get, then put" row is exactly this change, caught on 10 runs of 10.')
-        + w.reveal('Bug 2',
-                   w.snippet('''
+        + w.md('### Bug 2')
+        + w.snippet('''
 class ClientRateLimiter implements RateLimiter {
     // ... fields as before
     @Override
@@ -1202,27 +1208,30 @@ class ClientRateLimiter implements RateLimiter {
                 id -> factory.create(plans.limitFor(id), now));
         return bucket.tryConsume(now);       // and tryConsume is no longer synchronized
     }
-}''') + '\n\nIt is correct, and slow: one lock for the whole API, so fantasy-app\'s requests '
+}''')
+        + w.reveal('What is wrong, and the fix', 'It is correct, and slow: one lock for the whole API, so fantasy-app\'s requests '
                    "queue behind score-widget's. Fix: the lock belongs on each bucket, where the "
                    'shared state is.')
-        + w.reveal('Bug 3',
-                   w.snippet('''
+        + w.md('### Bug 3')
+        + w.snippet('''
 private void refill(long nowMillis) {
     long earned = (nowMillis - lastRefillMillis) / (long) millisPerToken;   // whole tokens
     tokens = Math.min(capacity, tokens + earned);
     lastRefillMillis = nowMillis;
-}''') + '\n\nThe division drops the fraction, and `lastRefillMillis` moves on anyway, so partial '
+}''')
+        + w.reveal('What is wrong, and the fix', 'The division drops the fraction, and `lastRefillMillis` moves on anyway, so partial '
                    'tokens are thrown away. A client sending every 150 ms gets its first 5 requests, '
                    'then nothing at all (checked: 0 of the next 62 in 10 seconds), when it should '
                    'get 5 a second. Fix: divide as doubles, or move `lastRefillMillis` forward only '
                    'by the time actually turned into tokens.')
-        + w.reveal('Bug 4',
-                   w.snippet('''
+        + w.md('### Bug 4')
+        + w.snippet('''
 class Plans {
     private final Map<String, Plan> planOf = new HashMap<>();
     void assign(String clientId, Plan plan) { planOf.put(clientId, plan); }
     // ... called by request threads while sign-ups call assign()
-}''') + '\n\nA `HashMap` written by one thread while others read it can lose entries or, during '
+}''')
+        + w.reveal('What is wrong, and the fix', 'A `HashMap` written by one thread while others read it can lose entries or, during '
                    'a resize, return garbage. Fix: `ConcurrentHashMap`.')
         + w.md('## What would you change if...')
         + w.reveal('...the limit must be per IP address, not per API key?',
@@ -1245,7 +1254,7 @@ class Plans {
         + w.reveal('Why a token bucket?',
                    'Bursts up to a set size, then a steady rate, with two numbers per client. A '
                    'fixed window lets twice the limit through at a window edge; a log is exact but '
-                   'costs a timestamp per request. It is not exact per second: say so.')
+                   'costs a timestamp per request. It is not exact per second: up to 10 can pass in one.')
         + w.reveal('What exactly does `synchronized` protect, and why per bucket?',
                    "Refill, check and take on one client's two numbers, as one step. Per bucket, "
                    'because that is where the shared state is: clients never wait for each other, '

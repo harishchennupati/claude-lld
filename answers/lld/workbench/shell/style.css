@@ -192,7 +192,7 @@ pre.asc.bad { border-left: 3px solid var(--r); }
 pre.asc.good { border-left: 3px solid var(--g); }
 .ar { color: var(--r); } .ag { color: var(--g); } .ay { color: var(--y); } .ad { color: var(--ov); }
 .aa { color: var(--acc); } .ab { color: var(--b); } .am { color: var(--mut); }
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
 .pair > * { margin-top: 6px !important; min-width: 0; }
 
 /* ---------------------------------------------------------------- figures */
@@ -263,7 +263,7 @@ table.kv td:first-child { white-space: nowrap; color: var(--acc); width: 24%; }
 .box.mistake { border-left-color: var(--r); } .box.mistake .bh { color: var(--r); }
 .box.fix { border-left-color: var(--g); } .box.fix .bh { color: var(--g); }
 .box.why { border-left-color: var(--acc); } .box.why .bh { color: var(--acc); }
-.javas { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.javas { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 14px; }
 .javas .box { margin: 6px 0; }
 
 /* X, not Y */
@@ -332,11 +332,12 @@ textarea.misslog {
 .copybox span { color: var(--mut); font-size: 13px; }
 
 /* recall map */
-.recall { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }
+.recall { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
 .recall .rc { background: var(--dark); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px 12px; }
 .recall .rc h4 { margin: 0 0 6px; font-family: var(--sans); font-size: 15px; color: var(--acc); }
 .recall .rc ul { margin: 0; padding-left: 18px; font-size: 13px; }
 .recall .rc li { margin: 3px 0; }
+.recall code, .box code, .qa code, details.rv code { white-space: normal; }
 
 /* bottom prev/next */
 .pnav { display: flex; justify-content: space-between; gap: 12px; margin: 44px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -353,10 +354,17 @@ textarea.misslog {
   body.navopen nav.side { transform: none; }
   section.step { padding: 24px 22px 60px; }
 }
+@media (max-width: 440px) {
+  .brand { display: none; }
+  header.top { justify-content: space-between; }
+}
 @media (max-width: 760px) {
   body { font-size: 14px; }
   header.top { gap: 8px; padding: 0 10px; }
   .brand span { display: none; }
+  .brand b { font-size: 16px; overflow: hidden; text-overflow: ellipsis; }
+  .modes button { padding: 6px 9px; }
+  #pos { min-width: 3.6em; }
   section.step { padding: 20px 16px 50px; }
   h1 { font-size: 27px; }
   .pair, .javas, .recall { grid-template-columns: 1fr; }
