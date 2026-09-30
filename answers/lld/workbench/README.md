@@ -19,18 +19,21 @@ everything; **Practise** mode hides the code and the answers until the reader as
 
 | group | steps | what each step holds |
 |---|---|---|
-| Understand | The problem | the interviewer's line (a real reported wording, with company and year); the situation, with realistic names and numbers; one flow picture; "what this really is" in two sentences; the questions to ask, each with what its answer changes in the code; what we build; what is left out; the hour |
+| Understand | The problem | the interviewer's line (a real reported wording, with company and year); the situation, with realistic names and numbers; one flow picture; "what this really is" in one sentence; the questions to ask, each with what its answer changes in the code; what we build (the product's rules as a table); what SDE-2 and SDE-3 are graded on; the hour (what to type in a 60-minute round, what in a 90-minute machine-coding round); how to use the page |
 | | The core idea (e.g. how to count) | the first idea, drawn failing (a ✗ text panel); the options as a table; "X, not Y" lines; the chosen mechanism with its formula and a worked trace whose numbers the code prints later |
-| Design | The design | the caller's code first; the class diagram; one sequence diagram of real requests; who does what, and when each class changes |
-| | How to get there | the derivation table: *it must* / *first idea* / *what goes wrong* / *what we do instead*; "X, not Y"; what is left out on purpose; the typing order |
-| Build | one step per group of 1-3 classes, in typing order | the where-we-are strip; 2-4 sentences of why; the code, whole files, explained in its comments; the output of a tiny program that uses only what exists so far; a ✗/✓ panel where a race or a wrong first idea is the point; a "Java ·" note where a language or library idea is first used; "If the interviewer asks" (2-4 short answers) |
+| Design | How to get there | the first version everyone writes, compiled and run (the 15-minute version); then one interviewer push per move: what it breaks, what the design becomes, and a bold "X, not Y" line; the same path as a folded table; what is left out on purpose; the typing order. It comes *before* the finished diagram, so the diagram is the summary |
+| | The design | the caller's code first; the class diagram; one sequence diagram of a real request; who does what, and when each class changes |
+| | Threads (when the problem has them) | the three ways two threads break shared data (lost update, check-then-act, stale read), each a short ✗ trace with its name; the fix and the fix's limit; later steps reuse the names |
+| Build | one step per group of 1-5 types, in typing order | the where-we-are strip; 2-4 sentences of why; the code, whole files, explained in its comments; the output of a tiny program that uses only what exists so far; a ✗/✓ panel where a race or a wrong first idea is the point; a "Java ·" note where a language or library idea is first used; at most two "If the interviewer asks" answers |
 | | Run it | `Main` in parts, its output, and what the output shows |
-| | Tests | the test file in parts; its output; the break-it table (real broken copies, each caught by the named test) |
+| | Tests | the test file in parts (the first test open, the rest folded); its output; the break-it table (real broken copies, each with the test that must fail) |
 | | Why it holds up | what threads share and what guards it; why it cannot deadlock; measured cost; SOLID and patterns pointed at the code; patterns *not* used and why |
-| Follow-ups | one step each, ordered so each builds on the last | the ask (a reported wording, company, year); the strip with new and changed classes; where it lands in *our* design (which interface absorbs it); the diff (new code with changes highlighted; repeated changes folded); the demo's output; the catch (the one hole left); Java notes; interview answers |
-| Remember and practise | Recall | six cards (the ask, the core mechanism, classes, threads, tests, follow-ups) and the five lines to remember exactly |
-| | Practise | drill 1: the core from a blank file with a timer and a tick list; the test file to run against your code; the whole core in one file for an online editor; drill 2: each follow-up in 10 minutes; drill 3: out loud; when to repeat; a miss log kept in the browser |
-| | Check yourself | predict the output (answers printed by real code); spot the bug (real bugs, each answer checked); what would you change if...; the questions they ask; everything folded |
+| Follow-ups | one step each, ordered so each builds on the last; optional ones marked *later* | the ask (a reported wording, company, year); "Builds on:" the step before; the strip with only new and changed types; where it lands in *our* design (which interface absorbs it); the diff (new code with changes highlighted; repeated changes folded); the demo's output; the catch (the one hole left); Java notes; interview answers |
+| Remember and practise | Recall | cards (the ask, the core mechanism, the shape, threads, X-not-Y, tests, follow-ups, what the tests need) and the lines to remember exactly |
+| | Practise | drill 0: the 15-minute version; drill 1: the 60-minute round subset with a tick list; drill 2: machine coding, then the page's tests against your code (plus the whole core in one file for an online editor); drill 3: each follow-up with its own time, started from `<slug>-code/steps/<step>/`; drill 4: out loud; when to repeat; a miss log kept in the browser |
+| | Check yourself | predict the output (answers printed by real code); spot the bug (real bugs, each with its fix as code); what would you change if... (answers as code); the questions they ask; everything folded |
+
+The left list shows minutes per step; the must-do path is the steps without *later*.
 
 ## Writing rules
 
@@ -53,6 +56,11 @@ These come from the reader's feedback on earlier versions. Break none of them.
 - Say what is not exact, what is left out, and the one hole each follow-up leaves.
 - Main text is read in full; folds are skimmed. Put only repeated or optional material in folds.
 - LLD is about code, abstractions and principles: no capacity estimates, no HLD boxes.
+- At most two interview Q&As per step; the rest go to Check yourself.
+- Never claim which of two measured things wins: print both, and let generated words describe
+  the numbers of this build (the lock-free step does this).
+- A race test must fail on every run when the code is broken. When many threads are not enough,
+  widen the race window on purpose (a factory that takes 50 ms), rather than hoping.
 
 ## Files of a problem
 
@@ -62,7 +70,8 @@ These come from the reader's feedback on earlier versions. Break none of them.
                        Check.that(...) so a wrong number stops the build
 <slug>/config.py       snapshots, build steps, demos, broken copies (MUTANTS), strip groups
 <slug>/problem.py      the words: one function per step, in page order, returning
-                       dict(id, group, nav, title, body[, stage])
+                       dict(id, group, nav, title, body, min, opt[, stage]); `min` is the
+                       step's reading minutes, `opt` marks a step as *later*
 <slug>/figures.py      the diagrams, drawn with svg.py (sequence() draws sequence diagrams)
 ```
 
@@ -76,22 +85,25 @@ Snapshot markers in the Java files (flat, never nested):
 //@ file from f2       first line: the whole file exists from f2 on
 ```
 
-`problem.py` writes steps with the helpers in `build.py`'s class `W`: `md`, `code`, `part`, `diff`,
-`run`, `asc` (text panels; `{r}`, `{g}`, `{y}`... colour spans; ✗ and ✓ colour themselves), `fig`,
-`table`, `xy`, `ask`, `strip`, `java`, `javas`, `box`, `asks`, `reveal`, `drill`, `checks`,
-`copybox`, `onefile`, `misslog`, `mutant_table`.
+`problem.py` writes steps with the helpers in `build.py`'s class `W`: `md`, `code`, `snippet`,
+`part`, `diff`, `run`, `asc` (text panels; `{r}`, `{g}`, `{y}`... colour spans; ✗ and ✓ colour
+themselves), `pair`, `fig`, `table`, `xy`, `ask`, `strip`, `java`, `javas`, `box`, `asks`,
+`reveal`, `drill`, `checks`, `timed`, `copybox`, `onefile`, `misslog`, `mutant_table`.
+`w.runs.out[name]` is a program's output, for quoting a measured number in the words.
 
 ## What the build checks
 
 - Every build step compiles on its own with the steps before it, with `-Xlint:all -Werror`.
 - Every snapshot compiles; its demo runs and checks its own numbers; the tests pass in every
   snapshot (a follow-up never breaks the core).
-- Every broken copy in `MUTANTS` makes its named test fail on every run (race tests run 10 times).
+- Every broken copy in `MUTANTS` makes its named test fail on every run (race tests run 10 times);
+  other tests may fail too.
 - The exported `complete` project compiles with every demo, and every demo runs.
 
 ## Before shipping a page
 
 1. `python3 build.py <slug> --fresh` passes.
 2. Screenshots of every step at 1440 px and 390 px: no clipped figure, no overflow, code readable.
+   On a phone, tables turn into one card per row and figures scroll sideways at full size.
 3. A technical review (every claim, every line of code) and a cold read by someone playing the
    learner; fix what they find, rebuild, look again.

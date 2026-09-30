@@ -200,6 +200,59 @@ def counting(w):
 
 
 # ==================================================================================== design
+# The derivation: each interviewer push, what it breaks, and the code it leads to.
+MOVES = [
+    ('"Test that a refused client waits exactly 80 ms"',
+     'The clock is read inside, so the test must sleep 80 ms, and fails whenever the machine is '
+     'slow. Time becomes a dependency: a `Clock` handed in, the real one in production, a manual '
+     'one in tests. **Time handed in, not read inside.**', """
+interface Clock { long nowMillis(); }
+long now = clock.nowMillis();                     // was: System.currentTimeMillis()"""),
+    ('"Tell the client when to retry, and which rule said no"',
+     '`false` carries neither. Each bucket answers with a `Decision`, and the limiter with a '
+     '`RateLimitResult` that adds which rule refused. **A result record, not a boolean.**', """
+record Decision(boolean allowed, long remaining, long retryAfterMillis) { }
+RateLimitResult check(RequestContext request);   // was: boolean allow(String clientId)"""),
+    ('"PRO gets 50. Searches: 2 a second each. Sign-ins by IP. A daily quota. One cap for '
+     'everyone."',
+     '`if (plan == PRO) ... else if (endpoint.equals("/search"))` grows with every product '
+     'decision. So a rule becomes data: which requests it covers, whose budget it spends (a '
+     '`KeyScope`), how much (a `LimitPolicy`, per plan through `PlanLimits`) and how it counts '
+     '(an `Algorithm`). The rules sit in a `RuleBook`. **Rules as data, not if-statements.**', """
+new RateLimitRule("search", withKey().and(endpoint("/search")), KeyScope.CLIENT_AND_ENDPOINT,
+        LimitPolicy.fixed(Limit.perSecond(2)), Algorithm.TOKEN_BUCKET)"""),
+    ('"Sign-ins must be exact, and the quota starts again at midnight"',
+     "The token bucket's arithmetic is welded into the class. `Bucket` becomes an interface with "
+     'three classes, and `Algorithm` names them so a rule can pick one by name, each constant '
+     'holding a constructor. **A `Bucket` interface, not a switch.**', """
+interface Bucket {
+    Decision tryConsume(int cost, long nowMillis);
+    void refund(int cost, long nowMillis);
+}"""),
+    ('"A hundred threads at once"',
+     '`synchronized allow` is one lock for the whole API: during the widget\'s retry storm every '
+     'fantasy-app request queues behind it. The lock moves into each bucket, and the buckets move '
+     'into a `BucketStore` over a `ConcurrentHashMap`, created with `computeIfAbsent`. **A lock '
+     'per bucket, not one lock; a store, not a map inside the limiter.**', """
+public synchronized Decision tryConsume(int cost, long nowMillis)   // in each bucket
+buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis)) // in the store"""),
+    ('"A request refused by one rule must not count in the others"',
+     'If each rule takes its token on its own, a refused search still costs a plan token. The '
+     'limiter charges the rules in order and, when one refuses, gives back what the earlier ones '
+     'took. **All or nothing with a refund, not a chain that passes the request along.**', """
+for (Bucket spent : charged) {
+    spent.refund(request.cost(), now);           // a later rule said no
+}"""),
+    ('"Send 429 with Retry-After. And ops want to see who is throttled"',
+     'HTTP and log lines inside the limiter would tie it to one web framework and one logger. A '
+     '`RateLimitFilter` at the front door speaks HTTP; listeners hear every decision, and '
+     '`RefusalMetrics` counts refusals. **A filter and listeners, not HTTP and logging in the '
+     'limiter.**', """
+Response handle(RequestContext request, Function<RequestContext, Response> endpoint)
+interface RateLimitListener { void onDecision(RequestContext request, RateLimitResult result); }"""),
+]
+
+
 def derive(w):
     first = w.runs.demo('FirstCut')
     cls = first[first.index('class FirstCutLimiter'):first.index('public class FirstCut ')].strip()
@@ -213,54 +266,10 @@ def derive(w):
         It is correct for one rule on one server, and it is what you should have running by
         minute 10. Every step below is one push from the interviewer, what it breaks, and what the
         design becomes.
-
-        ### 1 · "Test that a refused client waits exactly 80 ms"
-
-        The clock is read inside, so the test must sleep 80 ms, and fails whenever the machine is
-        slow. Time becomes a dependency: a `Clock` handed in, the real one in production, a manual
-        one in tests. **Time handed in, not read inside.**
-
-        ### 2 · "Tell the client when to retry, and which rule said no"
-
-        `false` carries neither. Each bucket answers with a `Decision` (allowed, tokens left, the
-        wait), and the limiter with a `RateLimitResult` that adds which rule refused. **A result
-        record, not a boolean.**
-
-        ### 3 · "PRO gets 50. Searches: 2 a second each. Sign-ins by IP. A daily quota. One cap for everyone."
-
-        `if (plan == PRO) ... else if (endpoint.equals("/search"))` grows with every product
-        decision. So a rule becomes data: which requests it covers, whose budget it spends (a
-        `KeyScope`), how much (a `LimitPolicy`, per plan through `PlanLimits`) and how it counts
-        (an `Algorithm`). The rules sit in a `RuleBook`. **Rules as data, not if-statements.**
-
-        ### 4 · "Sign-ins must be exact, and the quota starts again at midnight"
-
-        The token bucket's arithmetic is welded into the class. `Bucket` becomes an interface with
-        three classes, and `Algorithm` names them so a rule can pick one by name, each constant
-        holding a constructor. **A `Bucket` interface, not a switch.**
-
-        ### 5 · "A hundred threads at once"
-
-        `synchronized allow` is one lock for the whole API: during the widget's retry storm every
-        fantasy-app request queues behind it. The lock moves into each bucket, and the buckets move
-        into a `BucketStore` over a `ConcurrentHashMap`, created with `computeIfAbsent`. **A lock
-        per bucket, not one lock; a store, not a map inside the limiter.**
-
-        ### 6 · "A request refused by one rule must not count in the others"
-
-        If each rule takes its token on its own, a refused search still costs a plan token. The
-        limiter charges the rules in order and, when one refuses, gives back what the earlier ones
-        took. **All or nothing with a refund, not a chain that passes the request along.**
-
-        ### 7 · "Send 429 with Retry-After. And ops want to see who is throttled"
-
-        HTTP and log lines inside the limiter would tie it to one web framework and one logger. A
-        `RateLimitFilter` at the front door speaks HTTP; `RateLimitListener`s hear every decision,
-        and `RefusalMetrics` counts refusals. **A filter and listeners, not HTTP and logging in
-        the limiter.**
-
-        That is the whole design. The next step draws it.
         ''')
+        + ''.join(w.md(f'### {i} · {push}\n\n{why}') + w.snippet(code)
+                  for i, (push, why, code) in enumerate(MOVES, 1))
+        + w.md('That is the whole design. The next step draws it.')
         + '<details class="more"><summary>The same path as a table</summary>'
         + w.table(['It must', 'First idea', 'What goes wrong', 'What we do instead'], [
             ['know the time', '`System.currentTimeMillis()` inside',
