@@ -1,4 +1,4 @@
-//@ file from x
+//@ file from cousins
 // LeetCode 362: hit(t) records a hit at second t; getHits(t) counts the hits in the last
 // 300 s. Memory must not grow with traffic, so there are 300 slots, one per second of the
 // window. A slot remembers which second it counts; a newer second landing on it starts again.

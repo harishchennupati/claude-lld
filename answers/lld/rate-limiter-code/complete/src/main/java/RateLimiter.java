@@ -1,11 +1,11 @@
-// The one question the API asks before it does any work for a request.
-// The API depends on this interface, never on a class behind it.
+// The one question the API asks before it does any work for a request. The API depends on this
+// interface, never on a class behind it: a Redis-backed or a shadow limiter drops in unseen.
 interface RateLimiter {
-    // `cost` tokens for this request: 1 for a live score, 5 for a whole match's history.
-    Decision tryAcquire(String clientId, int cost);
+    RateLimitResult check(RequestContext request);
 
-    // Every caller written before costs existed keeps working: an ordinary request costs 1.
-    default Decision tryAcquire(String clientId) {
-        return tryAcquire(clientId, 1);
+    // The interviewer's `boolean rateLimit(customerId)`, true meaning "go ahead": one line on
+    // top, for callers that have only a client id. Implementations get it for free.
+    default boolean rateLimit(String customerId) {
+        return check(RequestContext.of(customerId, "-", "/")).allowed();
     }
 }

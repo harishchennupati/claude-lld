@@ -107,7 +107,7 @@ def text_w(s, size, mono=True):
     return len(str(s)) * size * (0.6 if mono else 0.56)
 
 
-def sequence(parts, events, w=940, label='Sequence diagram', top=8, gap=34, pad=76):
+def sequence(parts, events, w=940, label='Sequence diagram', top=8, gap=34, pad=76, name_size=13):
     """A UML-style sequence diagram.
 
     parts:  [(name, sub or None), ...]            one lifeline each, left to right
@@ -132,13 +132,14 @@ def sequence(parts, events, w=940, label='Sequence diagram', top=8, gap=34, pad=
     h = y + 10
     s = Svg(w, h, 'seq')
     for i, (name, sub) in enumerate(parts):
-        bw = min(spacing - 12, max(text_w(name, 13) + 26, (text_w(sub, 11) + 20) if sub else 0, 96))
+        bw = min(spacing - 8, max(text_w(name, name_size) + 16, (text_w(sub, 11) + 16) if sub else 0,
+                                  96))
         s.rect(xs[i] - bw / 2, top, bw, head_h, 'sv-box acc' if i == 0 else 'sv-box', 8)
         if sub:
-            s.text(xs[i], top + 19, name, 'sv-t', 13, 'middle', 600)
+            s.text(xs[i], top + 19, name, 'sv-t', name_size, 'middle', 600)
             s.text(xs[i], top + 36, sub, 'sv-m', 11, 'middle')
         else:
-            s.text(xs[i], top + 28, name, 'sv-t', 13, 'middle', 600)
+            s.text(xs[i], top + 28, name, 'sv-t', name_size, 'middle', 600)
         s.add(f'<line x1="{xs[i]}" y1="{top + head_h}" x2="{xs[i]}" y2="{h - 6}" class="sv-ln life"/>')
     y = top + head_h + 24
     for e, step in zip(events, heights):

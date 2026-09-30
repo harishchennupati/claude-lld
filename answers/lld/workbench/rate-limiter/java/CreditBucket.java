@@ -1,7 +1,8 @@
-//@ file from f2
+//@ file from credits
 // Atlassian's version: `capacity` requests per window, and requests a client leaves unused
 // become credits, up to `maxCredits`, spent once a window is full. With 5 a second and up to
-// 5 credits, a client that made only 3 requests in one second may make 7 in the next.
+// 5 credits, a client that made only 3 requests in one second may make 7 in the next. Credits
+// are real savings, so this bucket is never idle (Bucket's default): forgetting it would lose them.
 class CreditBucket implements Bucket {
     private final int capacity;        // requests per window: 5
     private final long periodMillis;   // the window: 1,000 ms
@@ -18,21 +19,6 @@ class CreditBucket implements Bucket {
     }
 
     @Override
-    //@ until f3
-    public synchronized Decision tryConsume(long nowMillis) {
-        roll(nowMillis);
-        if (used < capacity) {
-            used++;                          // this window's requests first...
-        } else if (credits > 0) {
-            credits--;                       // ...then the savings
-        } else {
-            // Nothing left: the next window brings `capacity` more.
-            return Decision.deny(windowStart + periodMillis - nowMillis);
-        }
-        return Decision.allow((capacity - used) + credits);
-    }
-    //@ end
-    //@ from f3
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         roll(nowMillis);
         long left = (capacity - used) + credits;
@@ -49,11 +35,8 @@ class CreditBucket implements Bucket {
         credits -= fromCredits;
         return Decision.allow(left - cost);
     }
-    //@ end
-    //@ from f4
 
-    // Give back to this window first: that never hands the client more than it had. If a new
-    // window began in between, give nothing back: the client loses one request's worth at most.
+    // Back to this window first; if a new window began in between, nothing comes back.
     @Override
     public synchronized void refund(int cost, long nowMillis) {
         if (windowOf(nowMillis) != windowStart) {
@@ -63,22 +46,21 @@ class CreditBucket implements Bucket {
         used -= back;
         credits = Math.min(maxCredits, credits + (cost - back));
     }
-    //@ end
 
-    // When a new window begins, what the ended windows left unused becomes credits.
+    // When a new window begins, what the ended windows left unused becomes credits: the last
+    // window's leftover, plus a full window for every window with no requests at all.
     private void roll(long nowMillis) {
         long current = windowOf(nowMillis);
         if (current <= windowStart) {
-            return;                          // same window, or an older time: nothing to do
+            return;                                         // same window, or an older time
         }
-        long ended = (current - windowStart) / periodMillis;       // windows that have ended
-        long unused = (capacity - used) + (ended - 1) * capacity;  // the last one's leftover,
-        credits = (int) Math.min(maxCredits, credits + unused);    // plus whole quiet windows
+        long quietWindows = (current - windowStart) / periodMillis - 1;  // windows nobody used
+        long unused = (capacity - used) + quietWindows * capacity;       // + this one's leftover
+        credits = (int) Math.min(maxCredits, credits + unused);
         windowStart = current;
         used = 0;
     }
 
-    // The start of the window that `nowMillis` falls in: 2,350 ms -> 2,000.
     private long windowOf(long nowMillis) {
         return nowMillis - Math.floorMod(nowMillis, periodMillis);
     }

@@ -1,0 +1,21 @@
+import java.util.concurrent.ConcurrentHashMap;
+
+// This server's buckets, in one map shared by every request thread.
+class InMemoryBucketStore implements BucketStore {
+    private final ConcurrentHashMap<String, Bucket> buckets = new ConcurrentHashMap<>();
+
+    @Override
+    public Bucket bucketFor(String key, BucketFactory factory, Limit limit, long nowMillis) {
+        Bucket bucket = buckets.get(key);      // the usual case: the key has a bucket; no lock
+        if (bucket == null) {
+            // A key's first request: find-or-create as ONE atomic step, so two threads that meet
+            // a new key at the same moment still get the same bucket.
+            bucket = buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));
+        }
+        return bucket;
+    }
+
+    int size() {
+        return buckets.size();
+    }
+}

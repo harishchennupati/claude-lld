@@ -1,9 +1,8 @@
-//@ file from f1
 import java.util.ArrayDeque;
 
-// Exact: never more than `limit` requests in ANY window of `periodMillis`. It keeps the time
-// of every allowed request, oldest first. Logins, 5 a minute: after 5 attempts at 0 s, the 6th
-// must wait until 60 s, whatever happens in between.
+// Exact: never more than `limit` requests in ANY window of `periodMillis`. It keeps the time of
+// every allowed request, oldest first. Logins, 5 a minute per IP: after 5 attempts at 0 s, the
+// 6th must wait until 60 s, whatever happens in between. The price is one entry per request.
 class SlidingWindowLog implements Bucket {
     private final int limit;
     private final long periodMillis;
@@ -15,18 +14,6 @@ class SlidingWindowLog implements Bucket {
     }
 
     @Override
-    //@ until f3
-    public synchronized Decision tryConsume(long nowMillis) {
-        dropExpired(nowMillis);
-        if (times.size() < limit) {
-            times.addLast(nowMillis);
-            return Decision.allow(limit - times.size());
-        }
-        // Full. A place opens when the oldest request leaves the window.
-        return Decision.deny(times.peekFirst() + periodMillis - nowMillis);
-    }
-    //@ end
-    //@ from f3
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         dropExpired(nowMillis);
         if (cost > limit) {
@@ -38,8 +25,8 @@ class SlidingWindowLog implements Bucket {
             }
             return Decision.allow(limit - times.size());
         }
-        // Full. `cost` places open when enough of the oldest entries have left the window:
-        // with 5 entries and a cost of 2, the 2nd-oldest must leave.
+        // Full. Enough places open when enough of the oldest entries have left the window: with
+        // 5 entries and a cost of 2, the 2nd-oldest must leave.
         long mustLeave = times.size() + cost - limit;
         long leavesAt = 0;
         int seen = 0;
@@ -51,26 +38,23 @@ class SlidingWindowLog implements Bucket {
         }
         return Decision.deny(limit - times.size(), leavesAt - nowMillis);
     }
-    //@ end
-    //@ from f4
 
-    // Remove this request's entries: the newest ones, which it has just added.
+    // Remove this request's own entries (they carry its time), not whoever came last.
     @Override
     public synchronized void refund(int cost, long nowMillis) {
-        for (int i = 0; i < cost && !times.isEmpty(); i++) {
-            times.pollLast();
+        for (int i = 0; i < cost; i++) {
+            times.removeLastOccurrence(nowMillis);
         }
     }
-    //@ end
-    //@ from f6
 
-    // Idle once even the newest entry has left the window: the log is as empty as a new one.
+    //@ from idle
+    // Idle once even the newest entry has left the window: as empty as a new log.
     @Override
     public synchronized boolean isIdle(long nowMillis) {
         return times.isEmpty() || times.peekLast() <= nowMillis - periodMillis;
     }
-    //@ end
 
+    //@ end
     // Forget the entries that have left the window: at 60,000 ms, anything at 0 ms or earlier.
     private void dropExpired(long nowMillis) {
         while (!times.isEmpty() && times.peekFirst() <= nowMillis - periodMillis) {

@@ -1,8 +1,8 @@
-//@ file from f7
+//@ file from waiting
 import java.util.concurrent.Semaphore;
 
-// For callers that would rather wait than be refused, such as a nightly batch job.
-// Never use it for a web request: every waiting caller holds on to a server thread.
+// For callers that would rather wait than be refused, such as a nightly batch job. Never for a
+// web request: every waiting caller holds on to a thread.
 class Waiting {
     // Sleeping is handed in, like time, so a test can "sleep" by moving a manual clock.
     @FunctionalInterface
@@ -11,38 +11,40 @@ class Waiting {
     }
 
     private final RateLimiter limiter;
-    private final Clock clock;
     private final Sleeper sleeper;
     private final Semaphore seats;   // a waiting room: at most this many callers wait at once
 
-    Waiting(RateLimiter limiter, Clock clock, Sleeper sleeper, int maxWaiting) {
+    Waiting(RateLimiter limiter, Sleeper sleeper, int maxWaiting) {
         this.limiter = limiter;
-        this.clock = clock;
         this.sleeper = sleeper;
         this.seats = new Semaphore(maxWaiting);
     }
 
-    // True once the request is allowed. False at once if it can never fit, if the wait would
-    // run past the deadline, or if the waiting room is full.
-    boolean acquire(String clientId, int cost, long maxWaitMillis) throws InterruptedException {
+    // True once the request is allowed. False at once if it can never fit, if the waits would add
+    // up to more than maxWaitMillis, or if the waiting room is full. A request that needs no wait
+    // needs no seat either.
+    boolean acquire(RequestContext request, long maxWaitMillis) throws InterruptedException {
+        RateLimitResult r = limiter.check(request);
+        if (r.allowed()) {
+            return true;
+        }
         if (!seats.tryAcquire()) {
-            return false;                          // too many already waiting: refuse now
+            return false;                         // too many already waiting: refuse now
         }
         try {
-            long deadline = clock.nowMillis() + maxWaitMillis;
-            while (true) {
-                Decision d = limiter.tryAcquire(clientId, cost);
-                if (d.allowed()) {
-                    return true;
+            long waited = 0;                      // what we have slept so far: no clock needed
+            while (!r.allowed()) {
+                long wait = r.retryAfterMillis();
+                if (wait == Decision.NEVER || waited + wait > maxWaitMillis) {
+                    return false;                 // no point sleeping only to fail
                 }
-                long wait = d.retryAfterMillis();
-                if (wait == Decision.NEVER || clock.nowMillis() + wait > deadline) {
-                    return false;                  // no point sleeping only to fail
-                }
-                sleeper.sleep(wait);               // exactly as long as the limiter said, then ask
+                sleeper.sleep(wait);              // exactly as long as the limiter said, then ask
+                waited += wait;
+                r = limiter.check(request);
             }
+            return true;
         } finally {
-            seats.release();                       // always leave the waiting room
-        }
+            seats.release();                      // always leave the waiting room, even when
+        }                                         // the sleep is interrupted at shutdown
     }
 }

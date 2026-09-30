@@ -95,6 +95,7 @@ class Runs:
                 d = step['demo']
                 if d.endswith('Demo'):
                     src[d + '.java'] = self.demo(d)
+                    src['Check.java'] = self.demo('Check')
                 mains = [d]
             ok, comp, res = snap.compile_run(src, mains=mains)
             if not ok:
@@ -331,7 +332,7 @@ class W:
         for m, failed in self.runs.mutants:
             rows.append(f'<tr><td>{m["html"]}</td><td>{esc(m["test"])}</td>'
                         f'<td class="num">{failed} of {m["runs"]}</td></tr>')
-        return ('<table class="mut"><thead><tr><th>the break</th><th>the test that fails</th>'
+        return ('<table class="mut"><thead><tr><th>the break</th><th>the test that must fail</th>'
                 '<th>runs that failed</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
 
     def onefile(self, s='core', files=None):
@@ -442,14 +443,13 @@ class W:
                 if not self.t.exists(f, prev):
                     return 'new'
                 return 'chg' if self.t.text(f, prev) != self.t.text(f, snap_) else 'done'
-            for label, names in groups:
-                chips = ''.join(f'<span class="chip {state(n)}">{n}</span>' for n in names if state(n))
-                out.append(f'<div class="sg"><span class="sl">{label}</span>{chips}</div>')
-            extra = [f[:-5] for f in self.cfg['FILE_ORDER'] if f[:-5] not in order
-                     and self.t.exists(f, snap_)]
-            if extra:
-                chips = ''.join(f'<span class="chip {state(n)}">{n}</span>' for n in extra)
-                out.append(f'<div class="sg"><span class="sl">added in follow-ups</span>{chips}</div>')
+            every = [f[:-5] for f in self.cfg['FILE_ORDER'] if self.t.exists(f, snap_)
+                     and f != 'RateLimiterTest.java' and f != 'Main.java']
+            touched = [n for n in every if state(n) in ('new', 'chg')]
+            chips = ''.join(f'<span class="chip {state(n)}">{n}</span>' for n in touched)
+            out.append(f'<div class="sg"><span class="sl">this step</span>{chips}</div>')
+            out.append(f'<div class="sg"><span class="sl">unchanged</span>'
+                       f'<span class="muted">{len(every) - len(touched)} classes</span></div>')
             key = '<span class="ok">green</span> new · <span class="warn">yellow</span> changed'
         return f'<div class="strip">{"".join(out)}<span class="key">{key}</span></div>'
 
@@ -457,6 +457,12 @@ class W:
         t = self.timer(minutes) if minutes else ''
         return (f'<div class="drill"><div class="dh"><b>{inline(title)}</b>{t}</div>{md(body)}'
                 f'{extra}</div>')
+
+    def timed(self, items):
+        """A list of drills, each with its own timer: [(text, minutes, href), ...]."""
+        li = ''.join(f'<li><span>{inline(t)}</span> <a href="{h}">the step</a> {self.timer(m)}</li>'
+                     for t, m, h in items)
+        return f'<ol class="timed">{li}</ol>'
 
     def checks(self, key, items):
         li = ''.join(f'<li><label><input type="checkbox" data-key="{key}-{k}">{inline(x)}</label></li>'
@@ -493,8 +499,10 @@ def render(cfg, pages, figs, out_path):
             group = p['group']
             nav.append(f'<div class="grp">{esc(group)}</div>')
         num = f'{n + 1:02d}'
-        nav.append(f'<a href="#{p["id"]}" data-step="{p["id"]}"><span class="n">{num}</span>'
-                   f'<span class="t">{p["nav"]}</span></a>')
+        mins = f'<span class="min">{p["min"]}′</span>' if p.get('min') else ''
+        opt = ' class="opt"' if p.get('opt') else ''
+        nav.append(f'<a href="#{p["id"]}" data-step="{p["id"]}"{opt}><span class="n">{num}</span>'
+                   f'<span class="t">{p["nav"]}</span>{mins}</a>')
         panel = ''
         if p.get('panel'):
             panel = f'<aside class="panel">{p["panel"]}</aside>'
@@ -562,6 +570,8 @@ def export_projects(runs, cfg, out_dir):
             raise SystemExit(f'{d} fails in the complete project:\n{r[0][1]}')
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
+    for snap_name in cfg['SNAPS']:
+        projects['steps/' + snap_name] = {f: t.text(f, snap_name) for f in t.names(snap_name)}
     for name, files in projects.items():
         src = os.path.join(out_dir, name, 'src', 'main', 'java')
         os.makedirs(src)
@@ -569,7 +579,7 @@ def export_projects(runs, cfg, out_dir):
             with open(os.path.join(src, f), 'w', encoding='utf-8') as fh:
                 fh.write(text)
         with open(os.path.join(out_dir, name, 'pom.xml'), 'w', encoding='utf-8') as fh:
-            fh.write(POM.format(artifact=cfg['SLUG'] + '-' + name))
+            fh.write(POM.format(artifact=cfg['SLUG'] + '-' + name.replace('/', '-')))
     readme = cfg['EXPORT_README'].format(demos=', '.join(demos))
     with open(os.path.join(out_dir, 'README.md'), 'w', encoding='utf-8') as fh:
         fh.write(readme)
