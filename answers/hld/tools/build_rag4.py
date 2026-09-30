@@ -43,7 +43,7 @@ EXTRA_CSS = """<style>
 .cards ul{margin:0;padding-left:18px} .cards li{font-size:13px;margin:3px 0}
 p code,li code,td code,.qa code{background:var(--sur);padding:0 4px;border-radius:4px;color:#f5c2e7;font-size:.95em}
 pre.code{background:#181825;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:12.5px;line-height:1.55}
-@media (max-width:760px){.fwd{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.req{grid-template-columns:1fr}}
+@media (max-width:760px){section>table thead,details table thead{display:none} section>table td,details table td{display:block;border:0;padding:3px 10px} section>table tr,details table tr{display:block;border-bottom:1px solid var(--line);padding:6px 0} .fwd{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.req{grid-template-columns:1fr}}
 </style>"""
 
 

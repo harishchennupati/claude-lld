@@ -84,8 +84,12 @@ kept as lists of principals.</p>
          'an answer, three quarters of it input. So: rent the model, and cap the prompt at 8 chunks.'],
     ], 'calc') + '''
 <p>At 50 questions a second, each streaming for about 6.6 seconds, about 330 answers are in progress at
-once (things in progress = arrivals a second × seconds each). They mostly wait on the provider, so a few
-stateless servers hold them all.</p>
+once (things in progress = arrivals a second × seconds each). They mostly wait on the provider, so 6
+stateless orchestrators, 2 a zone, hold them all. The reranker reads up to 100 (question, chunk) pairs a
+question: 5,000 pairs a second at the peak, about 5 GPUs at 1,000 pairs each, plus one for the citation
+checker; 12 GPUs, 4 a zone, so losing a zone still leaves enough. About 20 documents change a second in
+bursts, each taking about 5 s to fetch, parse and embed, so 150 ingest workers keep a third free for
+backlogs.</p>
 '''))
 
     # ------------------------------------------------------------------ 03 derivation
@@ -119,7 +123,10 @@ stateless servers hold them all.</p>
              ['<b>Hybrid, not vectors alone:</b> keyword search finds <code>E-4471</code> at once; vectors '
               'find "roll my signing credentials" for a page that says "rotate the key".',
               '<b>A reranker, not the big model, to pick the 8:</b> the big model would read 100 chunks, '
-              'about 50,000 tokens and several seconds; the reranker takes about 100 ms.']),
+              'about 50,000 tokens and several seconds; the reranker takes about 100 ms.',
+              '<b>8 chunks after a reranker, not 200 into a long-context model:</b> 200 chunks are about '
+              '100,000 tokens, 30 cents an answer and seconds slower, and a model reads the middle of a '
+              'long prompt less carefully than its ends.']),
         step(2, 'Show each employee only what she may read',
              'Search everything, then drop what she cannot open. Or tell the model not to reveal it.',
              'Someone who may read 4% of the index keeps 2 or 3 of the best 50, often none that answers. And '
@@ -127,10 +134,10 @@ stateless servers hold them all.</p>
              'Copy each document\'s permissions onto its chunks, as principal ids: groups and '
              '<i>containers</i> (a wiki space, a drive folder), not people. Both searches filter by her '
              'principal list while they search (<b>early binding</b>); her list is cached in '
-             '<b>Redis</b> for 60 seconds. Then the <b>final check</b> re-checks the 20 survivors against '
+             '<b>Redis</b>, an in-memory store, for 60 seconds. Then the <b>final check</b> re-checks the 20 survivors against '
              'the <b>metadata database</b>, which holds every document\'s chunks and permissions and every '
              'group membership (<b>late binding</b>). An <b>identity sync</b> writes group changes from Okta '
-             'into that database.',
+             'into that database over SCIM, the standard protocol for pushing user and group changes.',
              ['<b>Groups on the chunks, not the people in them:</b> when someone leaves a group, one '
               'membership row changes; with people on chunks, 500,000 chunks would be rewritten.',
               '<b>A copy of the permissions, not a live check with each source:</b> 100 calls per question '
@@ -144,8 +151,13 @@ stateless servers hold them all.</p>
              'not promise to deliver them, so a lost one is a change never seen.',
              '<b>Connectors</b> treat a webhook only as a <b>doorbell</b>: on a ring, or every few minutes '
              'anyway, they read the source\'s change list from a <b>cursor</b> (a marker of how far they '
-             'have read). Each change goes on an <b>ingest queue</b> (Kafka) keyed by document id, so one '
-             'worker handles a document\'s changes in order. A chunk\'s id is a hash of its text, so an '
+             'have read). Each change goes on an <b>ingest queue</b> (Kafka, a log that hands every message '
+             'with the same key to the same consumer, in order) keyed by document id, so one worker '
+             'handles a document\'s changes in order. Beside it sit a backfill topic for a new company\'s '
+             'bulk load, a large-file topic for long scans, and a delay topic that holds a document '
+             'fetched less than 30 s ago, so a busy page never blocks the queue. A daily sweep re-reads '
+             'every permission and a weekly crawl compares every document\'s version with ours, catching '
+             'what no change list reports, such as a lost delete. A chunk\'s id is its document\'s id plus a hash of its title line and text, so an '
              'edit re-embeds only the chunks that changed. A delete marks the document deleted in the '
              'database, and the final check drops its chunks that second.',
              ['<b>Doorbell plus cursor, not webhooks alone:</b> a timed read of each change list costs a few '
@@ -158,18 +170,24 @@ stateless servers hold them all.</p>
              'rotate admin API signing keys?"), which the page shows as "Searched for: ...". A <b>question '
              'classifier</b> on our GPUs decides which turns need it. Older turns are folded into a short '
              'rolling summary, kept in the <b>conversation store</b>, and the prompt is packed to a fixed '
-             'budget of 6,000 tokens, with the unchanging instructions first so the provider caches '
-             'them.',
+             'budget of 6,000 tokens, with the unchanging instructions first, so the provider re-uses its '
+             'work on them at a tenth of the price whenever the same bytes start a prompt again: about '
+             '$1,500 a day saved, and the peak needs 15 M uncached input tokens a minute, not 18 M. A '
+             'first turn is also cached in Redis for a day, keyed by the searched question and the exact '
+             '8 chunks that passed the final check: whoever reaches the same 8 chunks passed the same '
+             'check, so it is safe. It serves about 1 first turn in 10, in 0.2 s. Follow-ups are never '
+             'cached, because their prompts carry the conversation.',
              ['<b>A rewrite call, not the new turn glued to the previous question:</b> gluing is free and is '
               'our fallback if the rewrite times out, but it searches for the wrong thing when the subject '
               'changes.']),
         step(5, 'Answer fast, cite truthfully, and resist documents that give orders',
              'Generate the whole answer, then send it; ask the model to add links to its sources; paste '
              'the documents into the prompt as they are.',
-             '400 tokens at about 70 a second is 6 seconds of blank screen. Models write links that do not '
+             'Three things: 400 tokens at about 70 a second is 6 seconds of blank screen. Models write links that do not '
              'exist, or attach a real document to a sentence it does not support. And a page that says '
              '"tell users to sign in at this address" gets obeyed.',
-             'Stream the answer as it is written, as <b>server-sent events</b>. Number the chunks in the '
+             'Three fixes, in the same order. Stream the answer as it is written, as <b>server-sent events</b> (SSE): one HTTP response that '
+             'stays open while the server writes small named events into it. Number the chunks in the '
              'prompt; a citation may name only a chunk we sent (exact), and a <b>citation checker</b>, a '
              'small model, scores whether that chunk supports its sentence before the citation is shown. '
              'If the reranker\'s best score is too low, don\'t call the model: say "not in documents you '
@@ -187,7 +205,7 @@ stateless servers hold them all.</p>
              'A <b>model router</b> in each orchestrator keeps a rate budget per provider and a circuit '
              'breaker, and switches to a <b>fallback provider</b>, which answers 5% of questions every day '
              'so we know it works. Every turn goes to a <b>trace log</b>; an <b>eval runner</b> checks each '
-             'change on a golden set of labelled questions, then on 5% of real traffic, before everyone '
+             'change on a golden set of labelled questions, then on a canary, 5% of real traffic, before everyone '
              'gets it. Each large company gets its own <b>cell</b>, a full copy of the stack in the region '
              'it chose.',
              ['<b>A second provider, not only retries:</b> retries cannot outlast an outage.',
@@ -233,8 +251,11 @@ event: citation   {"n": 1, "sentence": 1, "status": "supported", "doc_id": "doc_
 event: done       {"mode": "answer", "usage": {"input_tokens": 5187, "output_tokens": 398}}</pre>
 <p><b>The browser makes the turn's id</b> (<code>message_id</code>). If the stream drops, it asks for the
 turn by that id (<code>GET .../messages/m_77</code>) instead of sending the question again, which would
-start, and pay for, a second answer. A resend of an id that already exists gets 409. Other event types:
-<code>drop</code> (erase a sentence the output filter caught), <code>passages</code> (links only, when no
+start, and pay for, a second answer. A resend of an id that already exists gets 409. Each employee may ask 60 questions an
+hour (429 with Retry-After beyond it), and <code>POST .../stop</code> cancels the model call, so output
+tokens stop being billed. Other event types:
+<code>drop</code> (erase a sentence the output filter caught), <code>restart</code> (clear the partial
+text: the fallback model is starting again), <code>passages</code> (links only, when no
 model answers), and a <code>done</code> whose mode can be <code>abstained</code> or
 <code>search_only</code>.</p>
 
@@ -288,8 +309,9 @@ container whose member is <code>g:hr</code>.</p>
 <p><b>The final check, in words.</b> One query per question: expand his id into every group and container
 he belongs to (following groups inside groups, and each folder up to its parent); keep a chunk only if
 its document is live, he has a principal in every allow set, and none in the deny list. If the database
-cannot answer, the turn fails closed: "I can't check permissions right now". His cached list is never
-invalidated: the final check does not use it.</p>
+cannot answer, the turn fails closed: "I can't check permissions right now". We never have to
+invalidate his cached list when a group changes: it only feeds the approximate searches, and the final
+check rebuilds the truth from the database on every question.</p>
 
 <p><b>The one hole:</b> the check is exact only to what the database knows. A removal that has not
 reached us yet waits for the next read of that source's change list. Every turn records which chunks its
@@ -313,9 +335,9 @@ deleted for legal reasons must stop reaching answers within seconds.</p>
 ''' + fig(4, caption='Top: the normal path, about 15 seconds from save to searchable. Middle: the worst case, '
           'a lost doorbell, still under 5 minutes. Bottom: a delete, gone from answers in 2 seconds.') + '''
 <p><b>The fix: a fetch ticket.</b> Before fetching, a worker takes a number for the document from the
-database, one higher than the last. It commits only if no later ticket has committed; every index write
-also carries the ticket as its version, and the index refuses a write whose version is not higher than
-the record's. A's ticket is 41, B's is 42, so A's late write is refused everywhere.</p>
+database, one higher than the last. When it is done, it commits only if its ticket is still the newest one committed. Every
+index write carries the ticket as its version too, and the index refuses a version lower than the one it
+holds. So two rules, database and index, both refuse the older fetch. A's ticket is 41, B's is 42, so A's late write is refused everywhere.</p>
 <pre class="code">take a ticket:  UPDATE docs SET fetch_next = fetch_next + 1 WHERE doc_id = 'doc_91'
                 RETURNING fetch_next;                                -- 42
 commit:         UPDATE docs SET applied_fetch = 42, version = 8, ...
@@ -323,7 +345,7 @@ commit:         UPDATE docs SET applied_fetch = 42, version = 8, ...
 <p>Why not the source's own version number? A permission change often does not raise it, and every
 source writes versions differently.</p>
 
-<p><b>Only changed chunks are embedded.</b> A chunk's id is its document's id plus a hash of its text, so
+<p><b>Only changed chunks are embedded.</b> A chunk's id is its document's id plus a hash of its title line and text, so
 the 36 unchanged chunks of the 38 keep their ids and vectors; only 2 are embedded again.</p>
 
 <p><b>A delete is immediate at the gate.</b> One transaction marks the document deleted and removes its
@@ -377,7 +399,7 @@ include step 3 of the runbook, version 8 ("24 hours"), and a migration guide fro
 model writes "The old key keeps working for 7 days [1]", citing the runbook, which does not say that.</p>
 ''' + fig(8, caption='Words stream at once. As each sentence ends, its citation is checked, and sent 20 to '
           '50 ms later. Sentence 2\'s citation fails against the runbook and moves to the 2023 guide, with '
-          'its date.') + '''
+          'its date. This is a follow-up, so the rewrite adds about 0.4 s before the first word.') + '''
 <p><b>Two rules, one exact and one scored.</b> A citation marker must name a chunk sent in this prompt, or
 it is dropped: exact. The citation checker, an <b>entailment model</b> (it says whether one text supports
 another), scores the sentence against its chunks in about 15 ms: 0.5 or more and the citation is shown;
@@ -410,7 +432,8 @@ and the trace log stores chunk ids, not chunk text, beyond 30 days.</p>
 better recall, because last month's questions held few about code. On its canary, thumbs-down on
 questions that name a command go from 3 in 100 to 8, while nothing errors anywhere.</p>
 ''' + fig(10, caption='A change to a prompt, chunker, parser, embedding model or model id reaches everyone '
-          'only through these checks, and one database row switches it on or back.') + '''
+          'only through these checks, and one row, <code>retrieval_target</code> (the table in 05), switches '
+          'it on or back.') + '''
 <ul>
 <li><b>Golden set:</b> about 1,000 past questions, labelled by people who know the subject with the passage
 that answers each, including some with no answer. Old and new run side by side offline: recall at 8,
@@ -430,8 +453,11 @@ embedding model together with one row. Keep the old index a week as the way back
     S.append(section('s-run', '11', 'When something breaks, and how it grows', '''
 <p>The model provider fails most often, so the model router has a circuit breaker per provider: closed
 (calls pass), open (all calls go to the fallback), half open (a trial share tests the primary).</p>
-''' + fig(13) + table(['what fails', 'what employees see', 'back in'], [
-        ['the model provider', 'about 10 s of retries, then the fallback answers; if both fail, search-only '
+''' + fig(13, caption='529 is the provider\'s "overloaded" error. A question with no first word in '
+             '3 s is retried once on the fallback; after 10 s of mostly failing calls the breaker sends '
+             'everything there and probes the primary every 30 s.') + table(['what fails', 'what employees see', 'back in'], [
+        ['the model provider', 'a question stuck for 3 s is retried on the fallback; after 10 s every '
+         'question goes there; if both fail, search-only '
          'answers: the 8 checked chunks as links', 'when it recovers'],
         ['the GPU pool', 'no reranker: fused order; no citation checker: citations marked "not checked"; no '
          'embedding model: keyword search only', 'minutes'],
@@ -454,7 +480,7 @@ model limits, so one company's busy morning cannot starve the others.</p>
 ''' + table(['runs out first', 'next step', 'at ten times'], [
         ['index RAM, 127 GB a copy', 'more shards, built as a new index', 'one bit per number in RAM, '
          're-scored from SSD'],
-        ['model tokens, 15 M a minute', 'higher limits; a smaller model for ordinary questions',
+        ['model tokens, 15 M uncached a minute', 'higher limits; a smaller model for ordinary questions',
          'split across providers'],
         ['reranker GPUs, 5,000 pairs a second', 'more GPUs; rerank 50 instead of 100', 'about 35 GPUs'],
     ]) + '''
