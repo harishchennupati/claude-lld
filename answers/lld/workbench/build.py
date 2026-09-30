@@ -156,19 +156,18 @@ class Runs:
 
 # ------------------------------------------------------------------------------- page helpers
 def inline(s):
-    """`code`, **bold** and *italic* inside a line. Everything else passes through as HTML."""
-    s = str(s)
-    parts = re.split(r'(`[^`]+`)', s)
-    out = []
-    for p in parts:
-        if p.startswith('`') and p.endswith('`') and len(p) > 1:
-            out.append('<code>' + esc(p[1:-1], quote=False) + '</code>')
-        else:
-            p = re.sub(r'\[([^\]]+)\]\((#[\w-]+)\)', r'<a href="\2">\1</a>', p)   # [text](#step)
-            p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
-            p = re.sub(r'(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])', r'<em>\1</em>', p)
-            out.append(p)
-    return ''.join(out)
+    """`code`, **bold**, *italic* and [text](#step) inside a line; bold and links may contain code.
+    Everything else passes through as HTML."""
+    codes = []
+
+    def keep(m):                        # code first, out of the way of * and [
+        codes.append('<code>' + esc(m.group(1), quote=False) + '</code>')
+        return f'\x00{len(codes) - 1}\x00'
+    s = re.sub(r'`([^`]+)`', keep, str(s))
+    s = re.sub(r'\[([^\]]+)\]\((#[\w-]+)\)', r'<a href="\2">\1</a>', s)
+    s = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', s)
+    s = re.sub(r'(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])', r'<em>\1</em>', s)
+    return re.sub('\x00(\\d+)\x00', lambda m: codes[int(m.group(1))], s)
 
 
 def md(text):
@@ -330,10 +329,13 @@ class W:
     def mutant_table(self):
         rows = []
         for m, failed in self.runs.mutants:
-            rows.append(f'<tr><td>{m["html"]}</td><td>{esc(m["test"])}</td>'
-                        f'<td class="num">{failed} of {m["runs"]}</td></tr>')
-        return ('<table class="mut"><thead><tr><th>the break</th><th>the test that must fail</th>'
-                '<th>runs that failed</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
+            rows.append(f'<tr><td data-label="the break">{m["html"]}</td>'
+                        f'<td data-label="the test that must fail">{esc(m["test"])}</td>'
+                        f'<td data-label="runs that failed" class="num">{failed} of {m["runs"]}</td>'
+                        '</tr>')
+        return ('<div class="tw"><table class="mut"><thead><tr><th>the break</th>'
+                '<th>the test that must fail</th><th>runs that failed</th></tr></thead><tbody>'
+                + ''.join(rows) + '</tbody></table></div>')
 
     def onefile(self, s='core', files=None):
         """All of a snapshot's types in one runnable Main.java (for copying into an online editor)."""
@@ -366,7 +368,8 @@ class W:
     def fig(self, svg_html, title=None, caption=None, cls=''):
         t = f'<div class="ft">{title}</div>' if title else ''
         c = f'<figcaption>{inline(caption)}</figcaption>' if caption else ''
-        return f'<figure class="{cls}">{t}{svg_html}{c}</figure>'
+        # .fs scrolls sideways on a phone, so the figure's text stays readable
+        return f'<figure class="{cls}">{t}<div class="fs">{svg_html}</div>{c}</figure>'
 
     def asks(self, pairs, title='If the interviewer asks'):
         items = ''.join(f'<div class="qa"><b>{inline(q)}</b><p>{inline(a)}</p></div>' for q, a in pairs)
@@ -474,7 +477,10 @@ class W:
 
     def table(self, head, rows, cls=''):
         th = ''.join(f'<th>{inline(h)}</th>' for h in head)
-        tr = ''.join('<tr>' + ''.join(f'<td>{inline(c)}</td>' for c in r) + '</tr>' for r in rows)
+        # data-label: on a phone each row becomes a card, and each cell shows its column's name
+        labels = [esc(re.sub(r'<[^>]+>|[`*]', '', h)) for h in head]
+        tr = ''.join('<tr>' + ''.join(f'<td data-label="{labels[i]}">{inline(c)}</td>'
+                                      for i, c in enumerate(r)) + '</tr>' for r in rows)
         return (f'<div class="tw"><table class="{cls}"><thead><tr>{th}</tr></thead>'
                 f'<tbody>{tr}</tbody></table></div>')
 

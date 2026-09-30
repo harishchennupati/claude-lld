@@ -43,7 +43,8 @@ def classes():
                     ('handle(request, endpoint)',), size=12)
     _, rl = s.uml(350, 30, 280, 'RateLimiter', 'interface', (),
                   ('check(RequestContext): RateLimitResult',), size=12)
-    _, http = s.uml(706, 34, 234, 'HttpResponse', 'record', ('status, headers, body',), (), size=12)
+    _, http = s.uml(706, 34, 234, 'RateLimitFilter.Response', 'record', ('status, headers',), (),
+                    size=12)
     s.path(f'M{filt["x"] + filt["w"]} {filt["y"] + 30} L{rl["x"] - 2} {filt["y"] + 30}', 'sv-ln',
            end='m')
 
@@ -65,7 +66,7 @@ def classes():
     _, book = s.uml(24, y3, 210, 'RuleBook', None, ('rules: List<RateLimitRule>',),
                     ('matching(request)',), size=12)
     _, store = s.uml(254, y3, 230, 'BucketStore', 'interface', (),
-                     ('bucketFor(key, algorithm,', '  limit, now): Bucket'), size=12)
+                     ('bucketFor(key, factory,', '  limit, now): Bucket'), size=12)
     _, lis = s.uml(504, y3, 220, 'RateLimitListener', 'interface', (),
                    ('onDecision(request, result)',), size=12)
     _, clk = s.uml(744, y3, 196, 'Clock', 'interface', (), ('nowMillis()',), size=12)
@@ -100,7 +101,7 @@ def classes():
                   size=12)
     _, alg = s.uml(736, y5, 204, 'Algorithm', 'enum',
                    ('TOKEN_BUCKET, SLIDING_WINDOW_LOG,', 'FIXED_WINDOW'),
-                   ('newBucket(limit, now)',), size=11)
+                   ('create(limit, now)',), size=11)
     y6 = 668
     _, pl = s.uml(516, y6, 200, 'PlanLimits', None, ('Plans + EnumMap<Plan, Limit>',), (),
                   size=11.5)

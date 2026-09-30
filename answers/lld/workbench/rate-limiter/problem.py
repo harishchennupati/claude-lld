@@ -765,8 +765,9 @@ def tests(w):
         + w.asks([
             ('How do you test code that uses threads?',
              'Many threads, a latch so they start together, a frozen clock so no token comes back, '
-             'and far more requests than tokens; then assert the exact count. Then break the code '
-             'on purpose and watch the test fail.'),
+             'and far more requests than tokens; then assert the exact count. When the race window '
+             'is tiny, widen it on purpose, like the slow factory here. Then break the code on '
+             'purpose and watch the test fail.'),
         ]))
 
 
@@ -779,10 +780,12 @@ def holds(w):
              'check, then act'],
             ["a bucket's numbers", "requests for that key", '`synchronized` on the bucket',
              'lost update, stale read'],
-            ['`Plans`\' map', 'requests read, sign-ups write', '`ConcurrentHashMap`', 'lost update'],
+            ['`Plans`\' map', 'requests read, sign-ups write', '`ConcurrentHashMap`',
+             'stale read, a corrupted map'],
             ['`PlanLimits`, `RuleBook`, rules', 'read only', '`final` fields, records',
              '(safe publication)'],
-            ['the listener list', 'read per request', '`CopyOnWriteArrayList`', 'stale read'],
+            ['the listener list', 'read per request', '`CopyOnWriteArrayList`',
+             'a change during a walk'],
             ['refusal counts', 'every refused request', '`LongAdder` in a `ConcurrentHashMap`',
              'lost update'],
             ["`ManualClock`'s time", 'the test writes, requests read', '`volatile`', 'stale read'],
@@ -1073,14 +1076,14 @@ def lockfree(w):
 
 def timing_verdict(out):
     """One sentence about the demo's own numbers, so the words always match what was printed."""
-    said = []
-    for n, lock, cas in re.findall(r'(\d+) threads? on one bucket:\s+synchronized\s+(\d+) ns'
-                                   r'\s+CAS\s+(\d+) ns', out):
-        who = 'one thread' if n == '1' else f'{n} threads'
-        lock, cas = int(lock), int(cas)
-        winner = 'the lock was faster' if lock < cas else 'CAS was faster' if cas < lock else 'a tie'
-        said.append(f'with {who}, {winner}')
-    return ('Here, ' + ', and '.join(said) + '.') if said else ''
+    rows = [(int(n), int(lock), int(cas)) for n, lock, cas in re.findall(
+        r'(\d+) threads?\s+on one bucket:\s+synchronized\s+(\d+) ns\s+CAS\s+(\d+) ns', out)]
+    faster = ['the lock' if lock < cas else 'CAS' if cas < lock else None for _, lock, cas in rows]
+    if len(rows) == 2 and faster[0] and faster[0] == faster[1]:
+        return f'Here {faster[0]} was faster both times, with one thread and with {rows[1][0]}.'
+    said = [f'with {"one thread" if n == 1 else f"{n} threads"}, '
+            + (f'{who} was faster' if who else 'a tie') for (n, _, _), who in zip(rows, faster)]
+    return ('Here, ' + '; '.join(said) + '.') if said else ''
 
 
 def cousins(w):

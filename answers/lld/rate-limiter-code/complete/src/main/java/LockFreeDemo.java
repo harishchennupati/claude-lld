@@ -43,8 +43,7 @@ public class LockFreeDemo {
         start.countDown();
         pool.shutdown();
         pool.awaitTermination(60, TimeUnit.SECONDS);
-        System.out.println("16 threads x 2,000 requests, limit 10,000: " + allowed.get()
-                + " allowed");
+        System.out.printf("16 threads x 2,000 requests, limit 10,000: %,d allowed%n", allowed.get());
         Check.that(same == 8 && allowed.get() == 10_000, "same answers, exact count");
 
         // Time per tryConsume on ONE bucket (a hot client): 1 thread, then 8 threads at once.

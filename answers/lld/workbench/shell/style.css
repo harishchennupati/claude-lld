@@ -379,4 +379,15 @@ textarea.misslog {
   .ask .aq { font-size: 17px; }
   pre.java, pre.asc, .run pre { font-size: 12px; }
   .pnav a { max-width: 100%; }
+  /* figures keep their size and scroll sideways; tables become one card per row */
+  .fs { overflow-x: auto; }
+  .fs svg.fig { min-width: 680px; }
+  .tw table, .tw tbody, .tw tr, .tw td { display: block; width: auto !important; }
+  .tw thead { display: none; }
+  .tw tr { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .tw td { border: 0; padding: 3px 0; white-space: normal !important; }
+  .tw td.num { text-align: left; }
+  .tw td code { white-space: normal; }
+  .tw td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block;
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--mut); }
 }
