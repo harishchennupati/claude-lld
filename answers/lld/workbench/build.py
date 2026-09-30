@@ -163,6 +163,7 @@ def inline(s):
         if p.startswith('`') and p.endswith('`') and len(p) > 1:
             out.append('<code>' + esc(p[1:-1], quote=False) + '</code>')
         else:
+            p = re.sub(r'\[([^\]]+)\]\((#[\w-]+)\)', r'<a href="\2">\1</a>', p)   # [text](#step)
             p = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', p)
             p = re.sub(r'(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])', r'<em>\1</em>', p)
             out.append(p)

@@ -11,6 +11,7 @@ public class RateLimiterTest {
     public static void main(String[] args) throws Exception {
         test("a new client bursts its whole limit, then is refused", RateLimiterTest::burst);
         test("a refusal says exactly when to retry", RateLimiterTest::retryTime);
+        test("a refused request spends nothing", RateLimiterTest::refusalIsFree);
         test("quiet time never fills a bucket past its capacity", RateLimiterTest::capacity);
         test("each client has its own budget, from its own plan", RateLimiterTest::separate);
         test("many threads on one client get exactly its limit", RateLimiterTest::raceOneClient);
@@ -45,6 +46,15 @@ public class RateLimiterTest {
         check(retryAfter(limiter, "score-widget") == 80, "0.6 of a token: retry in 80 ms");
         clock.advance(80);
         check(limiter.tryAcquire("score-widget").allowed(), "80 ms later the token is there");
+    }
+
+    static void refusalIsFree() {
+        ManualClock clock = new ManualClock(0);
+        RateLimiter limiter = limiter(clock);
+        spend(limiter, "score-widget", 5);
+        spend(limiter, "score-widget", 10);                 // 10 refusals: they must cost nothing,
+        clock.advance(200);
+        check(limiter.tryAcquire("score-widget").allowed(), "so 200 ms later a token is there");
     }
 
     static void capacity() {
@@ -82,8 +92,8 @@ public class RateLimiterTest {
     }
 
     // 16 threads walk the same 2,000 brand-new clients at the same moment, one request each.
-    // Each client may pass 5 (FREE). If two threads could each create a bucket for one new client,
-    // that client would get up to 10. Exactly 2,000 x 5 = 10,000 must pass.
+    // Each client may pass 5 (FREE). If every thread could create its own bucket for a new client,
+    // all 16 of its requests could pass. Exactly 2,000 x 5 = 10,000 must pass.
     static void raceNewClients() throws InterruptedException {
         RateLimiter limiter = limiter(new ManualClock(0));
         AtomicInteger allowed = new AtomicInteger();
