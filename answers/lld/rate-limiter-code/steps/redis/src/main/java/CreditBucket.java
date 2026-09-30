@@ -1,7 +1,7 @@
 // Atlassian's version: `capacity` requests per window, and requests a client leaves unused
 // become credits, up to `maxCredits`, spent once a window is full. With 5 a second and up to
 // 5 credits, a client that made only 3 requests in one second may make 7 in the next. Credits
-// are real savings, so this bucket is never idle (Bucket's default): forgetting it would lose them.
+// are real savings, so this bucket must never be thrown away as idle (see Idle clients).
 class CreditBucket implements Bucket {
     private final int capacity;        // requests per window: 5
     private final long periodMillis;   // the window: 1,000 ms

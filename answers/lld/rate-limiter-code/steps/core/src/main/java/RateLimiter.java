@@ -6,6 +6,7 @@ interface RateLimiter {
     // The interviewer's `boolean rateLimit(customerId)`, true meaning "go ahead": one line on
     // top, for callers that have only a client id. Implementations get it for free.
     default boolean rateLimit(String customerId) {
+        // No IP or endpoint is known: the endpoint rules (search, login) never match it.
         return check(RequestContext.of(customerId, "-", "/")).allowed();
     }
 }

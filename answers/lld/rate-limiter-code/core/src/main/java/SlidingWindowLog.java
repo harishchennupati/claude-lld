@@ -22,8 +22,9 @@ class SlidingWindowLog implements Bucket {
             }
             return Decision.allow(limit - times.size());
         }
-        // Full. Enough places open when enough of the oldest entries have left the window: with
-        // 5 entries and a cost of 2, the 2nd-oldest must leave.
+        // Full. For a cost of 1 the wait is simply: times.peekFirst() + periodMillis - nowMillis
+        // (enough in the room). For any cost: with 5 entries and a cost of 2, the 2nd-oldest
+        // entry must leave the window first.
         long mustLeave = times.size() + cost - limit;
         long leavesAt = 0;
         int seen = 0;

@@ -148,7 +148,8 @@ public class RateLimiterTest {
         RateLimiter limiter = limiter(clock);
         spend(limiter, scores("score-widget"), 3);              // 2 tokens left
         clock.advance(-1_000);                                  // the wall clock is set back 1 s
-        check(limiter.check(scores("score-widget")).remaining() == 1, "the 2 tokens were there");
+        check(limiter.check(scores("score-widget")).remaining() == 1,
+                "2 tokens left, this took 1: nothing earned");
         clock.advance(1_000);                                   // back where it was
         check(spend(limiter, scores("score-widget"), 5) == 1, "and nothing was earned meanwhile");
     }

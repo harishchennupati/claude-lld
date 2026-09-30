@@ -2,7 +2,7 @@
 // SCRIPT, which refills, checks and takes on the Redis server as ONE step, because Redis runs
 // one script at a time. The script is the whole fleet's version of `synchronized`.
 class RedisTokenBucket implements Bucket {
-    // KEYS[1]: the bucket, e.g. "rl:plan|fantasy-app|50/1000ms". ARGV: capacity, ms per token,
+    // KEYS[1]: the bucket, e.g. "rl:plan|fantasy-app|50/1000". ARGV: capacity, ms per token,
     // cost. A text block (Java 15+) keeps the script readable here.
     static final String SCRIPT = """
             local capacity, perToken, cost = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])

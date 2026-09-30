@@ -26,7 +26,7 @@ class RuleBasedRateLimiter implements RateLimiter {
     }
 
     // New rules, no restart. Unchanged rules keep their buckets (same key); a changed limit is a
-    // new key, so its buckets start fresh, and the old ones go in the next idle sweep.
+    // new key, so its buckets start fresh; a later sweep (Idle clients) removes the old ones.
     void replaceRules(RuleBook next) {
         rules = next;
     }

@@ -6,7 +6,7 @@ import java.util.List;
 class RuleBook {
     private final List<RateLimitRule> rules;
 
-    // Rule names are part of bucket keys, so they must differ. List.of(...) cannot be changed.
+    // Rule names go into bucket keys, so each must be unique. Pass an unmodifiable List.of(...).
     RuleBook(List<RateLimitRule> rules) {
         this.rules = rules;
     }
