@@ -31,6 +31,8 @@ EXTRA_CSS = """<style>
 .grow span.p.new{border-color:var(--acc);background:var(--acc);color:#1e1e2e;font-weight:600}
 .xy{margin:10px 0;padding:8px 14px;border-left:3px solid #f9e2af;background:var(--sur);border-radius:0 8px 8px 0}
 .xy b{color:#f9e2af}
+.pushh{margin:16px 0 4px;color:#a6e3a1;font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-family:"IBM Plex Mono",monospace}
+details summary b{color:var(--acc)}
 .step h3{font-family:"Space Grotesk",-apple-system,"Segoe UI",system-ui,sans-serif;font-size:18px;color:var(--txt);margin:34px 0 8px}
 .step h3 .k{color:var(--acc);margin-right:8px}
 .fwd{display:grid;grid-template-columns:9.5em 1fr;gap:4px 14px;margin:8px 0}
@@ -110,7 +112,7 @@ html = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f'IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Space+Grotesk:wght@500;600;700'
         f'&display=swap" rel="stylesheet">{STYLE}{EXTRA_CSS}</head><body><main>'
         f'<header class="hero"><h1>Enterprise RAG assistant</h1>'
-        f'<p class="dek">A search engine whose results a model reads. About 75 minutes.</p></header>'
+        f'<p class="dek">A search engine whose results a model reads. Every topic of the full version, at interview depth: about two hours.</p></header>'
         f'{toc}{body}</main>{SCRIPT}</body></html>')
 open(OUT, 'w').write(html)
 text = re.sub(r'<[^>]+>', ' ', re.sub(r'<(script|style|svg|pre)[\s\S]*?</\1>', ' ', html))
