@@ -345,7 +345,9 @@ textarea.misslog {
 .recall .rc h4 { margin: 0 0 6px; font-family: var(--sans); font-size: 15px; color: var(--acc); }
 .recall .rc ul { margin: 0; padding-left: 18px; font-size: 13px; }
 .recall .rc li { margin: 3px 0; }
-.recall code, .box code, .qa code, details.rv code { white-space: normal; }
+/* inline code may wrap inside cards and answers; code blocks (pre) keep their spaces */
+.recall :not(pre) > code, .box :not(pre) > code, .qa :not(pre) > code,
+details.rv :not(pre) > code { white-space: normal; }
 
 /* bottom prev/next */
 .pnav { display: flex; justify-content: space-between; gap: 12px; margin: 44px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }

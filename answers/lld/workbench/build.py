@@ -11,6 +11,7 @@ A problem folder holds:
 Everything the page shows is compiled and run here first. A demo that fails, a snapshot that
 does not compile, or a broken copy that the tests do not catch stops the build.
 """
+import glob
 import html
 import importlib.util
 import json
@@ -592,8 +593,21 @@ def export_projects(runs, cfg, out_dir):
     print(f'  exported core, complete and practice projects to {os.path.relpath(out_dir, HERE)}')
 
 
+def check_line_length(pdir, limit=100):
+    """Every Java line on the page (and in the demos) fits in `limit` characters."""
+    long_lines = []
+    for sub in ('java', 'demos'):
+        for f in sorted(glob.glob(os.path.join(pdir, sub, '*.java'))):
+            for n, line in enumerate(open(f, encoding='utf-8'), 1):
+                if len(line.rstrip('\n')) > limit:
+                    long_lines.append(f'{sub}/{os.path.basename(f)}:{n} ({len(line.rstrip())})')
+    if long_lines:
+        raise SystemExit(f'lines over {limit} characters:\n  ' + '\n  '.join(long_lines))
+
+
 def main(slug):
     pdir = os.path.join(HERE, slug)
+    check_line_length(pdir)
     problem = load(os.path.join(pdir, 'problem.py'), 'problem_' + slug.replace('-', '_'))
     cfg = problem.CONFIG
     runs = Runs(pdir, cfg)

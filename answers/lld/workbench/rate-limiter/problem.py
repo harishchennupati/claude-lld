@@ -156,7 +156,8 @@ def counting(w):
              'fixed window, and the per-second rules already stop bursts.'),
         ])
         + w.md('''
-        Every row becomes a `Bucket` class: the first three we use in the core, the other two in
+        Every row becomes a `Bucket` class: the fixed window, the sliding window log and the token
+        bucket are in the core; the counter and the leaky bucket come in
         [More ways to count](#more).
 
         ## How the token bucket works
@@ -260,7 +261,7 @@ def derive(w):
         w.md('''
         Everyone's first version is one class. Here it is, compiled and run:
         ''')
-        + w.snippet(cls, label='FirstCutLimiter.java', note='the 15-minute version')
+        + w.snippet(cls, label='FirstCut.java', note='the 15-minute version (its main is not shown)')
         + w.run('FirstCut')
         + w.md('''
         It is correct for one rule on one server, and it is what you should have running by
@@ -677,10 +678,11 @@ def limiter(w):
         + w.box('hole', 'The catch',
                 'Between taking a token and giving it back, the token is missing for a few '
                 'microseconds, so another request from the same client can be refused though it '
-                'would have fit, or be told one fewer is left. At most one request\'s worth, for '
-                'microseconds, and only ever stricter. We accept it. The strict fix is to ask every '
-                'rule first and take afterwards, holding all their locks in a fixed order: more '
-                'locks, more waiting.')
+                'would have fit. At most one request\'s worth, for microseconds: almost always one '
+                'refusal too many; a token bucket can also give back a token that a refill in that '
+                'gap would have thrown away at the cap. We accept it. The strict fix is to ask '
+                'every rule first and take afterwards, holding all their locks in a fixed order: '
+                'more locks, more waiting.')
         + w.java('CopyOnWriteArrayList and LongAdder', 'Listeners are read on every request and '
                  'added almost never: a copy-on-write list needs no lock to read. `LongAdder` is a '
                  'counter for many writers: each thread adds to its own cell, and `sum()` adds '
@@ -718,11 +720,14 @@ def run_(w):
     return step('run', B, 'Run it', 'Run it', minutes=4, stage='Build · run', body=
         w.strip(now=['Main'])
         + w.md('''
-        `Main` wires the objects as the server would at startup, with only the clock manual, so
-        every run prints the same. First some requests through the front door:
+        `Main` wires the objects as the server would at startup (the design step's snippet),
+        with only the clock manual, so every run prints the same. Then it sends requests from
+        three clients through the front door.
         ''')
+        + '<details class="more"><summary>Main.java: the wiring and the requests</summary>'
         + w.part('Main.java', r'^import', r'System\.out\.printf\("%4d', plus=2, label='Main.java',
                  note='wiring, and requests from three clients')
+        + '</details>'
         + w.md('Then the race: 100 threads send one request each for fantasy-app at the same '
                'instant, with a frozen clock, so exactly 50 may pass.')
         + w.part('Main.java', r'^    // 100 threads', None, label='Main.java', note='the race')
@@ -755,7 +760,9 @@ def tests(w):
         Threads. For the lost update: a frozen clock and far more requests than tokens, so a
         request that sneaks through shows up as a count above the limit. For check-then-act: a
         factory that takes 50 ms to build a bucket holds the race window open, so the bad
-        interleaving happens on every run, not once in a thousand.
+        interleaving happens on every run, not once in a thousand. Through the limiter that window
+        is nanoseconds wide, and a broken copy slipped past it on a small machine; the promise
+        belongs to the store, so the test asks the store.
         ''')
         + w.part(t, r'^    // ---- threads', r'"one bucket for one key, got "', plus=1, note='races')
         + '<details class="more"><summary>The helpers: limiters, requests, spend, together, check</summary>'
@@ -790,7 +797,7 @@ def holds(w):
             ["a bucket's numbers", "requests for that key", '`synchronized` on the bucket',
              'lost update, stale read'],
             ['`Plans`\' map', 'requests read, sign-ups write', '`ConcurrentHashMap`',
-             'stale read, a corrupted map'],
+             'stale read, or a resize seen half-done'],
             ['`PlanLimits`, `RuleBook`, rules', 'read only', '`final` fields, records',
              '(safe publication)'],
             ['the listener list', 'read per request', '`CopyOnWriteArrayList`',
@@ -812,8 +819,8 @@ def holds(w):
         ''')
         + w.asc('\n'.join('  ' + c for c in cost))
         + w.md('''
-        A check on `/scores` builds three short key strings and does three map lookups, one per
-        rule that covers it. The memory is why [Idle clients](#idle) sweeps buckets that a new one
+        A check on `/scores` builds three key strings and does three store lookups (one per rule
+        that covers it) and two plan lookups (plan and quota each ask `Plans`). The memory is why [Idle clients](#idle) sweeps buckets that a new one
         would replace exactly.
 
         ## Design principles, where they are in the code
@@ -847,6 +854,14 @@ def holds(w):
 
 
 # ================================================================================ follow-ups
+# What each follow-up needs to make sense, and the step whose code it starts from (drill 3 starts
+# from that step's folder in rate-limiter-code/steps/).
+NEEDS = {'more': 'the core', 'credits': 'the core', 'live': 'the core',
+         'idle': 'the core; it also gives the buckets from More ways to count and Credits their '
+                 '`isIdle`',
+         'waiting': 'the core', 'redis': 'the core',
+         'lockfree': 'the core (its `isIdle` comes from Idle clients)',
+         'cousins': 'nothing: two small classes of their own'}
 PREV = {'more': ('the core', 'tests'), 'credits': ('More ways to count', 'more'),
         'live': ('Credits', 'credits'), 'idle': ('Live limits', 'live'),
         'waiting': ('Idle clients', 'idle'), 'redis': ('Waiting', 'waiting'),
@@ -858,7 +873,8 @@ def followup(w, s, id_, nav, title, ask, src, lands, minutes, opt=False, extra='
              first=(), fold=(), fold_note=None):
     pname, pid = PREV[s]
     body = (w.ask(ask, src=src, label='Follow-up' if not opt else 'Follow-up · when you have time')
-            + w.md(f'*Builds on:* [{pname}](#{pid}).')
+            + w.md(f'*Needs:* {NEEDS[s]}. *Code starts from:* [{pname}](#{pid}), folder '
+                   f'`steps/{CONFIG["SNAPS"][CONFIG["SNAPS"].index(s) - 1]}/`.')
             + w.strip(snap_=s)
             + w.md(lands)
             + (figure or '')
@@ -934,7 +950,7 @@ def live(w):
         bucket key carries its limit, a changed limit simply gets new buckets.
         ''',
         after_run='''
-        The dry run names score-widget, twice. After the switch the next second allows 3, and the
+        The dry run finds two of score-widget's requests that the new rules would refuse. After the switch the next second allows 3, and the
         4th waits 334 ms (1,000 / 3, rounded up). The daily quota did not reset: that rule did not
         change, so its keys and buckets are the same.
         ''',
@@ -963,8 +979,9 @@ def idle(w):
         fold=['SlidingWindowLog', 'SlidingWindowCounter', 'LeakyBucket'],
         fold_note='`isIdle` in the other buckets',
         after_run='''
-        A token bucket left alone for one refill period is full again, so it goes. A quota bucket
-        holds today's count, so it stays until the day is over.
+        A token bucket left alone long enough to fill up again (a second, at 5 a second) is exactly
+        what a new one would be, so it goes. A quota bucket holds today's count, so it stays until
+        the day is over.
         ''',
         hole='A sweep and a request can meet: the request fetches an idle, full bucket, the sweep '
              'removes it from the map, the request spends from the removed bucket, and the next '
@@ -1080,7 +1097,7 @@ def lockfree(w):
               ('Does `synchronized` hurt with virtual threads?',
                'Not here: the lock is held for nanoseconds and nothing blocks inside it. Pinning '
                'only mattered when a virtual thread blocked while holding a monitor, and it is gone '
-               'since JDK 24.')])
+               'since JDK 24 (JEP 491).')])
 
 
 def timing_verdict(out):
@@ -1329,7 +1346,10 @@ ENDPOINT(RequestContext::endpoint),                  // "/search" for all client
         + w.reveal('...refused requests should count too, to punish retry storms?',
                    'In `TokenBucket`, let a refusal take tokens as well, down to minus the capacity, so '
                    'a client that keeps hammering digs a deeper hole: ' + w.snippet('''
-tokens = Math.max(-capacity, tokens - cost);         // before computing the wait'''))
+// in TokenBucket.tryConsume, where it refuses:
+tokens = Math.max(-capacity, tokens - cost);         // each refusal digs deeper, to -capacity
+long waitMillis = (long) Math.ceil((cost - tokens) * millisPerToken);
+return Decision.deny(0, waitMillis);                 // below zero: report 0 left'''))
         + w.reveal('...no bursts at all, just one request every 200 ms?',
                    'A bucket that holds one token is a steady pace: `new Limit(1, 200)`.')
         + w.reveal('...a list of partners who must never be limited?',
@@ -1338,7 +1358,8 @@ new RateLimitRule("plan", r -> r.hasKey() && !partners.contains(r.clientId()), .
         + w.md('## The questions they ask')
         + w.reveal('Why a token bucket?', 'Bursts up to a set size, then a steady rate, with two '
                    'numbers per key. A fixed window lets twice the limit through at an edge; a log is '
-                   'exact but costs an entry per request. It is not exact per second: say so.')
+                   'exact but costs an entry per request. It is not exact per second: up to 10 can pass '
+                   'in one.')
         + w.reveal('What exactly does `synchronized` protect, and why per bucket?', "Refill, check and "
                    "take on one key's numbers as one step (the lost update), plus visibility. Per "
                    'bucket, because that is where the shared state is: keys never wait for each other, '

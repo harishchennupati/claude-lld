@@ -13,14 +13,14 @@ public class IdleDemo {
         clock.advance(900);
         limiter.check(RequestContext.of("score-widget", "203.0.113.7", "/scores"));
         clock.advance(100);
-        System.out.println("buckets at 1,000 ms:   " + store.size()
-                + "  (a plan and a quota bucket per client, one global)");
+        System.out.printf("buckets at 1,000 ms:  %,d  (1,001 clients x a plan and a quota bucket,"
+                + " and one global)%n", store.size());
         int first = store.evictIdle(clock.nowMillis());
-        System.out.println("sweep at 1,000 ms:     removed " + first + ", left " + store.size()
-                + "  (quota buckets hold today's counts)");
+        System.out.printf("sweep at 1,000 ms:    removed %,d plan buckets that are full again;"
+                + " %,d left%n", first, store.size());
         clock.advance(86_400_000);                            // the next day
         int second = store.evictIdle(clock.nowMillis());
-        System.out.println("sweep the next day:    removed " + second + ", left " + store.size());
+        System.out.printf("sweep the next day:   removed %,d; %,d left%n", second, store.size());
         Check.that(first == 1_000 && second == 1_003 && store.size() == 0, "1,000 then 1,003");
     }
 }
