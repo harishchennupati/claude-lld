@@ -1,0 +1,752 @@
+# Stack Overflow LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"stackoverflow/Main.java").read_text()
+ext   = (H/"stackoverflow/Extensions.java").read_text()
+tests = (H/"stackoverflow/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("ask &amp; answer", 24, [("someone asks a question", "a title, a body, some tags"),
+                                  ("it lands in the store first", "and only then in the search index"),
+                                  ("answers arrive on the thread", "only while it is still open"),
+                                  ("comments hang off both", "never off another comment")]),
+        ("vote",             106, [("a reader votes on a post", "up, down, changed, taken back"),
+                                   ("read the vote they had before", "the same vote again does nothing"),
+                                   ("score and reputation move", "by new minus old, as one step"),
+                                   ("then tell the listeners", "after the lock, never inside it")]),
+        ("accept",           226, [("the asker accepts an answer", "only the asker, only one"),
+                                   ("take back the previous +15", "if one was already accepted"),
+                                   ("award the new author +15", "the asker's +2 is paid once"),
+                                   ("the flag moves", "readers see it without the lock")])]
+for lab, y, boxes in rows:
+    pf += _tx(86, y+30, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 52, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+26, x+260), True)
+pf += _ar("M555 158 V166", dash=True) + _bx(390, 166, 450, 36, "refused: your own post, or too little reputation", "nothing at all is written", dash=True)
+pf += _tx(86, 300, "read", "var(--acc)", 13)
+pf += _tx(175, 300, "at any moment, without counting a single vote: what is this post's score?  what is my reputation?  which questions carry the tag java?",
+          "var(--text)", 12, "start")
+pf += _tx(615, 332, "fifty people vote on the same answer in the same instant: the score must equal the number of distinct voters, and no reputation may be counted twice",
+          "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 348, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("09:12  Alice asks q1", ["tagged java and collections", "into the store, then into the index",
+                               "score 0, nothing accepted yet"], True),
+      ("09:20  Bob answers, Carol upvotes", ["a1 score 0 -&gt; 1", "Bob 100 -&gt; 110 reputation",
+                                             "Carol pays nothing to vote"], False),
+      ("09:21  Dan upvotes a1 twice", ["the ledger already says Dan: UP", "score stays 1, Bob stays at 110",
+                                       "idempotent by the ledger, not by luck"], False),
+      ("11:40  Alice accepts a2, not a1", ["Bob -15 and Carol +15, one step", "Alice keeps the +2 she was paid once",
+                                           "flag and reputation still agree"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 110, t, lines, acc=acc)
+P_EX = _mv(1230, 186, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Register users; ask a question with a title, a body and tags.</li>
+<li>Answer an open question; comment on a question or on an answer.</li>
+<li>Upvote or downvote any post you did not write, then change that vote or take it back.</li>
+<li>Every vote and every acceptance moves the <i>target author's</i> reputation by a fixed amount.</li>
+<li>The asker marks exactly one answer accepted, and may change which one.</li>
+<li>Close, reopen and delete a question, with reputation thresholds deciding who may.</li>
+<li>Find questions by tag, by keyword and by author.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many people voting on one post at once: the score equals the number of distinct voters, never more, never fewer.</li>
+<li>A repeated vote is a no-op; a flip or a retraction is exactly invertible, so score and reputation can never drift apart.</li>
+<li>A post's score, a user's vote and "which thread owns this post" are all O(1); search is O(matches), never a scan.</li>
+<li>The reputation numbers are swappable without touching a line of the vote path.</li>
+<li>One source of truth per thread: the question owns its posts, its ledger and its one lock.</li>
+<li>Nothing half-done: a refused vote leaves every score and every reputation exactly as they were.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design Stack Overflow. People ask questions, others answer them and comment, anybody can upvote or '
+          'downvote a post and change their mind later, the asker accepts one answer, and all of that moves '
+          'reputation. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>People ask questions and other people answer them. '
+ 'Anyone can leave a comment, and anyone except the author can vote a post up or down &mdash; and change that vote '
+ 'later, or take it back entirely. Every one of those votes moves the <i>author\'s</i> reputation by a fixed number '
+ 'of points, and reputation is what buys the right to do more: you need fifteen points to upvote, a hundred and '
+ 'twenty-five to downvote. The person who asked can mark exactly one answer as the accepted one, which pays its '
+ 'author fifteen points, and they can change their mind later. Questions carry tags so other people can find them. '
+ 'Thousands of people vote on the same front-page answer at the same moment, so the one thing that must always be '
+ 'true is that a post\'s score is the number of distinct people who voted on it &mdash; never more, never fewer &mdash; '
+ 'and the author\'s reputation agrees with it to the point.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, with '
+ 'a <code>main</code> that asks, answers, votes and accepts, and prints the scores. The interviewer is watching for, '
+ 'in this order: the questions you ask before typing (the exact reputation numbers and whether a vote can be changed '
+ 'are the first two); which classes exist and which one owns the votes; a vote end to end; what happens when fifty '
+ 'people vote at the same instant; where the reputation numbers live, so changing them is one line and not a search '
+ 'through the code; and what the system looks like after a refused vote. Then the twists: badges, bounties, edit '
+ 'history, moderation, search and paging, persistence.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Questions and answers only, or comments and edits too?</td><td>Questions, answers and comments; edit history is a follow-up</td><td>Three kinds of post sharing one votable base (moves 1, 12)</td></tr>'
+ '<tr><td>Can a vote be changed or taken back, and is the same vote twice a no-op?</td><td>Yes to all three</td><td>A ledger of who voted which way, and new-minus-old arithmetic (moves 2, 6)</td></tr>'
+ '<tr><td>Give me the exact reputation numbers.</td><td>+5 question up, +10 answer up, -2 down, +15 accepted, +2 to the accepter</td><td>One rulebook behind one interface, handed in (move 3)</td></tr>'
+ '<tr><td>Can somebody vote on their own post, and who may accept an answer?</td><td>No; only the asker, and only one answer at a time</td><td>The guards that run before anything is written (move 6)</td></tr>'
+ '<tr><td>Does reputation gate anything?</td><td>Yes: 15 to upvote, 50 to comment, 125 to downvote, 500 to close</td><td>A threshold table on the user, checked inside the flow (move 5)</td></tr>'
+ '<tr><td>Tags and search now, or later?</td><td>Tags, keyword and author search; no ranking</td><td>An inverted index, O(matches) rather than a scan (move 5)</td></tr>'
+ '<tr><td>One process and in memory, or a database and many servers?</td><td>One process, in memory</td><td>No repository yet; a follow-up adds one (move 12)</td></tr>'
+ '<tr><td>Badges, bounties, moderation, edit history?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> a vote is not an entity, it is one entry in a map from user to '
+ 'direction; the same vote twice is a no-op and a change is new-minus-old; reputation is stored as the true signed '
+ 'number and floored only when it is shown; one lock per question thread, in memory, one process. Named as out of '
+ 'scope: badges, bounties, edit history, moderation, ranking and persistence &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a USER asks a QUESTION; others post ANSWERS and COMMENTS; a VOTE moves a SCORE and a REPUTATION; a TAG finds the question later",
+          "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 170, "User", "id + a reputation counter", 1), (218, 190, "Question", "title, tags, answers, lock", 1),
+                          (426, 165, "Answer", "body, score, its voters", 1), (609, 175, "Comment", "votable, not commentable", 1),
+                          (802, 195, "Vote", "a map entry, not an entity", 0), (1015, 185, "Rulebook", "no state: an interface", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a map entry, or an interface", "var(--muted)", 11)
+m1 += _tx(615, 210, "and one noun is three nouns: a question, an answer and a comment all carry an author, a body, a score and a ledger, so that machinery is one abstract Post", "var(--acc)", 11)
+MV[1] = _mv(1230, 225, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("turn a reason into points", "ReputationRules  (no state: pure)", "rules.pointsFor(ANSWER_UP)"),
+                                       ("move one post's score", "Post  (owns the voters map)", "post.record(voterId, UP)"),
+                                       ("decide a vote, end to end", "Question  (owns the posts and the lock)", "question.vote(postId, user, UP)"),
+                                       ("find questions by a word", "SearchIndex  (owns the inverted maps)", "index.byWord(\"hashmap\")")]):
+    y = 24 + k*56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 268, "a verb whose state is spread over two classes goes to the class that owns both: the question owns every post in its thread, so it owns the vote", "var(--muted)", 11)
+m2 += _tx(615, 288, "and accepting is not a new kind of vote: it is one flag on the question plus two reputation moves, so it lives beside vote(), under the same lock", "var(--muted)", 11)
+MV[2] = _mv(1230, 300, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 70, 220, 100, "QaService", "configure(rules, listeners)", acc=True)
+for k, (t, sub, impl) in enumerate([("ReputationRules", "+5 / +10 / -2 / +15, one table", "DefaultRules, TunedRules, a lambda in a test"),
+                                    ("RepAward", "how a delta lands on a user", "the plain adder, DailyCap(adder, 200)"),
+                                    ("PostListener", "badges, moderation, a cache, undo", "BadgeManager, ModerationQueue, RepReversal"),
+                                    ("Clock + Directory", "where time and people come from", "System::currentTimeMillis, so::user")]):
+    y = 24 + k*58
+    m3 += _ar("M250 120 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 430, 44, impl, "what can be handed in") + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 268, "dashed green = handed in. The service never builds a rule, so a new reputation policy is a new class and one changed line", "var(--muted)", 11)
+m3 += _tx(615, 288, "and one rule wraps another: DailyCap(adder, 200) caps what anybody earns in a day without the vote path learning that caps exist", "var(--acc)", 11)
+MV[3] = _mv(1230, 300, m3)
+
+# move 4: the gap, and one owner with one lock
+m4 = _D + _bx(30, 30, 190, 44, "Carol's tab", "reads score 41") + _bx(30, 110, 190, 44, "Dan's tab", "reads score 41")
+m4 += _bx(350, 70, 190, 44, "a1.score", "41", acc=True)
+m4 += _ar("M220 52 H350 V70") + _ar("M220 132 H350 V114") + _tx(285, 40, "read", "var(--muted)", 10.5) + _tx(285, 160, "read", "var(--muted)", 10.5)
+m4 += '<rect x="580" y="20" width="300" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(730, 45, "the gap", RED, 12) + _tx(730, 70, "both read 41, both write 42", RED, 11) + _tx(730, 90, "one upvote is gone, and so is +10", RED, 11)
+m4 += _tx(730, 130, "fix: read and write as ONE step", "var(--text)", 11)
+m4 += _bx(910, 40, 290, 100, "Question.lock", "check, ledger, score, reputation", acc=True)
+m4 += _tx(1055, 165, "the lock lives where the shared state lives", "var(--muted)", 10.5)
+m4 += _tx(1055, 185, "one lock per QUESTION: two threads never wait", "var(--muted)", 10.5)
+MV[4] = _mv(1230, 200, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("which way did this user vote?", "Map&lt;userId, VoteType&gt;, on the post", "O(1)"),
+                                      ("what is this post's score?", "an int field, written with the ledger", "O(1)"),
+                                      ("which post in this thread is that id?", "Map&lt;postId, Post&gt;, inside the question", "O(1)"),
+                                      ("which thread owns this post?", "Map&lt;postId, questionId&gt;, in the service", "O(1)"),
+                                      ("which questions carry this tag or word?", "Map&lt;word, Set&lt;questionId&gt;&gt;", "O(matches)"),
+                                      ("may this user downvote yet?", "an enum of thresholds, one compare", "O(1)")]):
+    y = 16 + k*44
+    m5 += _bx(30, y, 380, 36, q, "") + _ar("M410 %s H460" % (y+18), True)
+    m5 += _bx(460, y, 540, 36, shape, "", acc=True) + _ar("M1000 %s H1050" % (y+18), True) + _bx(1050, y, 150, 36, cost, "")
+m5 += _tx(615, 296, "the score is STORED and moved with the ledger entry, never recomputed by counting votes: that is what makes a hot question cheap to read", "var(--muted)", 11)
+MV[5] = _mv(1230, 310, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D + _bx(30, 30, 200, 44, "OPEN", "answers and comments land", acc=True)
+m6 += _bx(300, 30, 200, 44, "CLOSED", "no new answers; still votable") + _bx(165, 130, 200, 44, "DELETED", "terminal; out of the index")
+m6 += _ar("M230 46 H300", True) + _ar("M300 62 H230") + _ar("M265 74 V130", True)
+m6 += _tx(265, 22, "close / reopen", "var(--muted)", 10.5)
+m6 += '<rect x="560" y="20" width="650" height="190" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(885, 44, "the order inside a vote, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1 take the thread's lock and find the post in the id map",
+                       "2 refuse a self-vote, an unknown post, too little reputation",
+                       "3 read the vote this user had before -- the same one again returns now",
+                       "4 only now write: the ledger entry, the score, the author's counter",
+                       "5 unlock, then tell the listeners inside a try/catch",
+                       "a refused vote leaves every score and every reputation untouched;",
+                       "the three writes in step 4 are field writes that cannot fail half way"]):
+    m6 += _tx(575, 68 + k*21, l, "var(--muted)" if k > 4 else "var(--text)", 11, "start")
+m6 += _tx(615, 230, "three states and one rule: nothing is written until every check has passed. Accepting follows the same order -- reverse the old award, then make the new one.", "var(--muted)", 11)
+MV[6] = _mv(1230, 245, m6)
+
+# move 7: what is inside the lock, and ten people at the same instant
+m7 = _D + _card(30, 20, 545, 150, "inside the lock: about one microsecond",
+                ["find the post in the thread's id map", "read this voter's previous vote",
+                 "write the ledger entry and the score", "one atomic add to the author's counter",
+                 "about six operations, no allocation worth the name"], acc=True)
+m7 += _ar("M575 95 H640", True) + _tx(607, 85, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 150, "outside the lock: milliseconds to seconds",
+            ["indexing the question's words: at ask time", "the badge listener: after the unlock",
+             "rendering the page: about 20 ms", "the reader deciding to click: seconds"])
+m7 += _tx(615, 200, "ten people upvote the same answer at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 215, 106, 40, "voter %d" % (k+1), "waits %d us" % k, acc=(k == 9))
+m7 += _tx(615, 283, "the tenth voter waits nine microseconds for the lock and then twenty milliseconds for the page to redraw:", "var(--muted)", 11)
+m7 += _tx(615, 301, "one at a time is true, and nobody can tell, because nothing slow is allowed inside the lock", "var(--muted)", 11)
+MV[7] = _mv(1230, 315, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one lock per question thread: is it a bottleneck?", "var(--text)", 12)
+for k, l in enumerate(["the locked part of a vote: about six operations, roughly 1 us",
+                       "the real site takes a few votes a second across 24 million questions",
+                       "a front-page question at its peak: about 20 votes a second",
+                       "even 1000 votes a second into ONE thread is 1 ms of lock per second",
+                       "that is 0.1% busy, and the lock is per question: threads never meet"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 index, listeners and rendering outside the lock", "already done; reputation is already a lock-free counter"),
+                              ("2 a lock per POST instead of per thread", "buys parallel votes on different answers, costs the single-accept invariant"),
+                              ("3 a row per vote in the database", "unique key on (post_id, voter_id), UPDATE posts SET score = score + ?")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("fifty people vote in the same instant", "one lock per thread; test 1: 100 calls, 50 voters, score exactly 50"),
+                                ("the same vote arrives twice", "the ledger is read before anything is written; test 1: the second call does nothing"),
+                                ("a voter flips, then takes it back", "new minus old; test 2: score and reputation return to exactly zero"),
+                                ("a downvote drags a new user below zero", "store the truth, floor on the read; test 7: retracting gives back exactly 1"),
+                                ("the asker changes the accepted answer", "reverse, then award, under one lock; test 4: the +15 moves, it is not duplicated"),
+                                ("the badge listener throws", "publish after the unlock in a try/catch; test 8: the vote still landed"),
+                                ("a thread with 40 upvotes is deleted", "the ledger is the undo log; test 9: every point paid out comes back, once")]):
+    y = 18 + k*42
+    m9 += _bx(30, y, 320, 38, bad, "") + _ar("M350 %s H400" % (y+19), True) + _bx(400, y, 800, 38, fix, "", acc=True)
+m9 += _tx(615, 334, "every claim this design makes has a failure test: FailureTests.java runs nine blocks of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 347, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 220), ("the line in the code", 310), ("what it buys", 850)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface ReputationRules { int pointsFor(RepReason r); }", None), ("a new rulebook is a class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new DailyCap(plainAdder, 200) wraps the award rule", None), ("a daily cap the vote path never hears about", None)],
+          [("Observer", "var(--text)"), ("moves 3, 4", None), ("publish(events) after the unlock, inside a try/catch", None), ("badges, moderation, a cache, undo on delete", None)],
+          [("State", "var(--text)"), ("move 6", None), ("OPEN &harr; CLOSED, DELETED terminal, checked before a write", None), ("an answer on a closed question cannot happen", None)],
+          [("Template Method", "var(--text)"), ("move 1", None), ("abstract PostKind kind() -- the one thing each post answers", None), ("one vote path for three kinds of post", None)],
+          [("Facade", "var(--text)"), ("move 2", None), ("so.vote(postId, voterId, UP): two O(1) hops, no lock in sight", None), ("callers never touch an index or a lock", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the service is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh QaService", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("the RepReason &rarr; points EnumMap IS the registry, one line per rule", "var(--muted)"), ("it earns the name when rules come from config", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("not yet", None), ("a question has four fields and all four are required", "var(--muted)"), ("it earns a place when bounties and flags arrive", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 335, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 350, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 450), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Post: the ledger. Question: the flow and the lock. Rules: the numbers. Index: the words.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("BadgeManager is a new file and one more argument to configure()", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("moves 1, 3", None), ("the vote path calls post.kind(); it never asks \"is this an answer?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: take only what you use", None), ("move 1", None), ("Comment is votable but not Commentable, so it carries no comment list", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("configure(rules, listeners);  setAwards(...);  setClock(() -&gt; t)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "the numbers change; a daily cap", "a new ReputationRules, or a RepAward wrapper, plus one configure line", "", "move 3"),
+        ("someone new wants to know", "badges, moderation, undo on delete", "one more listener; Post, the lock and the vote path do not change", "", "move 4"),
+        ("a new step in a life", "on hold, protected, duplicate", "one more QuestionState and one more checked transition", "", "move 6"),
+        ("a new invariant across posts", "a bounty that may not go negative", "the check and the writes inside the SAME thread lock: all or nothing", "", "move 4"),
+        ("state that must outlive the process", "persist it; two servers", "the voters map becomes a table with a unique key on (post_id, voter_id)", "and the score becomes UPDATE posts SET score = score + ? in the same transaction", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the question, the post and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the prompt again: a <b>user</b> asks a <b>question</b>; other users post <b>answers</b> and leave "
+ "<b>comments</b>; a <b>vote</b> moves a <b>score</b> and a <b>reputation</b>; a <b>tag</b> finds the question "
+ "later. A user has an id and a reputation that moves: a class. A question has a title, tags, its answers, a state "
+ "and a lock: a class. An answer and a comment have a body and a score: classes. A vote is the interesting one, "
+ "because the tempting answer is wrong &mdash; a vote is not an entity with an id and a timestamp, it is the answer "
+ "to \"which way did this user go on this post\", which is one entry in a map. Making it a map entry is what makes "
+ "changing and retracting a vote almost free later. And the reputation rulebook has no state at all &mdash; it is a "
+ "table of numbers &mdash; so it is an interface, not a class with fields. Finally, notice that the question, the "
+ "answer and the comment all carry the same four things: an author, a body, a score and a ledger of voters. That "
+ "repetition is the abstract <code>Post</code>, and it is the only inheritance in the design.", 1),
+
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Turn a reason into points\" touches nothing: it takes an enum and returns a number, so it belongs to a pure rule, "
+ "<code>rules.pointsFor(ANSWER_UP)</code>. \"Move one post's score\" touches the voters map and the score, which live "
+ "together on the post, so it is <code>post.record(voterId, UP)</code> &mdash; one method that writes both, because "
+ "writing one without the other is the bug. \"Decide a vote end to end\" touches the post, the ledger, the author's "
+ "reputation and the lock; only the question sees all of those, so <code>question.vote(postId, user, UP)</code> is the "
+ "orchestrator. \"Find questions by a word\" touches the inverted maps and nothing else, so it is the index's. And "
+ "notice what is not a new verb: accepting an answer. It is one flag on the question plus two reputation moves, so it "
+ "sits beside <code>vote</code> under the same lock and follows the same order.", 2),
+
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "The reputation numbers will change: they are policy, and an interviewer will change them in front of you. How a "
+ "delta <i>lands</i> will change too, the moment somebody says \"cap it at two hundred a day\". Who wants to know "
+ "will change: badges today, a moderation queue tomorrow, a cache for the front page after that. Each becomes a "
+ "one-method interface the service is <i>given</i> and never builds: <code>ReputationRules</code> with "
+ "<code>pointsFor(reason)</code>, <code>RepAward</code> with <code>award(user, delta, at)</code>, "
+ "<code>PostListener</code> with <code>onEvent(e)</code>, plus <code>Clock</code> and <code>Directory</code>. This is "
+ "where the patterns come from, not the other way round: a swappable rulebook behind an interface is "
+ "<b>Strategy</b>; <code>DailyCap</code>, which wraps the plain adder and hands on less, is <b>Decorator</b>; a "
+ "service that announces \"a vote happened\" without knowing what a badge is, is <b>Observer</b>. The one subtlety "
+ "worth saying out loud: the cap wraps the <i>award</i> rule and not the rulebook, because the rulebook is asked "
+ "twice per vote &mdash; once for the old state, once for the new &mdash; and so it has to stay pure.", 3),
+
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Carol and Dan upvote the same answer at the same instant. Both read the score as 41, both add one, both write 42: "
+ "one upvote has vanished, and so has ten points of somebody's reputation, and nothing looks wrong afterwards. So "
+ "reading the ledger and writing the score must be one step, in the class that owns both: the question thread. The "
+ "lock is per <i>question</i>, which is the whole trick &mdash; twenty-four million threads take votes in parallel "
+ "and never wait for each other, while the people inside one thread are serialised for about a microsecond. "
+ "Reputation is the exception that proves the rule: one user is voted on from many different threads at once, each "
+ "holding a different lock, so it cannot live under any of them. It is one number with no companion invariant, so it "
+ "is an <code>AtomicLong</code> and the add is lock-free &mdash; and because additions commute, the total is right "
+ "whatever order they arrive in. Anything that only listens is called after the lock is released.", 4),
+
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "The table is the move, and two of its rows carry the round. The score is an <code>int</code> field written in the "
+ "same step as the ledger entry and never recomputed by counting the map: recomputing is the mistake that makes a "
+ "front-page question expensive exactly when it is popular. And \"which thread owns this post?\" is one map in the "
+ "service, which is what turns <code>vote(postId, ...)</code> into two hash lookups &mdash; without it, voting on an "
+ "answer means finding its question first. The rest follow the same rule, which is to ask the question before "
+ "choosing the shape: the inverted index costs the number of matches rather than the number of questions on the "
+ "site, and the privilege check is an enum of thresholds and one comparison rather than an if-chain scattered "
+ "through the service.", 5),
+
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "A question is OPEN when it is asked, CLOSED when somebody with the close privilege closes it, OPEN again if it "
+ "is reopened, and DELETED once &mdash; terminal, out of the search index, and refused to anybody who is neither "
+ "the asker nor a moderator. Writing the states down forces the questions the interviewer will ask: can you still "
+ "vote on a closed question? Yes, and only new answers and comments are refused. Then the order, which is the real "
+ "answer to \"what happens when it fails\". Take the thread's lock, find the post, and refuse a self-vote, an "
+ "unknown post, or a voter without the reputation for it. "
+ "Read the vote this user had before &mdash; if it is the same one, return now, and that is what makes a retried "
+ "request safe. Only then write, and the three writes are a map entry, an <code>int</code> and one atomic add: field "
+ "writes that cannot fail half way. Unlock, then tell the listeners inside a try/catch. Accepting follows the same "
+ "shape: check the actor is the asker, take back the previous fifteen points, then award the new ones, all inside "
+ "one lock, so nobody can read a thread where two answers look accepted or none does. What happens to the "
+ "reputation a deleted thread paid out is policy rather than mechanism, and the ledger is what makes either "
+ "answer cheap: page 05 has the listener that hands every point back.", 6),
+
+("Move 7: yes, the lock makes one thread's votes happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every vote takes the thread's lock, have you made "
+ "Stack Overflow a queue? You have, for about one microsecond, and only for the people reading that one question. "
+ "The picture lists everything the lock covers: two map lookups, a map write, an <code>int</code> add and one "
+ "atomic add, with no allocation worth the name. Everything slow is deliberately outside it &mdash; a question's "
+ "words are indexed when it is asked, not when it is voted on, and the listeners run after the unlock inside a "
+ "try/catch, so a broken badge rule cannot break a vote that already happened. When ten people upvote the same "
+ "answer at the same instant, the tenth waits about nine microseconds for the lock and then twenty milliseconds "
+ "for the page to redraw, and cannot tell the difference.", 7),
+
+("Move 8: say the arithmetic, then name the ladder.",
+ "The whole site takes a few votes a second spread over twenty-four million questions; a question on the front page "
+ "at its peak might take twenty a second. Against a lock held for one microsecond, even an imaginary thread taking a "
+ "thousand votes a second holds its lock one millisecond in every second: busy a tenth of one per cent of the time, "
+ "and that is per question, so the number of questions is irrelevant. Then the ladder, in the order you would climb "
+ "it. First, keep indexing, listeners and rendering outside the lock, which this code already does, and keep "
+ "reputation as a lock-free counter, which it already is. Second, if one thread ever needed it, move the lock from "
+ "the question down to the post, so votes on different answers of the same question stop waiting &mdash; and say the "
+ "price out loud: the single-accepted-answer invariant spans two posts, so it would need the thread's lock anyway. "
+ "Third, beyond one process, every vote becomes a row with a unique key on (post_id, voter_id) and the score becomes "
+ "<code>UPDATE posts SET score = score + ?</code> in the same transaction, which is the database performing exactly "
+ "the atomic step the lock performed. Say the arithmetic first: climbing without it is complexity nobody asked for.", 8),
+
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "The seven rows above are the list, and three of them are worth saying out loud. The reputation floor is the "
+ "subtle one: store a clamped number and retracting a downvote hands out points that were never taken, so the true "
+ "signed number is what lives on the user and the floor lives on the read. Publishing after the unlock is the "
+ "second: a badge listener that throws must not be able to undo a vote that already happened. Deleting a thread is "
+ "the third: because the ledger says which way every voter went, one pass can hand back exactly what that thread "
+ "paid out, and it must run once and not twice. Each row is a few lines in FailureTests.java, which prints ALL "
+ "PASS or exits non-zero; a design that cannot show its tests is a claim.", 9),
+
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every pattern in the table came out of a move, which is why each gets one line and not a paragraph. Three are "
+ "worth a sentence more. Decorator is the one people put in the wrong place: <code>DailyCap</code> wraps the "
+ "<i>award</i> rule and not the rulebook, because the rulebook is asked twice per vote &mdash; once for the old "
+ "state, once for the new &mdash; and has to stay pure. Observer is why the word \"badge\" appears nowhere in "
+ "<code>vote()</code>: move 3 handed the interface in, move 4 said nothing slow may sit inside the lock, and "
+ "between them badges, the moderation queue, the page cache and the undo that runs when a thread is deleted are "
+ "all just listeners. Template Method is the quiet one: <code>Post</code> holds the whole voting machinery and "
+ "leaves exactly one thing abstract, <code>kind()</code>, which is how one vote path serves three kinds of post. "
+ "The last three rows are the ones that earned nothing, and the table says what would change that.", 10),
+
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "The table is the whole move: five letters, five lines of this code, nothing recited. The one worth defending out "
+ "loud is I, because it is the letter people skip: a comment is votable but not <code>Commentable</code>, so it "
+ "carries no comment list it would never use, and \"you cannot comment on a comment\" becomes a type question "
+ "rather than a runtime check. D is the one a test cashes in: the question is handed its rulebook, its award rule, "
+ "its clock and its listeners, which is why a test can give it numbers that pay double, a clock stuck on last "
+ "Tuesday and a listener that throws on purpose. If a letter cannot be pointed at a line, the moves did not do "
+ "their job.", 11),
+
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (the numbers change, a daily cap, downvoting costs the voter a point) is a new "
+ "<code>ReputationRules</code> or a <code>RepAward</code> wrapper plus one configure line. Someone new who wants to "
+ "know (badges, a moderation queue, a hot-question cache, the undo that runs when a thread is deleted) is one more "
+ "listener. A new step in a life (on hold, protected, duplicate) is one more <code>QuestionState</code> and one "
+ "more checked transition. A new invariant across posts (a bounty that may not leave a user negative) is the check "
+ "and the writes inside the <i>same</i> thread lock, all or nothing. And state that must outlive the process is the "
+ "voters map becoming a table with a unique key on (post_id, voter_id), while the score becomes <code>UPDATE posts "
+ "SET score = score + ?</code> in the same transaction: the database performing the atomic step the lock performed. "
+ "For all five the question, the post and the tests are untouched; that is the test that the derivation was right. "
+ "Page 05 has the code for each.", 12),
+]
+
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, Splitwise) and the class diagram, the lock, the tests, "
+ "the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is "
+ "named before the move that produced it. On this problem two of them carry the round: move 1, because deciding that a "
+ "vote is a map entry and not an entity makes changing and retracting a vote free, and move 6, because the order inside "
+ "the lock is the whole difference between a score you can trust and one you cannot.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the caller, the index, the event
+put("app", 10, 20, 250, "QaService",
+    ["users: Map&lt;id, User&gt;", "questions: Map&lt;id, Question&gt;", "home: Map&lt;postId, questionId&gt;",
+     "index: SearchIndex", "listeners: List&lt;PostListener&gt;", "rules / awards / clock / ids"],
+    ["ask / answer / comment", "vote / retractVote / accept", "close / reopen / delete / edit",
+     "byTag / byWord / byAuthor", "configure / setAwards / setClock"])
+put("index", 10, 290, 250, "SearchIndex",
+    ["byWord / byTag / byAuthor:", "  Map&lt;String, Set&lt;questionId&gt;&gt;"],
+    ["add(q) / remove(q)", "byTag / byWord / byAuthor", "words(text): List&lt;String&gt;"])
+put("listener", 10, 450, 250, "PostListener", [], ["onEvent(QaEvent e)"], "interface")
+put("event", 10, 560, 250, "QaEvent",
+    ["kind: EventKind", "questionId / postId: String", "actorId / authorId: String", "repDelta: int,  atMs: long"], [])
+# centre column: the post hierarchy, with the question as the aggregate root
+put("post", 310, 20, 340, "Post",
+    ["id / authorId: String", "body: String", "score: int", "voters: Map&lt;userId, VoteType&gt;", "createdAtMs: long"],
+    ["kind(): PostKind", "record(voterId, type): VoteType", "voteOf(userId) / score() / ledger()"], "", True)
+put("question", 310, 225, 340, "Question",
+    ["title: String,  tags: Set&lt;String&gt;", "answers: List&lt;Answer&gt;", "comments: List&lt;Comment&gt;",
+     "byId: Map&lt;postId, Post&gt;", "lock: ReentrantLock", "acceptedAnswerId: volatile String",
+     "state: QuestionState", "rules / awards / clock / people"],
+    ["addAnswer(id, user, body)", "addComment(id, target, user, body)", "vote(postId, user, type)",
+     "retract(postId, user)", "accept(answerId, actor)", "close / reopen / delete / reverseAwards", "editBody(postId, user, body)"])
+put("answer", 310, 560, 165, "Answer", ["questionId: String", "comments: List"], ["kind() = ANSWER"])
+put("comment", 495, 560, 155, "Comment", ["targetPostId: String"], ["kind() = COMMENT"])
+# third column: the person and the fixed vocabularies
+put("user", 690, 20, 225, "User",
+    ["id / name: String", "rep: AtomicLong", "badges: Set&lt;String&gt;"],
+    ["reputation(): floored at 0", "rawReputation(): the truth", "addRep(delta): lock-free", "can(Privilege): boolean"])
+put("vt", 690, 212, 225, "VoteType", ["UP(+1), DOWN(-1)"], [], "enum")
+put("pk", 690, 282, 225, "PostKind", ["QUESTION, ANSWER, COMMENT"], [], "enum")
+put("qs", 690, 352, 225, "QuestionState", ["OPEN, CLOSED, DELETED"], [], "enum")
+put("rr", 690, 422, 225, "RepReason", ["QUESTION_UP / _DOWN,", "ANSWER_UP / _DOWN, ACCEPTED ..."], [], "enum")
+put("pv", 690, 508, 225, "Privilege", ["VOTE_UP(15), COMMENT(50),", "VOTE_DOWN(125), CLOSE(500)"], [], "enum")
+put("ek", 690, 594, 225, "EventKind", ["ASKED, ANSWERED, VOTED,", "ACCEPTED, CLOSED, DELETED ..."], [], "enum")
+# fourth column: the rules that are handed in
+put("rules", 955, 20, 260, "ReputationRules", [], ["pointsFor(RepReason): int"], "interface")
+put("defrules", 955, 98, 260, "DefaultRules", ["table: EnumMap"], ["+5 / +10 / -2 / +15 / +2"])
+put("award", 955, 196, 260, "RepAward", [], ["award(user, delta, at): int"], "interface")
+put("adder", 955, 274, 260, "the plain adder", ["a lambda, not a class"], ["user.addRep(delta)"])
+put("clock", 955, 352, 260, "Clock", [], ["nowMs(): long"], "interface")
+put("dir", 955, 430, 260, "Directory", [], ["byId(userId): User"], "interface")
+put("cmt", 955, 508, 260, "Commentable", [], ["comments(): List&lt;Comment&gt;"], "interface")
+
+EDGES = [
+ # the post hierarchy
+ ln(B["question"]["t"], B["post"]["b"], "inherit"),
+ ln(B["answer"]["l"], B["post"]["l"], "inherit", "", [(294, 605), (294, 105)]),
+ ln(B["comment"]["r"], B["post"]["r"], "inherit", "", [(658, 597), (658, 140)]),
+ # the question owns every post in its thread
+ ln((392, 523), (392, 560), "compose", "owns"),
+ ln((572, 523), (572, 560), "compose"),
+ ln((650, 90), (690, 237), "assoc", "", [(676, 90), (676, 237)]),
+ # the service owns the threads, the index and the listeners
+ ln(B["app"]["r"], (310, 280), "compose", "", [(272, 129), (272, 280)]),
+ _tx(288, 205, "owns", "var(--muted)", 10.5),
+ ln((135, 238), (135, 290), "compose"),
+ ln((70, 238), (70, 450), "notify", "", [(4, 250), (4, 438)]),
+ ln(B["listener"]["b"], B["event"]["t"], "assoc"),
+ ln((135, 20), (802, 20), "assoc", "owns the people", [(135, 8), (802, 8)]),
+ # the rules, handed in through configure()
+ ln((650, 272), (955, 47), "inject", "", [(944, 272), (944, 47)]),
+ ln((650, 342), (955, 223), "inject", "", [(936, 342), (936, 223)]),
+ ln((650, 412), (955, 379), "inject", "", [(928, 412), (928, 379)]),
+ ln((650, 498), (955, 457), "inject", "", [(920, 498), (920, 457)]),
+ # the two implementations that live in Main.java
+ ln(B["defrules"]["t"], B["rules"]["b"], "inherit"),
+ ln(B["adder"]["t"], B["award"]["b"], "inherit"),
+ # who is commentable, and who deliberately is not
+ ln((620, 523), (955, 528), "inherit", "", [(620, 584), (940, 584)]),
+ ln((392, 650), (1085, 562), "inherit", "", [(392, 672), (1085, 672)]),
+]
+UMLSVG = uml_svg(1230, 730, EDGES, legend_y=706)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (italic = abstract, dashed border = interface, '
+ '&laquo;enum&raquo; = a fixed list of values). Middle: its fields, the state it holds. Bottom: its methods. '
+ '<b>The arrows.</b> Hollow triangle = extends or implements: a question, an answer and a comment are all posts, '
+ 'and both a question and an answer are commentable while a comment is not. Filled diamond = owns: the question '
+ 'owns every answer and comment in its thread, the service owns every thread. Plain arrow = references. Dashed '
+ 'lavender = handed in through <code>configure()</code>, <code>setAwards()</code> and <code>setClock()</code>. '
+ 'Dotted blue = notifies. <b>Where state lives:</b> a post holds its own body, its score and the map of who voted '
+ 'which way; the question holds the answers, the comments, the id map, the accepted flag, the state and the one '
+ 'lock that makes a vote atomic; a user holds a reputation counter that is written from many threads at once, which '
+ 'is why it is an <code>AtomicLong</code> and not an <code>int</code>; the rules hold no state at all, which is why '
+ 'one instance serves the whole site. Notice what is <i>not</i> here: no Vote class, because a vote is one entry in '
+ 'a map, and no Reputation class, because reputation is a number on a user plus a table of policy.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above '
+ 'each class and method says what it does; read only those first for the shape, then the bodies for the mechanics. '
+ 'Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s '
+ 'reference code, with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (nine blocks of '
+ 'claims proven; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints '
+ 'ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (the exact reputation numbers and whether a vote can be '
+ 'changed come first); then type in the order of Main.java: the six enums, the QaEvent record, the five one-method '
+ 'interfaces, DefaultRules, User with its atomic counter, the abstract Post with its ledger, Answer and Comment, then '
+ 'Question with its lock and the order inside <code>vote</code>, then SearchIndex, then the thin QaService, then a '
+ 'main with fifty threads voting on one answer.</div></div>')
+
+FU = [
+("Stack Overflow changes its mind: an answer upvote is now +12, an accepted answer +20, and nobody may earn more "
+ "than two hundred reputation a day.", "twist", 10,
+ "The numbers are one class. TunedRules implements the same single method with different values and is handed in "
+ "through configure(), which also re-points every thread that already exists, so the change applies mid-flight. The "
+ "daily cap is a different shape and it is worth saying why: the rulebook is asked twice on every vote, once for the "
+ "state the voter was in and once for the state they are moving to, so it has to stay pure. The cap therefore wraps "
+ "the <i>award</i> rule instead &mdash; DailyCap holds the plain adder, tracks what each user has earned today from "
+ "the injected clock, and hands on only what is left of the budget. Losses and reversals are never capped, because "
+ "capping them would make a downvote irreversible.",
+ X("a new rulebook", "badges")),
+
+("Fifty people upvote the same answer in the same instant, and some of them double-click. Prove you cannot lose or "
+ "double-count a vote.", "non-functional", 10,
+ "The race lives between reading the voter's previous vote and writing the new score. The whole read-modify-write "
+ "&mdash; the post lookup, the guards, the previous-vote read, the ledger entry, the score and the author's counter "
+ "&mdash; happens inside the question thread's lock, so no other writer can run in that gap. The proof is a count "
+ "rather than a feeling: fifty threads wait on one latch and then each calls vote twice, a hundred calls in all, and "
+ "afterwards the ledger holds exactly fifty voters, the score is exactly fifty, and the author's reputation moved by "
+ "exactly five hundred. If a vote had been lost the score would be below fifty; if a double-click had counted twice "
+ "the reputation would be above five hundred.",
+ T("// 1. fifty people upvote", "// 2. cast, flip, retract")),
+
+("One lock per question thread. Does that scale, or have you serialised Stack Overflow?", "non-functional", 5,
+ "It scales, and the answer is arithmetic rather than opinion. The locked part is about six operations &mdash; two "
+ "map lookups, a map write, an int add and one atomic add &mdash; roughly a microsecond. The site takes a few votes "
+ "a second across twenty-four million questions, and a front-page question at its peak takes about twenty; even an "
+ "imaginary thread taking a thousand a second holds its lock one millisecond in every second, a tenth of one per "
+ "cent, and the lock is per question, so the number of questions is irrelevant. Reputation never contends at all, "
+ "because it is a lock-free counter. If one thread ever did need more, the next rung is a lock per post instead of "
+ "per thread &mdash; and say the price in the same breath: the single-accepted-answer rule spans two posts, so it "
+ "would still need the thread's lock.",
+ sect(src, "List<QaEvent> vote(String postId", "List<QaEvent> accept(String answerId")),
+
+("A user upvotes, changes their mind and downvotes, then retracts. What are the score and the reputation?",
+ "functional", 10,
+ "Exactly what they were at the start, and there is no branch anywhere that says so. Every change computes the "
+ "reputation as what this vote is worth now minus what it was worth before, with no vote at all worth zero, and the "
+ "score moves by the same new-minus-old on the weights. An upvote is +1 and +10; the flip to a downvote is -2 on the "
+ "score and -12 on the reputation, applied as one step; the retraction is +1 and +2, and both land back on zero. The "
+ "retracted voter is removed from the map rather than stored as a null, so the ledger only ever holds real votes, "
+ "which is also why retract is its own method instead of vote(user, null).",
+ sect(src, "abstract class Post", "/** A remark on a question")),
+
+("Somebody upvotes their own answer, and somebody else votes on a post id that does not exist. What state is the "
+ "system in?", "functional", 5,
+ "Exactly the state it was in. Both are refused before anything is written: the post lookup and the three guards "
+ "&mdash; not your own post, not a comment downvote, enough reputation &mdash; all run before the first write, and "
+ "what follows them is a map entry, an int and an atomic add, none of which can fail half way. So there is no "
+ "half-cast vote, no score to roll back and nothing for the caller to clean up; the failure tests check the score "
+ "and the author's reputation after each refusal and find them untouched. The same shape covers a voter without "
+ "enough reputation: the threshold is checked from a table on the enum, not an if-chain in the service.",
+ T("// 3. the guards:", "// 4. accepting:")),
+
+("The asker accepted answer A this morning and wants to accept B instead. Where do the fifteen points go?",
+ "functional", 10,
+ "They move, and the move happens inside one lock so nobody can see a thread with two accepted answers or none. "
+ "Accepting checks that the actor really is the asker and that the answer belongs to this thread, returns "
+ "immediately if that answer is already the accepted one, then takes fifteen points back from the previous author "
+ "before awarding fifteen to the new one and moving the flag. The asker's two points are paid once, on the first "
+ "acceptance, not once per change of mind. The flag itself is volatile, so a reader sees the winner without taking "
+ "the lock. Skipping the reversal is the usual shortcut and it quietly breaks the invariant that reputation and the "
+ "flag tell the same story.",
+ sect(src, "List<QaEvent> accept(String answerId", "List<QaEvent> close(User by")),
+
+("A million questions. Find the ones tagged java, sort them by votes, and give me page three.", "non-functional", 10,
+ "Search never scans. When a question is asked, its words, its tags and its author are pushed into three inverted "
+ "maps, so a lookup returns the matching ids straight away and costs the number of matches rather than the number of "
+ "questions. The service turns those ids back into live questions, drops anything deleted, and sorts; ordering and "
+ "paging stay out of the index, so a new sort is one more SortOrder constant and indexing does not change. Two tags "
+ "at once is the same index and not a new one: take the posting list of the rarer tag and keep only the ids that "
+ "are in the other, so the cost is the shorter list rather than the site. The thread page has an order of its own "
+ "that has nothing to do with search &mdash; the accepted answer first, then by score, then oldest first &mdash; "
+ "and it is one comparator over the answers the question already holds. What this version does not do is rank: a "
+ "real relevance score, or a trigram index for substrings, is the next rung, and no signature moves when it "
+ "arrives.",
+ sect(src, "final class SearchIndex", "final class QaService") + "\n" + X("search, sort and pagination", "a spam rate limit")),
+
+("Award badges: bronze at fifteen reputation, silver at fifty, gold at five hundred.", "twist", 5,
+ "A new listener and one more argument to configure(). The service already publishes an event for every vote and "
+ "every acceptance, after the lock and inside a try/catch, and the event carries the reputation delta that was "
+ "actually applied. BadgeManager reads the user's current reputation, compares it against the thresholds and awards "
+ "the ones that are missing; the badge set is a concurrent set, so awarding twice is harmless. Nothing in Post, "
+ "Question or the rulebook changes, which is the whole point of having introduced the observer in move 4 rather than "
+ "calling a badge service from inside vote(). The same stream pays for the front page too: HotThreadCache in "
+ "Extensions.java keeps a rendered thread and drops its entry on any event for that question, so a reader can never "
+ "be shown a stale score and invalidation costs no new coupling.",
+ X("badges", "edit history")),
+
+("Questions must keep an edit history, and a moderator must be able to close, reopen and delete.", "twist", 10,
+ "Closing is already a state machine: OPEN to CLOSED and back, DELETED once and terminal, with the close privilege "
+ "gating who may, and a closed thread refusing new answers and comments while its existing posts stay votable "
+ "(deleting has a card of its own, the next one). Edit history is the one new piece and it is small, because the replacement happens inside the thread's lock: "
+ "editBody swaps the text and hands back what was there, and the EditLog appends that old text as a revision. The "
+ "post still holds only the current body, so reading one stays a field read, and the chain is append-only, so the "
+ "audit trail cannot be rewritten.",
+ sect(src, "String editBody(String postId", "private void requireLive") + "\n" + X("edit history", "a moderation queue")),
+
+("A moderator deletes a thread that collected forty upvotes and an accepted answer. Where do all those points go, "
+ "and could a passer-by have deleted it?", "functional", 8,
+ "Deleting is guarded like closing: the asker may delete their own question, anybody else needs the five hundred "
+ "point close privilege, and a refused delete leaves the thread exactly as it was. Where the points go is policy "
+ "rather than mechanism, and the design makes either answer cheap because the ledger threw nothing away: "
+ "<code>reverseAwards</code> walks every post's voters map under the thread's one lock, recomputes what each entry "
+ "was worth from the same rulebook that paid it, and hands it straight back &mdash; then reverses the acceptance, "
+ "both halves of it, the author's fifteen and the asker's two. Nothing extra had to be recorded for any of that: "
+ "the ledger IS the undo log. The reversal itself is one more listener on the DELETED event the service already "
+ "publishes, so Question, Post and the vote path are untouched, and it is idempotent, so a replayed event cannot "
+ "take the same points twice. The scores on the thread are left as they were, which is the trade to say out loud: "
+ "the thread is gone from every read path, so nothing can show a score that no longer agrees with a reputation.",
+ X("deleting a question", "persistence") + "\n" + sect(src, "int reverseAwards()", "/** Hand the delta to the award rule")),
+
+("Somebody makes ten accounts and upvotes their own answer with all of them. Somebody else posts thirty questions "
+ "an hour.", "twist", 5,
+ "One vote per account is already free: the ledger is keyed by voter id, so the second click from one account is a "
+ "no-op, and the self-vote guard stops the account that wrote the post. Ten accounts is a different problem, and "
+ "the honest answer in the room is that no object model can tell ten people from one person with ten logins "
+ "&mdash; what the design owes is somewhere to put the detection and a way to undo the damage. The somewhere is a "
+ "listener: the moderation queue already watches the same event stream and flags any post whose score falls to the "
+ "floor, and a fraud rule that notices ten day-old accounts upvoting the same answer inside a minute sits beside "
+ "it, with no change to the vote path. The undo is the ledger again, the same pass that runs when a thread is "
+ "deleted. Volume is the easy half: a token bucket per user, three in a burst and one more every ten minutes, "
+ "asked by the caller before it calls <code>ask</code>, so the question, the vote path and the rulebook never learn "
+ "that spam exists.",
+ X("a moderation queue", "bounties") + "\n" + X("a spam rate limit", "deleting a question")),
+
+("Put a bounty on a question: fifty of my reputation to whoever gets it accepted this week.", "twist", 5,
+ "A bounty is an escrow, and the interesting part is the order. The points leave the sponsor the moment the bounty "
+ "is offered, after a check that they have them, so the same reputation can never back two bounties and the site "
+ "cannot go into deficit. The desk is a listener: when an acceptance event arrives for that question inside the "
+ "window it pays the answer's author and closes the offer. A sweep, run by a scheduler with the same injected clock, "
+ "gives back anything that expired unclaimed. Nothing in the question or the vote path changes; this is move 4's "
+ "twist, a new invariant across posts, handled by doing the check and the write in one place.",
+ X("bounties", "search, sort and pagination")),
+
+("Persist it. And now there are two servers.", "twist", 5,
+ "The posts, the users and the votes go behind repository interfaces and the domain classes do not change, only what "
+ "they were handed. The vote, which is a read-modify-write under a lock today, becomes an upsert with a unique key "
+ "on (post_id, voter_id) returning whether it was new, plus SET score = score + ? and SET reputation = reputation + "
+ "? in the same transaction: the database performing the atomic step the lock performed, so two servers cannot lose "
+ "a vote and no application lock is needed. Accepting puts its check in the WHERE clause, so two accepters race and "
+ "exactly one wins. The idempotency that the voters map gave us for free is now the unique index, which is the same "
+ "property moved down a layer.",
+ X("persistence", "the hot-question cache")),
+
+("Where does time come from, and how do you test what a post was stamped with?", "design", 3,
+ "The question holds a Clock it was handed and stamps every post and every event with it; nothing in the system "
+ "reads the wall clock inside a method. A test hands in a clock that returns a fixed instant, asks a question, moves "
+ "the instant forward a week and edits it, and can then assert the exact timestamps on the post and on the revision. "
+ "The same seam is what makes the daily cap and the bounty sweep testable: both are given a now rather than asked to "
+ "find one, so a week passes in one line.",
+ "/** Where time comes from. Injected, so a test can stamp a post with any instant it likes. */\n"
+ "interface Clock { long nowMs(); }\n\n"
+ "// on the service: handed in, defaulted, and pushed into every live thread\n"
+ "private volatile Clock clock = System::currentTimeMillis;\n"
+ "void setClock(Clock c) { clock = c; for (Question q : questions.values()) q.setClock(c); }\n\n"
+ "// in a test: pick the instant, then move it\n"
+ "long[] now = { 1_700_000_000_000L };\n"
+ "so.setClock(() -> now[0]);\n"
+ "Question q = so.ask(\"alice\", \"Why is my regex slow?\", \"Catastrophic backtracking.\", Set.of(\"regex\"));\n"
+ "now[0] += 7L * 24 * 3600 * 1000;                        // a week later\n"
+ "bounties.sweep(now[0]);                                 // the expired bounty comes back\n"),
+
+("Which pattern is where, which SOLID letter is where, and why is there a PostKind enum when Post already has "
+ "three subclasses?", "design", 8,
+ "The patterns are on page 02 in one line each, and none of them was chosen before the move that produced it. The "
+ "pairing worth repeating is the one people invert: Strategy is the rulebook, because the numbers change; Decorator "
+ "is DailyCap, because how a delta <i>lands</i> changes; and they are two things because the rulebook is asked "
+ "twice per vote and has to stay pure. The enum question is the sharp one. The subclasses exist for structure and "
+ "behaviour a question does not share &mdash; a comment has a target post, an answer has its own comment list "
+ "&mdash; while <code>kind()</code> chooses a <i>row of numbers</i>, and a table indexed by an enum beats a virtual "
+ "method returning a number when those numbers are policy somebody will change mid-round. Keep them separate and "
+ "each grows on its own: a kind that needs its own vote behaviour becomes a method on Post, not a bigger switch. "
+ "Factory earns its place the day rulebooks arrive as strings from configuration, because the reason-to-points "
+ "table is already the registry; Builder earns its place the day a question gains optional fields &mdash; a bounty, "
+ "a close reason, a duplicate target &mdash; because today all four are required and a builder would be ceremony.",
+ "// Strategy: the numbers behind one method, handed in, never built by the service\n"
+ "interface ReputationRules { int pointsFor(RepReason reason); }\n"
+ "so.configure(new TunedRules(), badges, mods, cache);\n\n"
+ "// Decorator: the cap wraps how a delta LANDS, because the rulebook is asked twice per vote and must stay pure\n"
+ "so.setAwards(new DailyCap((u, d, t) -> { u.addRep(d); return d; }, 200));\n\n"
+ "// Observer: the service announces; it does not know what a badge, a moderator or a deletion policy is\n"
+ "for (PostListener l : listeners) try { l.onEvent(e); } catch (RuntimeException ex) { /* log */ }\n\n"
+ "// Template Method: one vote path, three kinds of post, exactly one abstract hole\n"
+ "abstract PostKind kind();\n\n"
+ "// ...and why the enum lives BESIDE the subclasses: the subclass carries structure,\n"
+ "final class Comment extends Post { private final String targetPostId; }   // a question has no target\n"
+ "// while the enum only picks the row of numbers, which is policy and changes mid-round\n"
+ "RepReason reason = switch (kind) {\n"
+ "    case QUESTION -> v == VoteType.UP ? RepReason.QUESTION_UP : RepReason.QUESTION_DOWN;\n"
+ "    case ANSWER   -> v == VoteType.UP ? RepReason.ANSWER_UP   : RepReason.ANSWER_DOWN;\n"
+ "    case COMMENT  -> v == VoteType.UP ? RepReason.COMMENT_UP  : RepReason.COMMENT_DOWN;\n"
+ "};\n\n"
+ "// Factory: not yet. The registry is already here; it earns the name when rules come from config strings\n"
+ "Map<String, ReputationRules> byName = Map.of(\"default\", new DefaultRules(), \"tuned\", new TunedRules());\n\n"
+ "// Builder: not yet. Four required fields is a constructor; a bounty, flags and a close reason would change that\n"
+ "new Question(id, authorId, title, body, tags, atMs, rules, people, clock);\n"),
+]
+
+build(dict(
+    slug="stackoverflow", title="Stack Overflow",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 9 failure-test blocks and a 50-thread vote race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

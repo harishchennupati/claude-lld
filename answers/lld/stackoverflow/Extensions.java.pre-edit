@@ -1,0 +1,386 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: a new rulebook -- the numbers move, and nothing else does
+/**
+ * The interviewer changes the policy mid-round: an answer upvote is now +12, a downvote costs the author 3, and
+ * an accepted answer is worth 20. A new class implementing the same one method, handed in through configure().
+ * Post, the vote path and the tests are untouched.
+ */
+final class TunedRules implements ReputationRules {
+    private final Map<RepReason, Integer> table = new EnumMap<>(RepReason.class);
+    TunedRules() {
+        table.put(RepReason.QUESTION_UP, 6);
+        table.put(RepReason.QUESTION_DOWN, -3);
+        table.put(RepReason.ANSWER_UP, 12);
+        table.put(RepReason.ANSWER_DOWN, -3);
+        table.put(RepReason.COMMENT_UP, 0);
+        table.put(RepReason.COMMENT_DOWN, 0);
+        table.put(RepReason.ANSWER_ACCEPTED, 20);
+        table.put(RepReason.ACCEPTER_BONUS, 2);
+    }
+    public int pointsFor(RepReason reason) { return table.getOrDefault(reason, 0); }
+}
+
+// ---- ext: a daily reputation cap -- a Decorator on how a delta lands, not on the rulebook
+/**
+ * "Nobody may earn more than 200 reputation a day." It wraps the award rule rather than the rulebook, because
+ * the rulebook is asked twice per vote (old state, new state) and must stay pure; this is called once, with the
+ * number that really moved. Losses and reversals are never capped -- capping them would make a downvote
+ * irreversible, which is the same mistake as flooring reputation on the write path.
+ */
+final class DailyCap implements RepAward {
+    private final RepAward base;
+    private final int perDay;
+    private final Map<String, long[]> earned = new ConcurrentHashMap<>();   // userId -> { day number, earned that day }
+
+    DailyCap(RepAward base, int perDay) { this.base = base; this.perDay = perDay; }
+
+    public int award(User user, int delta, long atMs) {
+        if (delta <= 0) return base.award(user, delta, atMs);
+        long day = atMs / 86_400_000L;
+        long[] row = earned.computeIfAbsent(user.id(), k -> new long[] { day, 0 });
+        synchronized (row) {                                               // one tiny lock per user, not per site
+            if (row[0] != day) { row[0] = day; row[1] = 0; }               // a new day resets the budget
+            int give = (int) Math.min(delta, Math.max(0, perDay - row[1]));
+            if (give == 0) return 0;
+            row[1] += give;
+            return base.award(user, give, atMs);
+        }
+    }
+}
+
+// ---- ext: badges -- a NEW listener and one wiring line; Post and the rulebook do not change
+/**
+ * Bronze at 15 reputation, silver at 50, gold at 500. It listens to the events the service already publishes
+ * and reads the reputation the award rule already applied, so it never recomputes a delta and cannot disagree
+ * with the profile page.
+ */
+final class BadgeManager implements PostListener {
+    private static final int[] LEVELS = { 15, 50, 500 };
+    private static final String[] NAMES = { "bronze", "silver", "gold" };
+    private final Directory people;
+    private final List<String> awarded = new CopyOnWriteArrayList<>();
+
+    BadgeManager(Directory people) { this.people = people; }
+
+    public void onEvent(QaEvent e) {
+        if (e.repDelta() == 0) return;
+        User u = people.byId(e.authorId());
+        if (u == null) return;
+        for (int i = 0; i < LEVELS.length; i++) {
+            if (u.reputation() >= LEVELS[i] && !u.badges().contains(NAMES[i])) {
+                u.awardBadge(NAMES[i]);
+                awarded.add(u.id() + ":" + NAMES[i]);
+            }
+        }
+    }
+    List<String> awarded() { return List.copyOf(awarded); }
+}
+
+// ---- ext: edit history -- the body becomes an append-only chain, and the post still holds only the latest
+/** One earlier version of a post's body, with who replaced it and when. Nothing is ever overwritten in the log. */
+record Revision(String postId, String editorId, String body, long atMs) {}
+
+/**
+ * The revision log. The edit itself happens inside the thread's lock (QaService.edit returns the text that was
+ * there before), so the log entry and the new body can never disagree. Reading a post stays one field read.
+ */
+final class EditLog {
+    private final QaService so;
+    private final Clock clock;
+    private final Map<String, List<Revision>> history = new ConcurrentHashMap<>();
+
+    EditLog(QaService so, Clock clock) { this.so = so; this.clock = clock; }
+
+    /** Edit a post and keep what was there. Returns the number of stored revisions after the edit. */
+    int edit(String postId, String editorId, String newBody) {
+        String previous = so.edit(postId, editorId, newBody);               // under the thread's lock
+        List<Revision> chain = history.computeIfAbsent(postId, k -> new CopyOnWriteArrayList<>());
+        chain.add(new Revision(postId, editorId, previous, clock.nowMs()));
+        return chain.size();
+    }
+    /** Every earlier version, oldest first. The current text lives on the post itself. */
+    List<Revision> historyOf(String postId) { return List.copyOf(history.getOrDefault(postId, List.of())); }
+}
+
+// ---- ext: a moderation queue -- another listener, watching the same events badges watch
+/**
+ * Any post whose score falls to the floor or below is queued for a human. It is a listener, so the vote path
+ * never learns what moderation is, and a moderator who is offline cannot slow a vote down.
+ */
+final class ModerationQueue implements PostListener {
+    private final QaService so;
+    private final int floor;
+    private final Set<String> flagged = ConcurrentHashMap.newKeySet();
+
+    ModerationQueue(QaService so, int floor) { this.so = so; this.floor = floor; }
+
+    public void onEvent(QaEvent e) {
+        if (e.kind() != EventKind.VOTED && e.kind() != EventKind.VOTE_RETRACTED) return;
+        Question q = so.question(e.questionId());
+        Post p = q == null ? null : q.post(e.postId());
+        if (p == null) return;
+        if (p.score() <= floor) flagged.add(p.id()); else flagged.remove(p.id());
+    }
+    Set<String> flagged() { return Set.copyOf(flagged); }
+}
+
+// ---- ext: bounties -- reputation held in escrow, paid on accept, returned when it expires
+/**
+ * The asker puts reputation on the line now and it is deducted immediately: an escrow that cannot be spent
+ * twice. If an answer is accepted before the deadline the sponsor's points go to its author; if the deadline
+ * passes with nothing accepted, sweep() gives them back. Time is the injected clock, so a test can skip a week.
+ */
+final class BountyDesk implements PostListener {
+    /** One live offer. Points are already out of the sponsor's account when this exists. */
+    record Offer(String questionId, String sponsorId, int points, long expiresAtMs) {}
+
+    private final Directory people;
+    private final Map<String, Offer> open = new ConcurrentHashMap<>();
+    private final List<String> paid = new CopyOnWriteArrayList<>();
+
+    BountyDesk(Directory people) { this.people = people; }
+
+    /** Escrow the points now. Refused if the sponsor cannot cover it, so the site can never go into deficit. */
+    void offer(String questionId, String sponsorId, int points, long nowMs, long lifetimeMs) {
+        User sponsor = people.byId(sponsorId);
+        if (sponsor == null || sponsor.reputation() < points) throw new IllegalStateException("not enough reputation for a bounty");
+        if (open.putIfAbsent(questionId, new Offer(questionId, sponsorId, points, nowMs + lifetimeMs)) != null)
+            throw new IllegalStateException("this question already has a bounty");
+        sponsor.addRep(-points);
+    }
+
+    public void onEvent(QaEvent e) {
+        if (e.kind() != EventKind.ACCEPTED) return;
+        Offer offer = open.remove(e.questionId());
+        if (offer == null || e.atMs() > offer.expiresAtMs()) return;
+        User winner = people.byId(e.authorId());
+        if (winner != null) { winner.addRep(offer.points()); paid.add(e.authorId() + ":" + offer.points()); }
+    }
+
+    /** Give back every expired bounty nobody won. Called by a scheduler with the same injected clock. */
+    int sweep(long nowMs) {
+        int returned = 0;
+        for (Offer o : List.copyOf(open.values())) {
+            if (nowMs <= o.expiresAtMs() || open.remove(o.questionId()) == null) continue;
+            User sponsor = people.byId(o.sponsorId());
+            if (sponsor != null) { sponsor.addRep(o.points()); returned++; }
+        }
+        return returned;
+    }
+    List<String> paid() { return List.copyOf(paid); }
+}
+
+// ---- ext: search, sort and pagination -- the index is already O(matches); this is only how they are shown
+/** How a result list is ordered. A comparator behind a name, chosen per query rather than baked into search. */
+enum SortOrder {
+    NEWEST(Comparator.comparingLong(Question::createdAtMs).reversed()),
+    VOTES(Comparator.comparingInt(Question::score).reversed()),
+    UNANSWERED(Comparator.comparingInt((Question q) -> q.answers().size()).thenComparing(Question::createdAtMs, Comparator.reverseOrder()));
+
+    final Comparator<Question> order;
+    SortOrder(Comparator<Question> order) { this.order = order; }
+}
+
+/** One page of results plus what the caller needs to draw the pager. */
+record Page<T>(List<T> items, int page, int size, int total) {
+    boolean hasNext() { return (long) (page + 1) * size < total; }
+}
+
+/** Sorting and slicing, kept out of the index so a new sort never touches indexing. */
+final class Search {
+    static Page<Question> page(List<Question> matches, SortOrder order, int page, int size) {
+        List<Question> sorted = new ArrayList<>(matches);
+        sorted.sort(order.order);
+        int from = Math.min(page * size, sorted.size()), to = Math.min(from + size, sorted.size());
+        return new Page<>(List.copyOf(sorted.subList(from, to)), page, size, sorted.size());
+    }
+}
+
+// ---- ext: a spam rate limit -- a token bucket per user, consulted before a post is created
+/**
+ * Six posts an hour, with a burst of three. A bucket per user, refilled from the injected clock rather than a
+ * timer thread, so a test can move an hour in one line. The service asks before minting an id; nothing else moves.
+ */
+final class PostQuota {
+    private final int burst;
+    private final long refillEveryMs;
+    private final Map<String, long[]> buckets = new ConcurrentHashMap<>();  // userId -> { tokens, last refill }
+
+    PostQuota(int burst, long refillEveryMs) { this.burst = burst; this.refillEveryMs = refillEveryMs; }
+
+    /** True if this user may post now, and the token is taken. False costs nothing. */
+    boolean allow(String userId, long nowMs) {
+        long[] b = buckets.computeIfAbsent(userId, k -> new long[] { burst, nowMs });
+        synchronized (b) {
+            long gained = (nowMs - b[1]) / refillEveryMs;
+            if (gained > 0) { b[0] = Math.min(burst, b[0] + gained); b[1] += gained * refillEveryMs; }
+            if (b[0] <= 0) return false;
+            b[0]--;
+            return true;
+        }
+    }
+}
+
+// ---- ext: persistence -- the same atomic step, performed by the database instead of the lock
+/** The store, behind an interface. The domain classes never learn what a row is. */
+interface QuestionRepository {
+    void save(Question q);
+    Question byId(String id);
+}
+
+/** The vote table. The unique key on (post_id, voter_id) IS the idempotency the voters map gives us in memory. */
+interface VoteRepository {
+    /** Upsert a vote and return the previous type, or null. One statement, one round trip. */
+    VoteType upsert(String postId, String voterId, VoteType type);
+}
+
+/** What the three statements look like. One transaction, and no application lock anywhere. */
+final class SqlSketch {
+    /** The ledger entry. ON CONFLICT is why a retried request, or a second server, cannot double-count. */
+    static final String UPSERT_VOTE = """
+        INSERT INTO votes (post_id, voter_id, type) VALUES (?, ?, ?)
+          ON CONFLICT (post_id, voter_id) DO UPDATE SET type = EXCLUDED.type
+          RETURNING (xmax = 0) AS was_new""";
+    /** The score. SET score = score + ? is the database doing exactly what the lock did: read and write as one step. */
+    static final String BUMP_SCORE = "UPDATE posts SET score = score + ? WHERE id = ?";
+    /** And reputation, which was already a lock-free counter in memory. */
+    static final String BUMP_REP = "UPDATE users SET reputation = reputation + ? WHERE id = ?";
+    /** The accepted answer, guarded so two accepters cannot both win: the compare is in the WHERE clause. */
+    static final String ACCEPT = "UPDATE questions SET accepted_answer_id = ? WHERE id = ? AND (accepted_answer_id IS NULL OR accepted_answer_id = ?)";
+}
+
+// ---- ext: the hot-question cache -- a rendered thread, thrown away by the same events badges listen to
+/**
+ * A question that reaches the front page is read a hundred thousand times and written twice. Keep the rendered
+ * thread in a small LRU and let the event stream invalidate it: any event on that thread drops its entry, so a
+ * reader can never see a stale score. No new coupling -- it is one more listener.
+ */
+final class HotThreadCache implements PostListener {
+    private final int capacity;
+    private final LinkedHashMap<String, String> rendered;
+    private int hits, misses;
+
+    HotThreadCache(int capacity) {
+        this.capacity = capacity;
+        this.rendered = new LinkedHashMap<>(16, 0.75f, true) {
+            protected boolean removeEldestEntry(Map.Entry<String, String> e) { return size() > HotThreadCache.this.capacity; }
+        };
+    }
+
+    /** The rendered thread, built once and reused until something on it changes. */
+    synchronized String view(QaService so, String questionId) {
+        String cached = rendered.get(questionId);
+        if (cached != null) { hits++; return cached; }
+        misses++;
+        Question q = so.question(questionId);
+        StringBuilder sb = new StringBuilder(q.title()).append(" [").append(q.score()).append("]");
+        for (Answer a : q.answers()) sb.append(" | ").append(a.id()).append(" ").append(a.score());
+        String view = sb.toString();
+        rendered.put(questionId, view);
+        return view;
+    }
+
+    public synchronized void onEvent(QaEvent e) { rendered.remove(e.questionId()); }
+    synchronized String stats() { return hits + " hits, " + misses + " misses"; }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) {
+        long[] now = { 1_700_000_000_000L };                               // a clock the demo controls
+        QaService so = new QaService();
+        so.setClock(() -> now[0]);
+        so.register("alice", "Alice", 130);            // enough to downvote (125); not enough for gold yet
+        so.register("bob", "Bob", 130);
+        so.register("carol", "Carol", 130);
+        so.register("mod", "Mod", 700);                // 500+ reputation, so she may edit somebody else's post
+
+        BadgeManager badges = new BadgeManager(so::user);
+        ModerationQueue mods = new ModerationQueue(so, -2);
+        BountyDesk bounties = new BountyDesk(so::user);
+        HotThreadCache cache = new HotThreadCache(64);
+        so.configure(new TunedRules(), badges, mods, bounties, cache);
+
+        Question q = so.ask("alice", "How do I reverse a list in place?", "Without allocating a second list.", Set.of("java"));
+        Answer a1 = so.answer(q.id(), "bob", "Swap from both ends, i and n-1-i.");
+        Answer a2 = so.answer(q.id(), "carol", "Collections.reverse does it for you.");
+
+        // a new rulebook: an answer upvote is now +12
+        long bobBefore = so.user("bob").reputation();
+        so.vote(a1.id(), "carol", VoteType.UP);
+        System.out.println("tuned rulebook: an answer upvote moved bob " + (so.user("bob").reputation() - bobBefore) + " (was 10)");
+
+        // a daily cap, wrapping the plain adder
+        so.setAwards(new DailyCap((u, d, t) -> { u.addRep(d); return d; }, 20));
+        so.register("dan", "Dan", 300); so.register("eve", "Eve", 300);
+        long carolBefore = so.user("carol").reputation();
+        so.vote(a2.id(), "dan", VoteType.UP);
+        so.vote(a2.id(), "eve", VoteType.UP);
+        System.out.println("daily cap 20/day: carol earned " + (so.user("carol").reputation() - carolBefore) + " from two +12 upvotes");
+        now[0] += 86_400_000L;                                             // tomorrow
+        so.vote(q.id(), "dan", VoteType.UP);
+        System.out.println("next day the budget resets: alice is now " + so.user("alice").reputation());
+        so.setAwards((u, d, t) -> { u.addRep(d); return d; });             // back to the plain adder
+
+        // badges, from the events that already flow
+        System.out.println("badges awarded: " + badges.awarded());
+
+        // edit history
+        EditLog edits = new EditLog(so, () -> now[0]);
+        edits.edit(a1.id(), "bob", "Swap from both ends: for (i = 0; i < n/2; i++) swap(i, n-1-i).");
+        edits.edit(a1.id(), "mod", "Swap from both ends. See also Collections.reverse.");
+        System.out.println("revisions of " + a1.id() + ": " + edits.historyOf(a1.id()).size()
+            + ", oldest = \"" + edits.historyOf(a1.id()).get(0).body() + "\"");
+
+        // a moderation queue, from the same events
+        so.vote(a2.id(), "alice", VoteType.DOWN);
+        so.vote(a2.id(), "bob", VoteType.DOWN);
+        so.retractVote(a2.id(), "dan");
+        so.retractVote(a2.id(), "eve");
+        System.out.println("flagged for moderation (score <= -2): " + mods.flagged());
+
+        // a bounty, escrowed now and paid on accept
+        long aliceBefore = so.user("alice").reputation();
+        bounties.offer(q.id(), "alice", 50, now[0], 7L * 86_400_000L);
+        System.out.println("bounty escrowed: alice " + aliceBefore + " -> " + so.user("alice").reputation());
+        long bobRep = so.user("bob").reputation();
+        so.accept(a1.id(), "alice");
+        System.out.println("bounty paid: bob " + bobRep + " -> " + so.user("bob").reputation() + " " + bounties.paid());
+
+        // an expired bounty comes back
+        Question stale = so.ask("alice", "Why is my regex slow?", "Catastrophic backtracking, probably.", Set.of("regex"));
+        long before = so.user("alice").reputation();
+        bounties.offer(stale.id(), "alice", 25, now[0], 7L * 86_400_000L);
+        now[0] += 8L * 86_400_000L;
+        System.out.println("swept " + bounties.sweep(now[0]) + " expired bounty; alice " + before + " -> " + so.user("alice").reputation());
+
+        // search, sorted and paged
+        for (int i = 0; i < 7; i++) so.ask("bob", "Question " + i + " about lists", "body about java lists", Set.of("java"));
+        List<Question> matches = so.byTag("java");
+        Page<Question> p0 = Search.page(matches, SortOrder.VOTES, 0, 3);
+        System.out.println("tag java: " + matches.size() + " matches, page 0 of size 3 = "
+            + p0.items().size() + ", hasNext=" + p0.hasNext());
+
+        // a spam quota
+        PostQuota quota = new PostQuota(3, 600_000L);                      // 3 burst, one more every 10 minutes
+        int allowed = 0;
+        for (int i = 0; i < 5; i++) if (quota.allow("bob", now[0])) allowed++;
+        System.out.println("spam quota: " + allowed + " of 5 posts allowed in the same second");
+        System.out.println("ten minutes later: " + quota.allow("bob", now[0] + 600_000L));
+
+        // the hot-question cache
+        System.out.println("cache: " + cache.view(so, q.id()));
+        cache.view(so, q.id());
+        so.vote(a1.id(), "dan", VoteType.UP);                              // any event drops the entry
+        cache.view(so, q.id());
+        System.out.println("cache " + cache.stats() + " (the vote invalidated it)");
+
+        // persistence: the three statements that replace the lock
+        System.out.println("sql: " + SqlSketch.BUMP_SCORE);
+    }
+}

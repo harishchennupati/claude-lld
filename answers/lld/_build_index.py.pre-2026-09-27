@@ -1,0 +1,22 @@
+import pathlib,re,html
+L=pathlib.Path("/Users/harishchennupati/answers/lld")
+ORDER=[("Parking Lot","parking-lot"),("Elevator System","elevator"),("Movie Ticket Booking","bookmyshow"),("Splitwise","splitwise"),("Vending Machine","vending"),("ATM","atm"),("Rate Limiter","rate-limiter"),("LRU / LFU Cache","lru"),("Logger","logger"),("Tic-Tac-Toe","tic-tac-toe"),("Chess","chess"),("Snake and Ladder","snake-ladder"),("Notification Service","notification-lld"),("In-memory File System","file-system"),("Stack Overflow","stackoverflow"),("Order Book","order-book"),("Pub/Sub System","pubsub"),("Ride Sharing","ride-sharing"),("Food Delivery","food-delivery"),("Text Editor","text-editor"),("Spreadsheet","spreadsheet"),("Digital Wallet","digital-wallet"),("Banking System","banking"),("In-memory Database","inmem-db"),("Cache with Eviction Policies","cache-eviction"),("Payment Gateway","payment-gateway")]
+MT=[("Bounded Blocking Queue","mt-blocking-queue"),("Producer-Consumer","mt-producer-consumer"),("Read-Write Lock","mt-rwlock"),("TTL Cache","mt-ttl-cache"),("Striped Concurrent Map","mt-striped-map"),("Dining Philosophers","mt-dining"),("H2O Barrier","mt-h2o"),("Print in Order","mt-print-series")]
+def row(t,s):
+    p=L/(s+"-workbench.html")
+    if not p.exists(): return '<li class="off"><span>%s</span><em>not built yet</em></li>'%html.escape(t)
+    src=p.read_text(); sub=re.search(r'<span class="sub">(.*?)</span>',src); sub=re.sub(r"<[^>]+>","",sub.group(1)) if sub else ""
+    return '<li><a href="%s-workbench.html">%s</a><em>%s</em></li>'%(s,html.escape(t),html.escape(sub))
+page='''<!doctype html><html lang="en"><head><meta charset="utf-8"><title>LLD workbenches</title>
+<style>:root{--bg:#0f1419;--bg2:#161b22;--line:#2a3441;--text:#d6dde6;--muted:#7d8896;--acc:#3ddbb0}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,"Segoe UI",system-ui,sans-serif;font-size:14.5px}
+main{max-width:1100px;margin:0 auto;padding:40px 24px 80px} h1{font-size:28px;margin:0 0 6px} p.lead{color:var(--muted);margin:0 0 28px}
+h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:26px 0 8px}
+ol{list-style:none;margin:0;padding:0;counter-reset:n} li{counter-increment:n;display:grid;grid-template-columns:2.2em 1fr 1fr;gap:12px;align-items:baseline;padding:9px 10px;border-top:1px solid var(--line)}
+li::before{content:counter(n,decimal-leading-zero);font-family:"JetBrains Mono",Menlo,monospace;font-size:11px;color:var(--acc)} li a{color:var(--text);text-decoration:none;font-weight:600} li a:hover{color:var(--acc)} li em{color:var(--muted);font-style:normal;font-size:12.5px} li.off span{color:var(--muted)}
+.how{background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:0 0 20px;line-height:1.6}
+</style></head><body><main><h1>LLD workbenches</h1><p class="lead">One page per system, five steps each: the problem, the twelve-move derivation, the class diagram, the whole code with copy buttons, and the follow-ups with timers. Java 21 reference code, compiled and race-tested on every build.</p>
+<div class="how"><b>How to use one.</b> Read 01 and 02 once. Keep 03 open while you read 04. Then close everything and do 05 from a blank file: sixty minutes for the whole system, then the follow-ups one at a time against the timer. The miss log at the end is the output. Day-one read: <a href="java-primer.html" style="color:var(--acc)">the Java primer</a>.</div>
+<h2>Systems</h2><ol>'''+"".join(row(t,s) for t,s in ORDER)+'''</ol>
+<h2>Multithreading</h2><ol>'''+"".join(row(t,s) for t,s in MT)+'''</ol></main></body></html>'''
+(L/"index.html").write_text(page); print("index:",sum(1 for t,s in ORDER+MT if (L/(s+"-workbench.html")).exists()),"of",len(ORDER)+len(MT),"built")

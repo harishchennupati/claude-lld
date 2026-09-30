@@ -1,0 +1,606 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/**
+ * The note denominations this machine stocks, declared LARGEST FIRST so the enum's own order is the order
+ * the note picker tries them in. Whole rupees only: cash can never have a rounding error.
+ */
+enum Note {
+    N2000(2000), N500(500), N200(200), N100(100);
+    final int value;
+    Note(int value) { this.value = value; }
+}
+
+/**
+ * Where the machine is in one customer's visit. Every public method names the states it is legal in, and
+ * the ALLOWED table below names which move may follow which; everything else throws.
+ */
+enum SessionState { IDLE, CARD_INSERTED, AUTHENTICATED, TRANSACTION, DISPENSING, EJECTED }
+
+/**
+ * The life of ONE withdrawal attempt. PENDING is the moment before the bank is asked. Everything after it
+ * is a fact about money: REFUSED (nothing moved), DEBITED (money left the account), DISPENSED (the customer
+ * is holding it), REVERSED (it jammed, so we credited it back), UNKNOWN (the bank never answered).
+ */
+enum TxnState { PENDING, REFUSED, DEBITED, DISPENSED, REVERSED, UNKNOWN }
+
+/** What the bank says to a debit. TIMEOUT is not a "no": it means nobody knows yet, so do not dispense. */
+enum BankReply { OK, DECLINED, TIMEOUT }
+
+/** Time, handed in rather than read, so a test can put the machine on any day at any hour. */
+interface Clock { long nowMs(); }
+
+/** The plastic: the number on the front and the account it resolves to. Immutable; it holds no money. */
+final class Card {
+    final String number, accountId;
+    Card(String number, String accountId) { this.number = number; this.accountId = accountId; }
+}
+
+/**
+ * Which session moves are legal. A table, not a chain of if-statements, so a new step in the visit is one
+ * more row and every illegal move is rejected for free.
+ */
+final class Transitions {
+    static final Map<SessionState, Set<SessionState>> ALLOWED = new EnumMap<>(Map.of(
+        SessionState.IDLE,          EnumSet.of(SessionState.CARD_INSERTED),
+        SessionState.CARD_INSERTED, EnumSet.of(SessionState.AUTHENTICATED, SessionState.EJECTED),
+        SessionState.AUTHENTICATED, EnumSet.of(SessionState.TRANSACTION, SessionState.EJECTED),
+        SessionState.TRANSACTION,   EnumSet.of(SessionState.DISPENSING, SessionState.AUTHENTICATED, SessionState.EJECTED),
+        SessionState.DISPENSING,    EnumSet.of(SessionState.AUTHENTICATED, SessionState.EJECTED),
+        SessionState.EJECTED,       EnumSet.of(SessionState.IDLE)));
+}
+
+/**
+ * One customer's visit: the card in the slot, where the visit has got to, and how many PINs have been
+ * wrong. A fresh Session is built on every card insertion, so the attempt counter cannot leak between
+ * customers.
+ */
+final class Session {
+    final String id;
+    final Card card;                                  // null only for the idle session
+    final long startedMs;
+    SessionState state;
+    int pinTries;
+    Session(String id, Card card, long startedMs, SessionState state) {
+        this.id = id; this.card = card; this.startedMs = startedMs; this.state = state;
+    }
+}
+
+/**
+ * One row in the machine's journal: everything known about one withdrawal attempt. It is written before
+ * the bank is asked and never deleted, so a machine that loses power mid-transaction has a row to
+ * reconcile from. The key is the idempotency key: the bank applies one key exactly once.
+ */
+final class Withdrawal {
+    final int id;
+    final String atmId, accountId, key;
+    final long amount, startedMs;
+    EnumMap<Note, Integer> notes = new EnumMap<>(Note.class);   // the reserved plan; empty until reserved
+    TxnState state = TxnState.PENDING;
+    String note = "";                                            // why, in English, for the receipt
+    Withdrawal(int id, String atmId, String accountId, long amount, long startedMs) {
+        this.id = id; this.atmId = atmId; this.accountId = accountId; this.amount = amount;
+        this.startedMs = startedMs; this.key = atmId + "-" + id;
+    }
+    /** Mark this attempt as "no money moved, and here is why". Returns this so callers can `return w.refuse(..)`. */
+    Withdrawal refuse(String why) { state = TxnState.REFUSED; note = why; return this; }
+    /** How many notes of each denomination were handed over (or reserved). */
+    int noteCount() { int n = 0; for (int c : notes.values()) n += c; return n; }
+    public String toString() { return "#" + id + " " + amount + " " + state + (note.isEmpty() ? "" : " (" + note + ")"); }
+}
+
+/** Thrown when a withdrawal did not end with cash in the customer's hand. Carries the journal row. */
+class WithdrawalFailed extends RuntimeException {
+    final Withdrawal w;
+    WithdrawalFailed(Withdrawal w) { super(w.state + ": " + w.note); this.w = w; }
+}
+
+/** Thrown when three wrong PINs have been entered: the card is inside the machine and stays there. */
+class CardRetained extends RuntimeException {
+    CardRetained(String msg) { super(msg); }
+}
+
+/** The dispenser hardware failed with the notes half out of the slot. */
+class HardwareFault extends RuntimeException {
+    HardwareFault(String msg) { super(msg); }
+}
+
+/**
+ * Something worth telling a receipt printer or an audit log about. A value, not a callback, so a listener
+ * can be added without the ATM knowing what it does.
+ */
+final class AtmEvent {
+    final String atmId, kind, accountId;
+    final long amount, atMs;
+    final Withdrawal txn;                            // null for card events
+    AtmEvent(String atmId, String kind, String accountId, long amount, long atMs, Withdrawal txn) {
+        this.atmId = atmId; this.kind = kind; this.accountId = accountId; this.amount = amount;
+        this.atMs = atMs; this.txn = txn;
+    }
+}
+
+/** Anyone who wants to know what the machine did. Called AFTER the lock is released. */
+interface AtmObserver { void onEvent(AtmEvent e); }
+
+/** Prints a slip. Deliberately trivial: it must never be able to affect a transaction. */
+class ReceiptPrinter implements AtmObserver {
+    public void onEvent(AtmEvent e) {
+        if (e.txn != null) System.out.println("   [receipt] " + e.atmId + " " + e.txn);
+    }
+}
+
+/** Keeps every event in memory, which is what an auditor reads afterwards. */
+class AuditLog implements AtmObserver {
+    final List<AtmEvent> events = new CopyOnWriteArrayList<>();
+    public void onEvent(AtmEvent e) { events.add(e); }
+    int count(String kind) { int n = 0; for (AtmEvent e : events) if (e.kind.equals(kind)) n++; return n; }
+}
+
+/**
+ * Everything the machine cannot do by itself. The one load-bearing method is debit: it must check the
+ * balance and subtract it as ONE indivisible step, and it must apply the same key at most once.
+ */
+interface BankService {
+    /** Does this card number and PIN belong together? */
+    boolean authenticate(String cardNumber, String pin);
+    /** The current balance, for a balance enquiry. */
+    long balance(String accountId);
+    /** Take the money if it is there, as one step. The same key twice moves money once. */
+    BankReply debit(String accountId, long amount, String key);
+    /** Put money back (a deposit, or the compensation after a jam). The same key twice moves money once. */
+    void credit(String accountId, long amount, String key);
+}
+
+/**
+ * A stand-in for the bank's core, written the way the real one has to behave: the balance is one
+ * AtomicLong per account and the only writer is a compare-and-set loop, so two terminals debiting the same
+ * account at the same instant can never both see the old balance. The key map is the idempotency record.
+ */
+class InMemoryBank implements BankService {
+    private final Map<String, AtomicLong> balances = new ConcurrentHashMap<>();
+    private final Map<String, String> pins = new ConcurrentHashMap<>();       // card number -> PIN
+    private final Map<String, BankReply> applied = new ConcurrentHashMap<>(); // idempotency key -> what happened
+    final AtomicInteger casRetries = new AtomicInteger();                     // how often a debit lost the race
+
+    /** Open an account with a starting balance. */
+    void open(String accountId, long paise) { balances.put(accountId, new AtomicLong(paise)); }
+    /** Attach a card number and its PIN to an account. */
+    void issueCard(String cardNumber, String pin) { pins.put(cardNumber, pin); }
+    public boolean authenticate(String cardNumber, String pin) { return pin.equals(pins.get(cardNumber)); }
+    public long balance(String accountId) { return balances.get(accountId).get(); }
+
+    /**
+     * Check-and-subtract as one step. computeIfAbsent runs the body at most once per key, so a retried
+     * request returns the first answer instead of debiting twice.
+     */
+    public BankReply debit(String accountId, long amount, String key) {
+        return applied.computeIfAbsent(key, k -> cas(accountId, -amount));
+    }
+    public void credit(String accountId, long amount, String key) {
+        applied.computeIfAbsent(key, k -> cas(accountId, amount));
+    }
+
+    /** The single writer of a balance: read, decide, compare-and-set, and retry against the FRESH value. */
+    private BankReply cas(String accountId, long delta) {
+        AtomicLong bal = balances.get(accountId);
+        if (bal == null) return BankReply.DECLINED;
+        for (;;) {
+            long now = bal.get();
+            if (now + delta < 0) return BankReply.DECLINED;          // a balance never goes negative
+            if (bal.compareAndSet(now, now + delta)) return BankReply.OK;
+            casRetries.incrementAndGet();                            // somebody else got in: read again
+        }
+    }
+}
+
+/**
+ * The rule that turns an amount into a set of notes. Behind an interface because it is the first thing an
+ * interviewer changes: fewest notes today, "ration the 2000s" tomorrow.
+ */
+interface NoteSelection {
+    /** The notes to hand over, or null if this stock cannot make exactly this amount. */
+    EnumMap<Note, Integer> select(EnumMap<Note, Integer> stock, long amount);
+}
+
+/**
+ * Fewest notes first, with a back-off. Pure greed is wrong: 600 from {500 x 1, 200 x 3, 100 x 0} dead-ends
+ * on the 500, while 200 x 3 pays it exactly. So each denomination tries its greediest count first and then
+ * steps down, which returns the fewest-note answer when one exists and finds an answer whenever one exists.
+ */
+class FewestNotes implements NoteSelection {
+    public EnumMap<Note, Integer> select(EnumMap<Note, Integer> stock, long amount) {
+        EnumMap<Note, Integer> plan = new EnumMap<>(Note.class);
+        return pick(Note.values(), 0, stock, amount, plan) ? plan : null;
+    }
+    private boolean pick(Note[] notes, int i, Map<Note, Integer> stock, long left, EnumMap<Note, Integer> plan) {
+        if (left == 0) return true;
+        if (i == notes.length) return false;
+        Note n = notes[i];
+        int most = (int) Math.min(left / n.value, stock.getOrDefault(n, 0));
+        for (int take = most; take >= 0; take--) {                   // greedy first, then back off
+            if (take > 0) plan.put(n, take); else plan.remove(n);
+            if (pick(notes, i + 1, stock, left - (long) take * n.value, plan)) return true;
+        }
+        plan.remove(n);
+        return false;
+    }
+}
+
+/** The hardware that physically pushes notes into the slot. An interface so a test can jam it. */
+interface NoteFeeder { void feed(EnumMap<Note, Integer> notes); }
+
+/** The working feeder: it always succeeds. */
+class WorkingFeeder implements NoteFeeder { public void feed(EnumMap<Note, Integer> notes) { } }
+
+/**
+ * The cassettes and the note pusher. It owns the note counts and its own lock, because reserving notes
+ * (choose a combination AND subtract it) has to be one step or a refill thread could invalidate the plan
+ * between the two halves. Nothing slow ever happens inside this lock.
+ */
+class CashDispenser {
+    private final EnumMap<Note, Integer> stock = new EnumMap<>(Note.class);
+    private final ReentrantLock lock = new ReentrantLock();
+    private final NoteFeeder feeder;
+    private NoteSelection selection = new FewestNotes();
+    private int retracted;                                            // notes that jammed and went to the bin
+
+    CashDispenser(NoteFeeder feeder) { this.feeder = feeder; for (Note n : Note.values()) stock.put(n, 0); }
+    /** The picking rule, handed in. The dispenser never builds one. */
+    void setSelection(NoteSelection s) { selection = s; }
+    /** Load notes into a cassette. Takes the lock: a refill may happen while a customer is at the machine. */
+    void refill(Note n, int howMany) { lock.lock(); try { stock.merge(n, howMany, Integer::sum); } finally { lock.unlock(); } }
+    /** How many of this note are in the cassette. */
+    int count(Note n) { lock.lock(); try { return stock.get(n); } finally { lock.unlock(); } }
+    /** All the money still inside the cassettes. */
+    long cash() { lock.lock(); try { long t = 0; for (Note n : Note.values()) t += (long) stock.get(n) * n.value; return t; } finally { lock.unlock(); } }
+    /** How many notes ended up in the retract bin after a jam. */
+    int retracted() { lock.lock(); try { return retracted; } finally { lock.unlock(); } }
+
+    /**
+     * Choose the notes for this amount AND take them out of the cassettes, as one step. Returns null when
+     * no combination of the notes in stock makes exactly this amount -- and that answer arrives BEFORE the
+     * bank is asked, which is the whole point of reserving.
+     */
+    EnumMap<Note, Integer> reserve(long amount) {
+        lock.lock();
+        try {
+            EnumMap<Note, Integer> plan = selection.select(stock, amount);
+            if (plan == null) return null;
+            for (Map.Entry<Note, Integer> e : plan.entrySet()) stock.merge(e.getKey(), -e.getValue(), Integer::sum);
+            return plan;
+        } finally { lock.unlock(); }
+    }
+
+    /** Put a reservation back, note for note. Used when the bank says no after the notes were reserved. */
+    void release(EnumMap<Note, Integer> plan) {
+        lock.lock();
+        try { for (Map.Entry<Note, Integer> e : plan.entrySet()) stock.merge(e.getKey(), e.getValue(), Integer::sum); }
+        finally { lock.unlock(); }
+    }
+
+    /**
+     * Hand the reserved notes to the customer. If the hardware jams the notes are NOT put back in the
+     * cassette -- they are physically stuck, so they are counted into the retract bin and the cash in the
+     * machine still adds up.
+     */
+    void push(EnumMap<Note, Integer> plan) {
+        try {
+            feeder.feed(plan);
+        } catch (RuntimeException e) {
+            lock.lock();
+            try { for (int c : plan.values()) retracted += c; } finally { lock.unlock(); }
+            throw new HardwareFault(e.getMessage());
+        }
+    }
+}
+
+/**
+ * A rule about the amount itself, checked before anything is touched. One method, handed in, so "minimum
+ * 100", "multiples of 100" and "no more than 25,000 a go" are configuration and not an edit.
+ */
+interface WithdrawalPolicy {
+    /** null means allowed; any other string is the reason the customer is shown. */
+    String refuse(String accountId, long amount, long nowMs);
+}
+
+/** The everyday rule: a minimum, a per-transaction ceiling, and a multiple of the smallest note. */
+class AmountRules implements WithdrawalPolicy {
+    private final long min, max, step;
+    AmountRules(long min, long max, long step) { this.min = min; this.max = max; this.step = step; }
+    public String refuse(String accountId, long amount, long nowMs) {
+        if (amount < min)      return "the minimum is " + min;
+        if (amount > max)      return "the most in one go is " + max;
+        if (amount % step != 0) return "amounts must be a multiple of " + step;
+        return null;
+    }
+}
+
+/**
+ * One machine. It owns the session, the journal and one lock; it is handed the bank, the dispenser, the
+ * clock and the rules, and it builds none of them. Every public method takes the lock, checks the session
+ * is in a state where the action is legal, and tells the listeners only after the lock is released.
+ */
+class ATM {
+    private static final AtomicInteger SEQ = new AtomicInteger();
+    final String id;
+    private final BankService bank;
+    private final CashDispenser dispenser;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final List<AtmObserver> observers = new CopyOnWriteArrayList<>();
+    private final List<Withdrawal> journal = new CopyOnWriteArrayList<>();
+    private Clock clock = System::currentTimeMillis;
+    private WithdrawalPolicy policy = new AmountRules(100, 25_000, 100);
+    private Session session;
+    private int pinLimit = 3;
+
+    ATM(String id, BankService bank, CashDispenser dispenser) {
+        this.id = id; this.bank = bank; this.dispenser = dispenser;
+        this.session = new Session(id + "-0", null, 0, SessionState.IDLE);
+    }
+    /** Hand in the rules. The machine never constructs a rule of its own. */
+    void configure(WithdrawalPolicy policy, NoteSelection selection) {
+        this.policy = policy; dispenser.setSelection(selection);
+    }
+    /** Hand in time, so a test can decide what "today" is. */
+    void setClock(Clock c) { this.clock = c; }
+    /** Add a listener. It is called after the lock is released and its exceptions are swallowed. */
+    void addObserver(AtmObserver o) { observers.add(o); }
+    /** Where the visit has got to. */
+    SessionState state() { lock.lock(); try { return session.state; } finally { lock.unlock(); } }
+    /** Every withdrawal attempt this machine has made, oldest first. Never pruned. */
+    List<Withdrawal> journal() { return List.copyOf(journal); }
+    /** The rows whose outcome nobody knows: the bank never answered. An operator reconciles these. */
+    List<Withdrawal> unresolved() {
+        List<Withdrawal> out = new ArrayList<>();
+        for (Withdrawal w : journal) if (w.state == TxnState.UNKNOWN) out.add(w);
+        return out;
+    }
+
+    /** Take a card and start a visit. Legal only when the machine is idle. */
+    void insertCard(Card card) {
+        lock.lock();
+        try {
+            require(SessionState.IDLE);
+            session = new Session(id + "-" + SEQ.incrementAndGet(), card, clock.nowMs(), SessionState.IDLE);
+            to(SessionState.CARD_INSERTED);
+        } finally { lock.unlock(); }
+        publish(new AtmEvent(id, "CARD_IN", card.accountId, 0, clock.nowMs(), null));
+    }
+
+    /**
+     * Try a PIN. Three wrong ones in one visit and the machine keeps the card: the session ends, the state
+     * goes back to IDLE with nothing in the slot to hand back.
+     */
+    void enterPin(String pin) {
+        boolean ok = false, retained = false;
+        int left = 0;
+        lock.lock();
+        try {
+            require(SessionState.CARD_INSERTED);
+            if (bank.authenticate(session.card.number, pin)) {
+                to(SessionState.AUTHENTICATED);
+                ok = true;
+            } else {
+                session.pinTries++;
+                left = pinLimit - session.pinTries;
+                if (left <= 0) {
+                    to(SessionState.EJECTED);             // the card goes into the capture bin, not the slot
+                    to(SessionState.IDLE);
+                    retained = true;
+                }
+            }
+        } finally { lock.unlock(); }
+        if (retained) {
+            publish(new AtmEvent(id, "CARD_RETAINED", "", 0, clock.nowMs(), null));
+            throw new CardRetained("three wrong PINs: the card has been retained");
+        }
+        if (!ok) throw new IllegalArgumentException("wrong PIN, " + left + " tries left");
+    }
+
+    /** The balance on the card's account. Legal only once the PIN was right. */
+    long balance() {
+        lock.lock();
+        try { require(SessionState.AUTHENTICATED); return bank.balance(session.card.accountId); }
+        finally { lock.unlock(); }
+    }
+
+    /** Pay money in. The machine holds no balance of its own, so this is one credit at the bank. */
+    void deposit(long amount) {
+        String account;
+        lock.lock();
+        try {
+            require(SessionState.AUTHENTICATED);
+            account = session.card.accountId;
+            bank.credit(account, amount, id + "-dep-" + SEQ.incrementAndGet());
+        } finally { lock.unlock(); }
+        publish(new AtmEvent(id, "DEPOSIT", account, amount, clock.nowMs(), null));
+    }
+
+    /**
+     * Take cash out. The order is the design: check the rule, RESERVE the notes, ask the bank to debit with
+     * an idempotency key, and only then push the notes. A refusal at either of the first two steps has
+     * moved no money at all; a jam after the debit is compensated with a credit under a second key; a bank
+     * that never answers dispenses nothing and leaves a row for an operator to reconcile.
+     */
+    Withdrawal withdraw(long amount) {
+        Withdrawal w;
+        lock.lock();
+        try { w = doWithdraw(amount); } finally { lock.unlock(); }
+        publish(new AtmEvent(id, "WITHDRAW", w.accountId, amount, clock.nowMs(), w));   // after the unlock
+        if (w.state != TxnState.DISPENSED) throw new WithdrawalFailed(w);
+        return w;
+    }
+
+    /** The withdrawal itself, always called with the lock held. It never throws for a business outcome. */
+    private Withdrawal doWithdraw(long amount) {
+        require(SessionState.AUTHENTICATED);
+        Withdrawal w = new Withdrawal(SEQ.incrementAndGet(), id, session.card.accountId, amount, clock.nowMs());
+        journal.add(w);                                             // written BEFORE the bank is asked
+
+        String no = policy.refuse(w.accountId, amount, clock.nowMs());
+        if (no != null) return w.refuse(no);                        // nothing has been touched
+
+        to(SessionState.TRANSACTION);
+        EnumMap<Note, Integer> plan = dispenser.reserve(amount);    // reserve BEFORE the debit
+        if (plan == null) { to(SessionState.AUTHENTICATED); return w.refuse("the cassettes cannot make " + amount); }
+        w.notes = plan;
+
+        BankReply reply = bank.debit(w.accountId, amount, w.key);   // the irreversible step
+        if (reply == BankReply.DECLINED) {
+            dispenser.release(plan);                                // every note goes back
+            to(SessionState.AUTHENTICATED);
+            return w.refuse("the bank declined");
+        }
+        if (reply == BankReply.TIMEOUT) {
+            dispenser.release(plan);                                // hand out nothing while nobody knows
+            to(SessionState.AUTHENTICATED);
+            w.state = TxnState.UNKNOWN;
+            w.note = "the bank did not answer; this row is for reconciliation";
+            return w;
+        }
+
+        w.state = TxnState.DEBITED;                                 // the money has left the account
+        to(SessionState.DISPENSING);
+        try {
+            dispenser.push(plan);
+            w.state = TxnState.DISPENSED;
+        } catch (HardwareFault f) {
+            bank.credit(w.accountId, amount, w.key + "-rev");       // compensate under its own key
+            w.state = TxnState.REVERSED;
+            w.note = "dispenser jammed (" + f.getMessage() + "); the account was credited back";
+        }
+        to(SessionState.AUTHENTICATED);
+        return w;
+    }
+
+    /** Give the card back and end the visit. */
+    void ejectCard() {
+        String account;
+        lock.lock();
+        try {
+            if (session.state == SessionState.IDLE) return;
+            account = session.card == null ? "" : session.card.accountId;
+            to(SessionState.EJECTED);
+            to(SessionState.IDLE);
+        } finally { lock.unlock(); }
+        publish(new AtmEvent(id, "CARD_OUT", account, 0, clock.nowMs(), null));
+    }
+
+    /** Refuse an action that this state does not allow, naming the state it happened in. */
+    private void require(SessionState wanted) {
+        if (session.state != wanted)
+            throw new IllegalStateException("illegal here: the machine is " + session.state + ", not " + wanted);
+    }
+    /** Move the session on, but only along an edge the table allows. */
+    private void to(SessionState next) {
+        if (!Transitions.ALLOWED.get(session.state).contains(next))
+            throw new IllegalStateException("illegal move " + session.state + " -> " + next);
+        session.state = next;
+    }
+    /** Tell the listeners. Always outside the lock, and a listener that throws is its own problem. */
+    private void publish(AtmEvent e) {
+        for (AtmObserver o : observers) {
+            try { o.onEvent(e); } catch (RuntimeException ignored) { }
+        }
+    }
+}
+
+/**
+ * Proof it works: a happy withdrawal, the three-wrong-PINs lockout, a lopsided drawer that greed alone
+ * could not pay, and forty machines racing for one account's last rupees with exactly the right number of
+ * winners and a balance that never goes below zero.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        InMemoryBank bank = new InMemoryBank();
+        bank.open("ACC-1", 10_000);
+        bank.issueCard("4111-1111", "1234");
+
+        CashDispenser cash = new CashDispenser(new WorkingFeeder());
+        cash.refill(Note.N2000, 2); cash.refill(Note.N500, 4); cash.refill(Note.N200, 3); cash.refill(Note.N100, 5);
+        ATM atm = new ATM("ATM-01", bank, cash);
+        atm.configure(new AmountRules(100, 25_000, 100), new FewestNotes());
+        AuditLog audit = new AuditLog();
+        atm.addObserver(new ReceiptPrinter());
+        atm.addObserver(audit);
+
+        Card card = new Card("4111-1111", "ACC-1");
+        atm.insertCard(card);
+        atm.enterPin("1234");
+        System.out.println("balance: " + atm.balance());
+        Withdrawal w = atm.withdraw(2700);
+        System.out.println("dispensed " + w.notes + " = " + w.noteCount() + " notes; balance now " + atm.balance());
+        try { atm.withdraw(2750); } catch (WithdrawalFailed f) { System.out.println("expected: " + f.getMessage()); }
+        atm.ejectCard();
+
+        // three wrong PINs: the card is kept and the machine is idle with nothing in the slot
+        atm.insertCard(card);
+        for (int i = 1; i <= 3; i++) {
+            try { atm.enterPin("0000"); }
+            catch (CardRetained e)           { System.out.println("try " + i + ": " + e.getMessage()); }
+            catch (IllegalArgumentException e) { System.out.println("try " + i + ": " + e.getMessage()); }
+        }
+        System.out.println("machine is " + atm.state() + " with the card in the capture bin");
+
+        // a lopsided drawer: 600 from {500 x 1, 200 x 3} -- greed alone dead-ends on the 500
+        CashDispenser odd = new CashDispenser(new WorkingFeeder());
+        odd.refill(Note.N500, 1); odd.refill(Note.N200, 3);
+        ATM atm2 = new ATM("ATM-02", bank, odd);
+        bank.open("ACC-2", 5_000);
+        atm2.insertCard(new Card("4111-1111", "ACC-2"));
+        atm2.enterPin("1234");
+        System.out.println("600 from a lopsided drawer: " + atm2.withdraw(600).notes);
+        atm2.ejectCard();
+
+        // the race: forty machines, one account with 10,000 left, everyone asking for 500
+        bank.open("ACC-RACE", 10_000);
+        int machines = 40;
+        List<ATM> fleet = new ArrayList<>();
+        for (int i = 0; i < machines; i++) {
+            CashDispenser d = new CashDispenser(new WorkingFeeder());
+            d.refill(Note.N500, 2);
+            ATM a = new ATM("ATM-R" + i, bank, d);
+            fleet.add(a);
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(machines);   // all forty really at once
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger paid = new AtomicInteger(), refused = new AtomicInteger();
+        AtomicLong handedOut = new AtomicLong();
+        for (ATM a : fleet) {
+            pool.submit(() -> {
+                a.insertCard(new Card("4111-1111", "ACC-RACE"));
+                a.enterPin("1234");
+                go.await();
+                try { Withdrawal x = a.withdraw(500); paid.incrementAndGet(); handedOut.addAndGet(x.amount); }
+                catch (WithdrawalFailed f) { refused.incrementAndGet(); }
+                a.ejectCard();
+                return null;
+            });
+        }
+        go.countDown();
+        pool.shutdown();
+        pool.awaitTermination(10, TimeUnit.SECONDS);
+        System.out.println("race: " + paid.get() + " paid, " + refused.get() + " refused, "
+            + handedOut.get() + " handed out, balance " + bank.balance("ACC-RACE"));
+        if (paid.get() != 20 || bank.balance("ACC-RACE") != 0)
+            throw new AssertionError("the bank is not the single writer!");
+
+        // the same race with no machine around it, so the compare-and-set is the only thing in the way
+        bank.open("ACC-CAS", 10_000);
+        ExecutorService raw = Executors.newFixedThreadPool(32);
+        CountDownLatch go2 = new CountDownLatch(1);
+        AtomicInteger won = new AtomicInteger();
+        for (int i = 0; i < 200; i++) {
+            final int n = i;
+            raw.submit(() -> { go2.await(); if (bank.debit("ACC-CAS", 100, "cas-" + n) == BankReply.OK) won.incrementAndGet(); return null; });
+        }
+        go2.countDown();
+        raw.shutdown();
+        raw.awaitTermination(10, TimeUnit.SECONDS);
+        System.out.println("bank alone: " + won.get() + " of 200 debits of 100 got through, balance "
+            + bank.balance("ACC-CAS") + ", debits that lost the race and read again: " + bank.casRetries.get());
+        System.out.println("audit rows: " + audit.events.size() + ", withdrawals seen: " + audit.count("WITHDRAW"));
+    }
+}

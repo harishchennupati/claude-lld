@@ -1,0 +1,2124 @@
+<!doctype html>
+<html lang="en" data-theme="midnight">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parking Lot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Playfair+Display:ital,wght@0,700;1,400&display=swap">
+<style>
+/* ape-present base stylesheet. Copy verbatim into <style>, then add
+   per-document rules beneath it. Every colour in the document must be one
+   of these tokens; grep for '#' outside the :root blocks and expect zero hits.
+
+   The document is a long-form reading page, not a deck: one prose column,
+   real headings, figures inline. Theme follows the OS or present-md; `t` flips it.
+   Width has a comfortable measure constraint (--measure) with visual elements
+   allowed to break out beyond it (--wide, --max-width). */
+
+/* ---- Theme: midnight (dark) -------------------------------- */
+:root[data-theme="midnight"],
+:root[data-theme="dark"],
+:root[data-theme="mocha"] {
+  --crust:            #11111b;
+  --mantle:           #181825;
+  --base:             #1e1e2e;
+  --surface0:         #313244;
+  --surface1:         #45475a;
+  --surface2:         #585b70;
+  --overlay0:         #6c7086;
+  --overlay1:         #7f849c;
+  --subtext0:         #a6adc8;
+  --subtext1:         #bac2de;
+  --text:             #cdd6f4;
+  --lavender:         #b4befe;
+  --blue:             #89b4fa;
+  --sapphire:         #74c7ec;
+  --sky:              #89dceb;
+  --teal:             #94e2d5;
+  --green:            #a6e3a1;
+  --yellow:           #f9e2af;
+  --peach:            #fab387;
+  --red:              #f38ba8;
+  --mauve:            #cba6f7;
+  --pink:             #f5c2e7;
+  --accent:           #cba6f7;
+  --accent-2:         #89b4fa;
+  --accent-3:         #89dceb;
+  --accent-soft:      rgba(203, 166, 247, 0.1);
+  --accent-line:      rgba(203, 166, 247, 0.42);
+  --glow:             rgba(203, 166, 247, 0.34);
+  --gradient:         linear-gradient(115deg, #cba6f7, #89b4fa 58%, #89dceb);
+  --accent-fade:      linear-gradient(90deg, #cba6f7, rgba(203, 166, 247, 0.45) 62%, transparent);
+  --surface-soft:     rgba(49, 50, 68, 0.34);
+  --crust-overlay:    rgba(17, 17, 27, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(205, 214, 244, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.025em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(205, 214, 244, 0.05);
+  --decor-dot:        rgba(205, 214, 244, 0.085);
+  --decor-glow-1:     rgba(203, 166, 247, 0.2);
+  --decor-glow-2:     rgba(137, 180, 250, 0.16);
+  --decor-glow-3:     rgba(137, 220, 235, 0.13);
+  --bg:               #1e1e2e;
+  --surface:          #181825;
+  --line:             #313244;
+  --muted:            #a6adc8;
+  --grid:             rgba(205, 214, 244, 0.06);
+  --err:              #f38ba8;
+  --ok:               #a6e3a1;
+  --code-k:           #cba6f7;
+  --code-s:           #a6e3a1;
+  --code-c:           #6c7086;
+  --code-n:           #89b4fa;
+  --serif:            'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: tokyo night (dark) -------------------------------- */
+:root[data-theme="tokyo"],
+:root[data-theme="tokyo-night"] {
+  --crust:            #16161e;
+  --mantle:           #1a1b26;
+  --base:             #1f2335;
+  --surface0:         #292e42;
+  --surface1:         #3b4261;
+  --surface2:         #545c7e;
+  --overlay0:         #626c96;
+  --overlay1:         #7c86ab;
+  --subtext0:         #a5b0d6;
+  --subtext1:         #b7c0e0;
+  --text:             #c8d3f5;
+  --lavender:         #a9b1ff;
+  --blue:             #7aa2f7;
+  --sapphire:         #2ac3de;
+  --sky:              #7dcfff;
+  --teal:             #73daca;
+  --green:            #9ece6a;
+  --yellow:           #e0af68;
+  --peach:            #ff9e64;
+  --red:              #f7768e;
+  --mauve:            #bb9af7;
+  --pink:             #ff7eb6;
+  --accent:           #2ac3de;
+  --accent-2:         #bb9af7;
+  --accent-3:         #73daca;
+  --accent-soft:      rgba(42, 195, 222, 0.1);
+  --accent-line:      rgba(42, 195, 222, 0.42);
+  --glow:             rgba(42, 195, 222, 0.34);
+  --gradient:         linear-gradient(115deg, #2ac3de, #bb9af7 58%, #73daca);
+  --accent-fade:      linear-gradient(90deg, #2ac3de, rgba(42, 195, 222, 0.45) 62%, transparent);
+  --surface-soft:     rgba(41, 46, 66, 0.34);
+  --crust-overlay:    rgba(22, 22, 30, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(200, 211, 245, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Sora', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.03em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(200, 211, 245, 0.05);
+  --decor-dot:        rgba(200, 211, 245, 0.085);
+  --decor-glow-1:     rgba(42, 195, 222, 0.2);
+  --decor-glow-2:     rgba(187, 154, 247, 0.16);
+  --decor-glow-3:     rgba(115, 218, 202, 0.13);
+  --bg:               #1f2335;
+  --surface:          #1a1b26;
+  --line:             #292e42;
+  --muted:            #a5b0d6;
+  --grid:             rgba(200, 211, 245, 0.06);
+  --err:              #f7768e;
+  --ok:               #9ece6a;
+  --code-k:           #bb9af7;
+  --code-s:           #9ece6a;
+  --code-c:           #626c96;
+  --code-n:           #7aa2f7;
+  --serif:            'Sora', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: nord (dark) -------------------------------- */
+:root[data-theme="nord"] {
+  --crust:            #232831;
+  --mantle:           #2e3440;
+  --base:             #353c4a;
+  --surface0:         #3b4252;
+  --surface1:         #434c5e;
+  --surface2:         #4c566a;
+  --overlay0:         #707d92;
+  --overlay1:         #8e9aae;
+  --subtext0:         #c3ccda;
+  --subtext1:         #d8dee9;
+  --text:             #eceff4;
+  --lavender:         #c9a9c8;
+  --blue:             #81a1c1;
+  --sapphire:         #88c0d0;
+  --sky:              #a3d4e0;
+  --teal:             #8fbcbb;
+  --green:            #a3be8c;
+  --yellow:           #ebcb8b;
+  --peach:            #d08770;
+  --red:              #bf616a;
+  --mauve:            #b48ead;
+  --pink:             #d3a3c6;
+  --accent:           #88c0d0;
+  --accent-2:         #81a1c1;
+  --accent-3:         #8fbcbb;
+  --accent-soft:      rgba(136, 192, 208, 0.1);
+  --accent-line:      rgba(136, 192, 208, 0.42);
+  --glow:             rgba(136, 192, 208, 0.34);
+  --gradient:         linear-gradient(115deg, #88c0d0, #81a1c1 58%, #8fbcbb);
+  --accent-fade:      linear-gradient(90deg, #88c0d0, rgba(136, 192, 208, 0.45) 62%, transparent);
+  --surface-soft:     rgba(59, 66, 82, 0.34);
+  --crust-overlay:    rgba(35, 40, 49, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(236, 239, 244, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   800;
+  --display-tracking: -0.035em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(236, 239, 244, 0.05);
+  --decor-dot:        rgba(236, 239, 244, 0.085);
+  --decor-glow-1:     rgba(136, 192, 208, 0.2);
+  --decor-glow-2:     rgba(129, 161, 193, 0.16);
+  --decor-glow-3:     rgba(143, 188, 187, 0.13);
+  --bg:               #353c4a;
+  --surface:          #2e3440;
+  --line:             #3b4252;
+  --muted:            #c3ccda;
+  --grid:             rgba(236, 239, 244, 0.06);
+  --err:              #bf616a;
+  --ok:               #a3be8c;
+  --code-k:           #b48ead;
+  --code-s:           #a3be8c;
+  --code-c:           #707d92;
+  --code-n:           #81a1c1;
+  --serif:            'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: dracula (dark) -------------------------------- */
+:root[data-theme="dracula"] {
+  --crust:            #1a1b23;
+  --mantle:           #21222c;
+  --base:             #282a36;
+  --surface0:         #343746;
+  --surface1:         #44475a;
+  --surface2:         #565a70;
+  --overlay0:         #6272a4;
+  --overlay1:         #7b85b6;
+  --subtext0:         #c8cbe0;
+  --subtext1:         #e2e4f0;
+  --text:             #f8f8f2;
+  --lavender:         #d6bcff;
+  --blue:             #79b8ff;
+  --sapphire:         #8be9fd;
+  --sky:              #a4f0fd;
+  --teal:             #66e0c8;
+  --green:            #50fa7b;
+  --yellow:           #f1fa8c;
+  --peach:            #ffb86c;
+  --red:              #ff5555;
+  --mauve:            #bd93f9;
+  --pink:             #ff79c6;
+  --accent:           #bd93f9;
+  --accent-2:         #ff79c6;
+  --accent-3:         #8be9fd;
+  --accent-soft:      rgba(189, 147, 249, 0.1);
+  --accent-line:      rgba(189, 147, 249, 0.42);
+  --glow:             rgba(189, 147, 249, 0.34);
+  --gradient:         linear-gradient(115deg, #bd93f9, #ff79c6 58%, #8be9fd);
+  --accent-fade:      linear-gradient(90deg, #bd93f9, rgba(189, 147, 249, 0.45) 62%, transparent);
+  --surface-soft:     rgba(52, 55, 70, 0.34);
+  --crust-overlay:    rgba(26, 27, 35, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(248, 248, 242, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Syne', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   800;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(248, 248, 242, 0.05);
+  --decor-dot:        rgba(248, 248, 242, 0.085);
+  --decor-glow-1:     rgba(189, 147, 249, 0.2);
+  --decor-glow-2:     rgba(255, 121, 198, 0.16);
+  --decor-glow-3:     rgba(139, 233, 253, 0.13);
+  --bg:               #282a36;
+  --surface:          #21222c;
+  --line:             #343746;
+  --muted:            #c8cbe0;
+  --grid:             rgba(248, 248, 242, 0.06);
+  --err:              #ff5555;
+  --ok:               #50fa7b;
+  --code-k:           #bd93f9;
+  --code-s:           #50fa7b;
+  --code-c:           #6272a4;
+  --code-n:           #79b8ff;
+  --serif:            'Syne', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: gruvbox (dark) -------------------------------- */
+:root[data-theme="gruvbox"] {
+  --crust:            #1b1e1f;
+  --mantle:           #232728;
+  --base:             #282828;
+  --surface0:         #32302f;
+  --surface1:         #3c3836;
+  --surface2:         #504945;
+  --overlay0:         #7c6f64;
+  --overlay1:         #928374;
+  --subtext0:         #bdae93;
+  --subtext1:         #d5c4a1;
+  --text:             #ebdbb2;
+  --lavender:         #d3b8c8;
+  --blue:             #83a598;
+  --sapphire:         #7daea3;
+  --sky:              #8ec07c;
+  --teal:             #89b482;
+  --green:            #b8bb26;
+  --yellow:           #fabd2f;
+  --peach:            #fe8019;
+  --red:              #fb4934;
+  --mauve:            #d3869b;
+  --pink:             #e2a3b4;
+  --accent:           #fabd2f;
+  --accent-2:         #fe8019;
+  --accent-3:         #b8bb26;
+  --accent-soft:      rgba(250, 189, 47, 0.1);
+  --accent-line:      rgba(250, 189, 47, 0.42);
+  --glow:             rgba(250, 189, 47, 0.34);
+  --gradient:         linear-gradient(115deg, #fabd2f, #fe8019 58%, #b8bb26);
+  --accent-fade:      linear-gradient(90deg, #fabd2f, rgba(250, 189, 47, 0.45) 62%, transparent);
+  --surface-soft:     rgba(50, 48, 47, 0.34);
+  --crust-overlay:    rgba(27, 30, 31, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(235, 219, 178, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Bricolage Grotesque', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Work Sans', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(235, 219, 178, 0.05);
+  --decor-dot:        rgba(235, 219, 178, 0.085);
+  --decor-glow-1:     rgba(250, 189, 47, 0.2);
+  --decor-glow-2:     rgba(254, 128, 25, 0.16);
+  --decor-glow-3:     rgba(184, 187, 38, 0.13);
+  --bg:               #282828;
+  --surface:          #232728;
+  --line:             #32302f;
+  --muted:            #bdae93;
+  --grid:             rgba(235, 219, 178, 0.06);
+  --err:              #fb4934;
+  --ok:               #b8bb26;
+  --code-k:           #d3869b;
+  --code-s:           #b8bb26;
+  --code-c:           #7c6f64;
+  --code-n:           #83a598;
+  --serif:            'Bricolage Grotesque', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Work Sans', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: rosé pine (dark) -------------------------------- */
+:root[data-theme="rosepine"],
+:root[data-theme="rose-pine"] {
+  --crust:            #14121f;
+  --mantle:           #191724;
+  --base:             #1f1d2e;
+  --surface0:         #26233a;
+  --surface1:         #403d52;
+  --surface2:         #524f67;
+  --overlay0:         #6e6a86;
+  --overlay1:         #817c9c;
+  --subtext0:         #b6b2d0;
+  --subtext1:         #cdc9e6;
+  --text:             #e0def4;
+  --lavender:         #d5c4ee;
+  --blue:             #6a9fb5;
+  --sapphire:         #6ba8bf;
+  --sky:              #9ccfd8;
+  --teal:             #86cfc4;
+  --green:            #9ccfa8;
+  --yellow:           #f6c177;
+  --peach:            #f0a882;
+  --red:              #eb6f92;
+  --mauve:            #c4a7e7;
+  --pink:             #ebbcba;
+  --accent:           #c4a7e7;
+  --accent-2:         #9ccfd8;
+  --accent-3:         #f6c177;
+  --accent-soft:      rgba(196, 167, 231, 0.1);
+  --accent-line:      rgba(196, 167, 231, 0.42);
+  --glow:             rgba(196, 167, 231, 0.34);
+  --gradient:         linear-gradient(115deg, #c4a7e7, #9ccfd8 58%, #f6c177);
+  --accent-fade:      linear-gradient(90deg, #c4a7e7, rgba(196, 167, 231, 0.45) 62%, transparent);
+  --surface-soft:     rgba(38, 35, 58, 0.34);
+  --crust-overlay:    rgba(20, 18, 31, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(224, 222, 244, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-body:        'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   600;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0.004em;
+  --decor-line:       rgba(224, 222, 244, 0.05);
+  --decor-dot:        rgba(224, 222, 244, 0.085);
+  --decor-glow-1:     rgba(196, 167, 231, 0.2);
+  --decor-glow-2:     rgba(156, 207, 216, 0.16);
+  --decor-glow-3:     rgba(246, 193, 119, 0.13);
+  --bg:               #1f1d2e;
+  --surface:          #191724;
+  --line:             #26233a;
+  --muted:            #b6b2d0;
+  --grid:             rgba(224, 222, 244, 0.06);
+  --err:              #eb6f92;
+  --ok:               #9ccfa8;
+  --code-k:           #c4a7e7;
+  --code-s:           #9ccfa8;
+  --code-c:           #6e6a86;
+  --code-n:           #6a9fb5;
+  --serif:            'Fraunces', Georgia, 'Times New Roman', serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Newsreader', Georgia, 'Times New Roman', serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: forest (dark) -------------------------------- */
+:root[data-theme="forest"] {
+  --crust:            #232a2e;
+  --mantle:           #2d353b;
+  --base:             #343f44;
+  --surface0:         #3d484d;
+  --surface1:         #475258;
+  --surface2:         #4f585e;
+  --overlay0:         #7a8478;
+  --overlay1:         #9da9a0;
+  --subtext0:         #c2c9bd;
+  --subtext1:         #d3c6aa;
+  --text:             #e5dfd2;
+  --lavender:         #d8b9c8;
+  --blue:             #7fbbb3;
+  --sapphire:         #6fb5ac;
+  --sky:              #9ed3c8;
+  --teal:             #83c092;
+  --green:            #a7c080;
+  --yellow:           #dbbc7f;
+  --peach:            #e69875;
+  --red:              #e67e80;
+  --mauve:            #d699b6;
+  --pink:             #e3aec3;
+  --accent:           #a7c080;
+  --accent-2:         #6fb5ac;
+  --accent-3:         #dbbc7f;
+  --accent-soft:      rgba(167, 192, 128, 0.1);
+  --accent-line:      rgba(167, 192, 128, 0.42);
+  --glow:             rgba(167, 192, 128, 0.34);
+  --gradient:         linear-gradient(115deg, #a7c080, #6fb5ac 58%, #dbbc7f);
+  --accent-fade:      linear-gradient(90deg, #a7c080, rgba(167, 192, 128, 0.45) 62%, transparent);
+  --surface-soft:     rgba(61, 72, 77, 0.34);
+  --crust-overlay:    rgba(35, 42, 46, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(229, 223, 210, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Outfit', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   600;
+  --display-tracking: -0.025em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(229, 223, 210, 0.05);
+  --decor-dot:        rgba(229, 223, 210, 0.085);
+  --decor-glow-1:     rgba(167, 192, 128, 0.2);
+  --decor-glow-2:     rgba(111, 181, 172, 0.16);
+  --decor-glow-3:     rgba(219, 188, 127, 0.13);
+  --bg:               #343f44;
+  --surface:          #2d353b;
+  --line:             #3d484d;
+  --muted:            #c2c9bd;
+  --grid:             rgba(229, 223, 210, 0.06);
+  --err:              #e67e80;
+  --ok:               #a7c080;
+  --code-k:           #d699b6;
+  --code-s:           #a7c080;
+  --code-c:           #7a8478;
+  --code-n:           #7fbbb3;
+  --serif:            'Outfit', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: neon (dark) -------------------------------- */
+:root[data-theme="neon"] {
+  --crust:            #050509;
+  --mantle:           #0a0a12;
+  --base:             #0e0e1a;
+  --surface0:         #16162a;
+  --surface1:         #22223c;
+  --surface2:         #2e2e50;
+  --overlay0:         #4f4f78;
+  --overlay1:         #6a6a96;
+  --subtext0:         #a8a8cc;
+  --subtext1:         #c8c8e4;
+  --text:             #f0f0ff;
+  --lavender:         #b39dff;
+  --blue:             #4d9fff;
+  --sapphire:         #22d3ee;
+  --sky:              #38e8ff;
+  --teal:             #2dd4bf;
+  --green:            #4ade80;
+  --yellow:           #fde047;
+  --peach:            #fb923c;
+  --red:              #fb5c7d;
+  --mauve:            #d946ef;
+  --pink:             #ff5cc8;
+  --accent:           #22d3ee;
+  --accent-2:         #ff5cc8;
+  --accent-3:         #38e8ff;
+  --accent-soft:      rgba(34, 211, 238, 0.1);
+  --accent-line:      rgba(34, 211, 238, 0.42);
+  --glow:             rgba(34, 211, 238, 0.34);
+  --gradient:         linear-gradient(115deg, #22d3ee, #ff5cc8 58%, #38e8ff);
+  --accent-fade:      linear-gradient(90deg, #22d3ee, rgba(34, 211, 238, 0.45) 62%, transparent);
+  --surface-soft:     rgba(22, 22, 42, 0.34);
+  --crust-overlay:    rgba(5, 5, 9, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(240, 240, 255, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'Space Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: 0.04em;
+  --display-case:     uppercase;
+  --body-tracking:    0;
+  --decor-line:       rgba(240, 240, 255, 0.05);
+  --decor-dot:        rgba(240, 240, 255, 0.085);
+  --decor-glow-1:     rgba(34, 211, 238, 0.2);
+  --decor-glow-2:     rgba(255, 92, 200, 0.16);
+  --decor-glow-3:     rgba(56, 232, 255, 0.13);
+  --bg:               #0e0e1a;
+  --surface:          #0a0a12;
+  --line:             #16162a;
+  --muted:            #a8a8cc;
+  --grid:             rgba(240, 240, 255, 0.06);
+  --err:              #fb5c7d;
+  --ok:               #4ade80;
+  --code-k:           #d946ef;
+  --code-s:           #4ade80;
+  --code-c:           #4f4f78;
+  --code-n:           #4d9fff;
+  --serif:            'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'Space Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: dark;
+}
+
+/* ---- Theme: daylight (light) -------------------------------- */
+:root, :root[data-theme="daylight"],
+:root[data-theme="light"],
+:root[data-theme="latte"] {
+  --crust:            #ebebeb;
+  --mantle:           #f5f5f5;
+  --base:             #fafaf8;
+  --surface0:         #ccd0da;
+  --surface1:         #9ca0b0;
+  --surface2:         #8c8fa1;
+  --overlay0:         #6c6f85;
+  --overlay1:         #5c5f77;
+  --subtext0:         #4c4f69;
+  --subtext1:         #3a3c52;
+  --text:             #1e2030;
+  --lavender:         #7287fd;
+  --blue:             #1e66f5;
+  --sapphire:         #209fb5;
+  --sky:              #04a5e5;
+  --teal:             #179299;
+  --green:            #40a02b;
+  --yellow:           #df8e1d;
+  --peach:            #fe640b;
+  --red:              #d20f39;
+  --mauve:            #8839ef;
+  --pink:             #ea76cb;
+  --accent:           #8839ef;
+  --accent-2:         #1e66f5;
+  --accent-3:         #179299;
+  --accent-soft:      rgba(136, 57, 239, 0.09);
+  --accent-line:      rgba(136, 57, 239, 0.34);
+  --glow:             rgba(136, 57, 239, 0.22);
+  --gradient:         linear-gradient(115deg, #8839ef, #1e66f5 58%, #179299);
+  --accent-fade:      linear-gradient(90deg, #8839ef, rgba(136, 57, 239, 0.45) 62%, transparent);
+  --surface-soft:     rgba(204, 208, 218, 0.42);
+  --crust-overlay:    rgba(235, 235, 235, 0.88);
+  --scrim:            rgba(30, 32, 48, 0.26);
+  --hairline:         rgba(30, 32, 48, 0.11);
+  --shadow-md:        0 8px 28px rgba(30, 32, 48, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(30, 32, 48, 0.2184);
+  --code-shadow:      0 6px 26px rgba(30, 32, 48, 0.168);
+  --font-display:     'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.025em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(30, 32, 48, 0.07);
+  --decor-dot:        rgba(30, 32, 48, 0.1);
+  --decor-glow-1:     rgba(136, 57, 239, 0.15);
+  --decor-glow-2:     rgba(30, 102, 245, 0.12);
+  --decor-glow-3:     rgba(23, 146, 153, 0.1);
+  --bg:               #fafaf8;
+  --surface:          #f5f5f5;
+  --line:             #ccd0da;
+  --muted:            #4c4f69;
+  --grid:             rgba(30, 32, 48, 0.08);
+  --err:              #d20f39;
+  --ok:               #40a02b;
+  --code-k:           #8839ef;
+  --code-s:           #40a02b;
+  --code-c:           #6c6f85;
+  --code-n:           #1e66f5;
+  --serif:            'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+/* ---- Theme: arctic (light) -------------------------------- */
+:root[data-theme="arctic"] {
+  --crust:            #e3e8ef;
+  --mantle:           #eceff4;
+  --base:             #f7f9fc;
+  --surface0:         #dbe1ea;
+  --surface1:         #c2cad6;
+  --surface2:         #a3adbd;
+  --overlay0:         #7b8797;
+  --overlay1:         #5f6b7c;
+  --subtext0:         #445060;
+  --subtext1:         #364150;
+  --text:             #2e3440;
+  --lavender:         #9c6f96;
+  --blue:             #4a7ba7;
+  --sapphire:         #2f7d94;
+  --sky:              #3d8fa8;
+  --teal:             #3b8b8a;
+  --green:            #5d8a45;
+  --yellow:           #b08834;
+  --peach:            #c06a4a;
+  --red:              #b0505a;
+  --mauve:            #96628f;
+  --pink:             #a86a94;
+  --accent:           #2f7d94;
+  --accent-2:         #4a7ba7;
+  --accent-3:         #3b8b8a;
+  --accent-soft:      rgba(47, 125, 148, 0.09);
+  --accent-line:      rgba(47, 125, 148, 0.34);
+  --glow:             rgba(47, 125, 148, 0.22);
+  --gradient:         linear-gradient(115deg, #2f7d94, #4a7ba7 58%, #3b8b8a);
+  --accent-fade:      linear-gradient(90deg, #2f7d94, rgba(47, 125, 148, 0.45) 62%, transparent);
+  --surface-soft:     rgba(219, 225, 234, 0.42);
+  --crust-overlay:    rgba(227, 232, 239, 0.88);
+  --scrim:            rgba(46, 52, 64, 0.26);
+  --hairline:         rgba(46, 52, 64, 0.11);
+  --shadow-md:        0 8px 28px rgba(46, 52, 64, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(46, 52, 64, 0.2184);
+  --code-shadow:      0 6px 26px rgba(46, 52, 64, 0.168);
+  --font-display:     'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   800;
+  --display-tracking: -0.035em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(46, 52, 64, 0.07);
+  --decor-dot:        rgba(46, 52, 64, 0.1);
+  --decor-glow-1:     rgba(47, 125, 148, 0.15);
+  --decor-glow-2:     rgba(74, 123, 167, 0.12);
+  --decor-glow-3:     rgba(59, 139, 138, 0.1);
+  --bg:               #f7f9fc;
+  --surface:          #eceff4;
+  --line:             #dbe1ea;
+  --muted:            #445060;
+  --grid:             rgba(46, 52, 64, 0.08);
+  --err:              #b0505a;
+  --ok:               #5d8a45;
+  --code-k:           #96628f;
+  --code-s:           #5d8a45;
+  --code-c:           #7b8797;
+  --code-n:           #4a7ba7;
+  --serif:            'Manrope', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+/* ---- Theme: solarized (light) -------------------------------- */
+:root[data-theme="solarized"] {
+  --crust:            #eee8d5;
+  --mantle:           #f5efdc;
+  --base:             #fdf6e3;
+  --surface0:         #e3ddc8;
+  --surface1:         #c9c3ad;
+  --surface2:         #a8a48e;
+  --overlay0:         #839496;
+  --overlay1:         #657b83;
+  --subtext0:         #586e75;
+  --subtext1:         #3f5b62;
+  --text:             #073642;
+  --lavender:         #8a8fd0;
+  --blue:             #268bd2;
+  --sapphire:         #1f8fa8;
+  --sky:              #2aa198;
+  --teal:             #21958c;
+  --green:            #859900;
+  --yellow:           #b58900;
+  --peach:            #cb4b16;
+  --red:              #dc322f;
+  --mauve:            #6c71c4;
+  --pink:             #d33682;
+  --accent:           #268bd2;
+  --accent-2:         #6c71c4;
+  --accent-3:         #21958c;
+  --accent-soft:      rgba(38, 139, 210, 0.09);
+  --accent-line:      rgba(38, 139, 210, 0.34);
+  --glow:             rgba(38, 139, 210, 0.22);
+  --gradient:         linear-gradient(115deg, #268bd2, #6c71c4 58%, #21958c);
+  --accent-fade:      linear-gradient(90deg, #268bd2, rgba(38, 139, 210, 0.45) 62%, transparent);
+  --surface-soft:     rgba(227, 221, 200, 0.42);
+  --crust-overlay:    rgba(238, 232, 213, 0.88);
+  --scrim:            rgba(7, 54, 66, 0.26);
+  --hairline:         rgba(7, 54, 66, 0.11);
+  --shadow-md:        0 8px 28px rgba(7, 54, 66, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(7, 54, 66, 0.2184);
+  --code-shadow:      0 6px 26px rgba(7, 54, 66, 0.168);
+  --font-display:     'Outfit', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Lora', Georgia, 'Times New Roman', serif;
+  --font-mono:        'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   600;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(7, 54, 66, 0.07);
+  --decor-dot:        rgba(7, 54, 66, 0.1);
+  --decor-glow-1:     rgba(38, 139, 210, 0.15);
+  --decor-glow-2:     rgba(108, 113, 196, 0.12);
+  --decor-glow-3:     rgba(33, 149, 140, 0.1);
+  --bg:               #fdf6e3;
+  --surface:          #f5efdc;
+  --line:             #e3ddc8;
+  --muted:            #586e75;
+  --grid:             rgba(7, 54, 66, 0.08);
+  --err:              #dc322f;
+  --ok:               #859900;
+  --code-k:           #6c71c4;
+  --code-s:           #859900;
+  --code-c:           #839496;
+  --code-n:           #268bd2;
+  --serif:            'Outfit', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'Source Code Pro', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Lora', Georgia, 'Times New Roman', serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+/* ---- Theme: paper (light) -------------------------------- */
+:root[data-theme="paper"] {
+  --crust:            #efe8dc;
+  --mantle:           #f7f2e9;
+  --base:             #fdfbf5;
+  --surface0:         #e4dccc;
+  --surface1:         #cec4b0;
+  --surface2:         #b0a48d;
+  --overlay0:         #8b8069;
+  --overlay1:         #6e6553;
+  --subtext0:         #4d4535;
+  --subtext1:         #38311f;
+  --text:             #211c11;
+  --lavender:         #6f5ba8;
+  --blue:             #2d5fa8;
+  --sapphire:         #1f7f96;
+  --sky:              #10788f;
+  --teal:             #1c7a6b;
+  --green:            #3f7a2e;
+  --yellow:           #9a6c12;
+  --peach:            #b35311;
+  --red:              #a81f2c;
+  --mauve:            #7a3f9c;
+  --pink:             #a83f77;
+  --accent:           #a81f2c;
+  --accent-2:         #1f7f96;
+  --accent-3:         #9a6c12;
+  --accent-soft:      rgba(168, 31, 44, 0.09);
+  --accent-line:      rgba(168, 31, 44, 0.34);
+  --glow:             rgba(168, 31, 44, 0.22);
+  --gradient:         linear-gradient(115deg, #a81f2c, #1f7f96 58%, #9a6c12);
+  --accent-fade:      linear-gradient(90deg, #a81f2c, rgba(168, 31, 44, 0.45) 62%, transparent);
+  --surface-soft:     rgba(228, 220, 204, 0.42);
+  --crust-overlay:    rgba(239, 232, 220, 0.88);
+  --scrim:            rgba(33, 28, 17, 0.26);
+  --hairline:         rgba(33, 28, 17, 0.11);
+  --shadow-md:        0 8px 28px rgba(33, 28, 17, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(33, 28, 17, 0.2184);
+  --code-shadow:      0 6px 26px rgba(33, 28, 17, 0.168);
+  --font-display:     'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-body:        'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0.003em;
+  --decor-line:       rgba(33, 28, 17, 0.07);
+  --decor-dot:        rgba(33, 28, 17, 0.1);
+  --decor-glow-1:     rgba(168, 31, 44, 0.15);
+  --decor-glow-2:     rgba(31, 127, 150, 0.12);
+  --decor-glow-3:     rgba(154, 108, 18, 0.1);
+  --bg:               #fdfbf5;
+  --surface:          #f7f2e9;
+  --line:             #e4dccc;
+  --muted:            #4d4535;
+  --grid:             rgba(33, 28, 17, 0.08);
+  --err:              #a81f2c;
+  --ok:               #3f7a2e;
+  --code-k:           #7a3f9c;
+  --code-s:           #3f7a2e;
+  --code-c:           #8b8069;
+  --code-n:           #2d5fa8;
+  --serif:            'Fraunces', Georgia, 'Times New Roman', serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Newsreader', Georgia, 'Times New Roman', serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+/* ---- Theme: rose quartz (light) -------------------------------- */
+:root[data-theme="rosequartz"],
+:root[data-theme="rose-quartz"] {
+  --crust:            #f2e9e1;
+  --mantle:           #faf4ed;
+  --base:             #fffaf3;
+  --surface0:         #ece0d8;
+  --surface1:         #d8ccc6;
+  --surface2:         #bdb0ae;
+  --overlay0:         #9893a5;
+  --overlay1:         #7d7791;
+  --subtext0:         #625b7d;
+  --subtext1:         #55506e;
+  --text:             #423d5c;
+  --lavender:         #a68fc0;
+  --blue:             #286983;
+  --sapphire:         #2f7d92;
+  --sky:              #56949f;
+  --teal:             #4a9188;
+  --green:            #5a8f52;
+  --yellow:           #ea9d34;
+  --peach:            #d7827e;
+  --red:              #b4637a;
+  --mauve:            #907aa9;
+  --pink:             #c4759a;
+  --accent:           #b4637a;
+  --accent-2:         #907aa9;
+  --accent-3:         #56949f;
+  --accent-soft:      rgba(180, 99, 122, 0.09);
+  --accent-line:      rgba(180, 99, 122, 0.34);
+  --glow:             rgba(180, 99, 122, 0.22);
+  --gradient:         linear-gradient(115deg, #b4637a, #907aa9 58%, #56949f);
+  --accent-fade:      linear-gradient(90deg, #b4637a, rgba(180, 99, 122, 0.45) 62%, transparent);
+  --surface-soft:     rgba(236, 224, 216, 0.42);
+  --crust-overlay:    rgba(242, 233, 225, 0.88);
+  --scrim:            rgba(66, 61, 92, 0.26);
+  --hairline:         rgba(66, 61, 92, 0.11);
+  --shadow-md:        0 8px 28px rgba(66, 61, 92, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(66, 61, 92, 0.2184);
+  --code-shadow:      0 6px 26px rgba(66, 61, 92, 0.168);
+  --font-display:     'Playfair Display', Georgia, 'Times New Roman', serif;
+  --font-body:        'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.02em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(66, 61, 92, 0.07);
+  --decor-dot:        rgba(66, 61, 92, 0.1);
+  --decor-glow-1:     rgba(180, 99, 122, 0.15);
+  --decor-glow-2:     rgba(144, 122, 169, 0.12);
+  --decor-glow-3:     rgba(86, 148, 159, 0.1);
+  --bg:               #fffaf3;
+  --surface:          #faf4ed;
+  --line:             #ece0d8;
+  --muted:            #625b7d;
+  --grid:             rgba(66, 61, 92, 0.08);
+  --err:              #b4637a;
+  --ok:               #5a8f52;
+  --code-k:           #907aa9;
+  --code-s:           #5a8f52;
+  --code-c:           #9893a5;
+  --code-n:           #286983;
+  --serif:            'Playfair Display', Georgia, 'Times New Roman', serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Figtree', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+/* ---- Theme: swiss (light) -------------------------------- */
+:root[data-theme="swiss"] {
+  --crust:            #f0f0f0;
+  --mantle:           #f8f8f8;
+  --base:             #ffffff;
+  --surface0:         #dcdcdc;
+  --surface1:         #bebebe;
+  --surface2:         #9a9a9a;
+  --overlay0:         #767676;
+  --overlay1:         #5a5a5a;
+  --subtext0:         #3a3a3a;
+  --subtext1:         #222222;
+  --text:             #0a0a0a;
+  --lavender:         #4b4b8f;
+  --blue:             #1a4fd6;
+  --sapphire:         #0a6e8a;
+  --sky:              #0e7490;
+  --teal:             #0f766e;
+  --green:            #15803d;
+  --yellow:           #a16207;
+  --peach:            #c2410c;
+  --red:              #e01b24;
+  --mauve:            #5b21b6;
+  --pink:             #be185d;
+  --accent:           #e01b24;
+  --accent-2:         #0a0a0a;
+  --accent-3:         #5a5a5a;
+  --accent-soft:      rgba(224, 27, 36, 0.09);
+  --accent-line:      rgba(224, 27, 36, 0.34);
+  --glow:             rgba(224, 27, 36, 0.22);
+  --gradient:         linear-gradient(115deg, #e01b24, #0a0a0a 58%, #5a5a5a);
+  --accent-fade:      linear-gradient(90deg, #e01b24, rgba(224, 27, 36, 0.45) 62%, transparent);
+  --surface-soft:     rgba(220, 220, 220, 0.42);
+  --crust-overlay:    rgba(240, 240, 240, 0.88);
+  --scrim:            rgba(10, 10, 10, 0.26);
+  --hairline:         rgba(10, 10, 10, 0.11);
+  --shadow-md:        0 8px 28px rgba(10, 10, 10, 0.17639999999999997);
+  --shadow-lg:        0 24px 68px rgba(10, 10, 10, 0.2184);
+  --code-shadow:      0 6px 26px rgba(10, 10, 10, 0.168);
+  --font-display:     'Archivo', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   900;
+  --display-tracking: -0.045em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(10, 10, 10, 0.07);
+  --decor-dot:        rgba(10, 10, 10, 0.1);
+  --decor-glow-1:     rgba(224, 27, 36, 0.15);
+  --decor-glow-2:     rgba(10, 10, 10, 0.12);
+  --decor-glow-3:     rgba(90, 90, 90, 0.1);
+  --bg:               #ffffff;
+  --surface:          #f8f8f8;
+  --line:             #dcdcdc;
+  --muted:            #3a3a3a;
+  --grid:             rgba(10, 10, 10, 0.08);
+  --err:              #e01b24;
+  --ok:               #15803d;
+  --code-k:           #5b21b6;
+  --code-s:           #15803d;
+  --code-c:           #767676;
+  --code-n:           #1a4fd6;
+  --serif:            'Archivo', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+  --crust:            #11111b;
+  --mantle:           #181825;
+  --base:             #1e1e2e;
+  --surface0:         #313244;
+  --surface1:         #45475a;
+  --surface2:         #585b70;
+  --overlay0:         #6c7086;
+  --overlay1:         #7f849c;
+  --subtext0:         #a6adc8;
+  --subtext1:         #bac2de;
+  --text:             #cdd6f4;
+  --lavender:         #b4befe;
+  --blue:             #89b4fa;
+  --sapphire:         #74c7ec;
+  --sky:              #89dceb;
+  --teal:             #94e2d5;
+  --green:            #a6e3a1;
+  --yellow:           #f9e2af;
+  --peach:            #fab387;
+  --red:              #f38ba8;
+  --mauve:            #cba6f7;
+  --pink:             #f5c2e7;
+  --accent:           #cba6f7;
+  --accent-2:         #89b4fa;
+  --accent-3:         #89dceb;
+  --accent-soft:      rgba(203, 166, 247, 0.1);
+  --accent-line:      rgba(203, 166, 247, 0.42);
+  --glow:             rgba(203, 166, 247, 0.34);
+  --gradient:         linear-gradient(115deg, #cba6f7, #89b4fa 58%, #89dceb);
+  --accent-fade:      linear-gradient(90deg, #cba6f7, rgba(203, 166, 247, 0.45) 62%, transparent);
+  --surface-soft:     rgba(49, 50, 68, 0.34);
+  --crust-overlay:    rgba(17, 17, 27, 0.84);
+  --scrim:            rgba(0, 0, 0, 0.5);
+  --hairline:         rgba(205, 214, 244, 0.09);
+  --shadow-md:        0 8px 28px rgba(0, 0, 0, 0.42);
+  --shadow-lg:        0 24px 68px rgba(0, 0, 0, 0.52);
+  --code-shadow:      0 6px 26px rgba(0, 0, 0, 0.4);
+  --font-display:     'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-body:        'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:        'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --display-weight:   700;
+  --display-tracking: -0.025em;
+  --display-case:     none;
+  --body-tracking:    0;
+  --decor-line:       rgba(205, 214, 244, 0.05);
+  --decor-dot:        rgba(205, 214, 244, 0.085);
+  --decor-glow-1:     rgba(203, 166, 247, 0.2);
+  --decor-glow-2:     rgba(137, 180, 250, 0.16);
+  --decor-glow-3:     rgba(137, 220, 235, 0.13);
+  --bg:               #1e1e2e;
+  --surface:          #181825;
+  --line:             #313244;
+  --muted:            #a6adc8;
+  --grid:             rgba(205, 214, 244, 0.06);
+  --err:              #f38ba8;
+  --ok:               #a6e3a1;
+  --code-k:           #cba6f7;
+  --code-s:           #a6e3a1;
+  --code-c:           #6c7086;
+  --code-n:           #89b4fa;
+  --serif:            'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --mono:             'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans:             'Inter', system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --ease:             cubic-bezier(0.22, 1, 0.36, 1);
+  --measure:          44rem;
+  --wide:             64rem;
+  --max-width:        72rem;
+    color-scheme: dark;
+  }
+}
+
+/* ---- Reset + page ----------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  /* Permanent graph-paper ground: 32px squares in faint accent. Ties the diagrams' grid to the page. */
+  background-image: linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+  color: var(--text);
+  font: 1rem/1.7 var(--mono);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+a { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 0.15em; }
+a:hover { text-decoration-color: var(--accent); }
+svg { display: block; max-width: 100%; height: auto; }
+svg text { font-family: var(--mono); fill: var(--text); }
+code, pre, .num { font-family: var(--mono); }
+p code, li code, td code { font-size: 0.95em; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0.05em 0.35em; }
+
+/* ---- Document column & width limits ------------------------------------------ */
+.doc { max-width: var(--measure); margin: 0 auto; padding: clamp(2rem, 5vw, 4rem) clamp(1.25rem, 4vw, 2.5rem) 6rem; }
+.doc > *, .doc section > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+
+/* Visual elements breakout: permitted to go beyond the prose column up to --wide or --max-width */
+figure.wide, .wide, .breakout {
+  width: min(var(--wide), 100vw - 2.5rem);
+  max-width: none;
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+.full-bleed {
+  width: min(var(--max-width), 100vw - 2.5rem);
+  max-width: none;
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Chrome bar: running head above the title. Mono, uppercase, hairline. */
+.chrome { display: flex; justify-content: space-between; gap: 1rem; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); padding-bottom: 0.6rem; border-bottom: 1.5px solid var(--text); margin-bottom: 2.5rem; }
+.chrome b { color: var(--text); font-weight: 500; }
+.tag { display: inline-block; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; padding: 0.15em 0.55em; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; vertical-align: middle; }
+
+/* Header: direct, clean first screen. Staggers in once on load. */
+.doc-header { padding-bottom: 1.75rem; border-bottom: 1px solid var(--line); margin-bottom: 2.25rem; }
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.chrome, .doc-header > * { animation: rise 700ms var(--ease) both; }
+.chrome { animation-delay: 0ms; }
+.doc-header > :nth-child(1) { animation-delay: 80ms; }
+.doc-header > :nth-child(2) { animation-delay: 200ms; }
+.doc-header > :nth-child(3) { animation-delay: 320ms; }
+.eyebrow { font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 0 0 0.75rem; }
+h1 { font-family: var(--serif); font-weight: var(--display-weight, 700); font-size: clamp(2.25rem, 4.5vw, 3.25rem); line-height: 1.08; letter-spacing: var(--display-tracking, -0.01em); text-transform: var(--display-case, none); margin: 0 0 0.9rem; }
+.dek { font-family: var(--serif); font-style: italic; font-size: 1.35rem; line-height: 1.45; color: var(--muted); margin: 0; }
+.meta { color: var(--muted); font-size: 0.9rem; margin-top: 0.75rem; }
+
+h2 { font-family: var(--serif); font-weight: var(--display-weight, 700); font-size: 1.75rem; line-height: 1.2; letter-spacing: var(--display-tracking, 0); margin: 3rem 0 1rem; position: relative; }
+h3 { font-family: var(--serif); font-weight: var(--display-weight, 700); font-size: 1.3rem; line-height: 1.3; margin: 2rem 0 0.75rem; position: relative; }
+/* Stub rule: the 36px accent hairline under every idea heading. The system's small punctuation mark. */
+h2::after, h3::after { content: ""; display: block; width: 36px; height: 2px; background: var(--accent); margin-top: 0.6rem; }
+/* Folio: idea number in the left margin, mono. <h2 data-n="03"> */
+[data-n]::before { content: attr(data-n); white-space: nowrap; position: absolute; right: 100%; margin-right: 1rem; top: 0.45em; font-family: var(--mono); font-weight: 400; font-size: 0.75rem; letter-spacing: 0.1em; color: var(--accent); }
+@media (max-width: 64rem) { [data-n]::before { position: static; display: block; margin: 0 0 0.35rem; } }
+/* Drop cap on the first paragraph of the context section. */
+.dropcap::first-letter { font-family: var(--serif); font-weight: 700; font-size: 3.4em; line-height: 0.8; float: left; margin: 0.08em 0.12em 0 0; color: var(--accent); }
+/* Magazine end mark after the last idea. */
+.end-mark { text-align: center; color: var(--accent); font-size: 0.9rem; margin: 3rem 0 0; letter-spacing: 0.4em; }
+h2 + p, h3 + p { margin-top: 0; }
+p { margin: 0 0 1.1rem; letter-spacing: var(--body-tracking, normal); }
+ul, ol { padding-left: 1.4rem; margin: 0 0 1.1rem; }
+li { margin: 0.3rem 0; }
+ul { list-style: none; padding-left: 1.4rem; }
+ul > li { position: relative; }
+ul > li::before { content: "—"; position: absolute; left: -1.4rem; color: var(--accent); font-family: var(--mono); }   /* newspaper dash, never a dot */
+ol li::marker { color: var(--accent); font-family: var(--mono); }
+mark { background: var(--accent-soft); color: var(--text); padding: 0 0.15em; border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 3rem 0; }
+
+/* Summary block (TL;DR). */
+.summary { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.1rem 1.4rem; margin: 0 0 2rem; box-shadow: var(--shadow-md); }
+.summary p:last-child { margin-bottom: 0; }
+
+/* Aside: a caveat, an "only when". */
+.aside { margin: 1.25rem 0; padding: 0.8rem 1.1rem; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 0.98rem; border-radius: 0 6px 6px 0; }
+.aside.err { border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+.aside p:last-child { margin-bottom: 0; }
+
+/* Callouts: key insights & alerts */
+.callout { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1.1rem 1.4rem; margin: 1.5rem 0; box-shadow: var(--shadow-md); }
+.callout.insight { border-left-color: var(--accent); background: var(--accent-soft); }
+.callout.warn { border-left-color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+.callout.ok { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.callout h4 { margin: 0 0 0.4rem; font-size: 0.82rem; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); }
+.callout.warn h4 { color: var(--err); }
+.callout.ok h4 { color: var(--ok); }
+.callout p:last-child { margin-bottom: 0; }
+
+/* Inline inspection pills & badges */
+.inspect-node { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.1em 0.45em; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 4px; color: var(--text); cursor: pointer; font-size: 0.9em; font-family: var(--mono); transition: all 200ms var(--ease); text-decoration: none; }
+.inspect-node:hover, .inspect-node.inspecting { background: var(--accent); color: var(--bg); border-color: var(--accent); box-shadow: 0 0 12px var(--glow); }
+.hl-pill { display: inline-block; padding: 0.08em 0.45em; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); border-radius: 999px; font-size: 0.85em; font-family: var(--mono); font-weight: 500; vertical-align: middle; }
+.delta { display: inline-flex; align-items: center; font-size: 0.82rem; font-family: var(--mono); padding: 0.15em 0.5em; border-radius: 4px; font-weight: 600; }
+.delta.up { color: var(--ok); background: color-mix(in srgb, var(--ok) 15%, transparent); }
+.delta.down { color: var(--err); background: color-mix(in srgb, var(--err) 15%, transparent); }
+
+/* SVG Inspect Dimming/Highlighting */
+svg.inspect-active [data-node] { opacity: 0.25; transition: opacity 250ms var(--ease); }
+svg.inspect-active .inspected, svg.inspect-active [data-node].inspected { opacity: 1 !important; filter: drop-shadow(0 0 8px var(--accent)); }
+
+/* ---- Figures -------------------------------------------------------------------- */
+figure { margin: 2rem 0; }
+figure > svg { width: 100%; }                 /* viewBox-only SVGs otherwise render at 300px */
+figcaption { color: var(--muted); font-size: 0.95rem; line-height: 1.5; margin-top: 0.75rem; text-align: center; max-width: 40rem; margin-left: auto; margin-right: auto; }
+figcaption strong { color: var(--text); font-weight: 600; }
+
+/* ---- Reveal (gentle; figures only) --------------------------------------------- */
+figure, .stats, .summary, .callout, .race-bars, .quadrant, .stepper { opacity: 0; transform: translateY(12px); transition: opacity 500ms var(--ease), transform 500ms var(--ease); }
+.in { opacity: 1 !important; transform: translateY(0) !important; }
+figure.wide.in, .wide.in, .breakout.in, .full-bleed.in { transform: translateX(-50%) !important; }
+/* Arrows draw themselves once the figure is in. */
+.draw { stroke-dasharray: 1000; stroke-dashoffset: 1000; transition: stroke-dashoffset 800ms var(--ease); transition-delay: calc(var(--i, 0) * 120ms + 200ms); }
+.in .draw { stroke-dashoffset: 0; }
+/* .pop animates opacity only: a CSS transform would override the SVG transform attribute. */
+.pop { opacity: 0; transition: opacity 400ms var(--ease); transition-delay: calc(var(--i, 0) * 120ms); }
+.in .pop { opacity: 1; }
+.grow { transform: scaleY(0); transform-origin: bottom; transition: transform 700ms var(--ease); transition-delay: calc(var(--i, 0) * 100ms + 200ms); transform-box: fill-box; }
+.in .grow { transform: none; }
+
+/* ---- Live motion (loops only while the figure is on screen: .live) ------------- */
+.packet { fill: var(--accent); }
+.packet.err { fill: var(--err); }
+.packet.ok { fill: var(--ok); }
+@keyframes pulse { 0%, 100% { stroke-width: 1.5; } 50% { stroke-width: 3.5; } }
+.live .pulse > rect, .live .pulse > circle, .live .pulse > path { animation: pulse 1.8s var(--ease) infinite; stroke: var(--accent); }
+.live .pulse-glow { animation: glowPulse 2s ease-in-out infinite; }
+@keyframes glowPulse { 0%, 100% { filter: drop-shadow(0 0 2px var(--accent)); } 50% { filter: drop-shadow(0 0 10px var(--accent)); } }
+.lit > rect, .lit > circle, .lit > path.node { stroke: var(--accent) !important; fill: var(--accent-soft) !important; }
+.lit > text { fill: var(--text); }
+.step.lit strong, .cell.lit { color: var(--accent); }
+.cell.lit { background: var(--accent-soft); border-color: var(--accent); }
+[data-cycle] > * { transition: fill 300ms var(--ease), stroke 300ms var(--ease), color 300ms var(--ease), background 300ms var(--ease), border-color 300ms var(--ease); }
+[data-cycle] > * > rect, [data-cycle] > * > circle { transition: fill 300ms var(--ease), stroke 300ms var(--ease); }
+@keyframes dash { to { stroke-dashoffset: -24; } }
+.live .flowing { stroke-dasharray: 6 6; animation: dash 1s linear infinite; }
+@keyframes streamFlow { to { stroke-dashoffset: -28; } }
+.live .stream-channel { stroke-dasharray: 8 6; animation: streamFlow 1.1s linear infinite; }
+
+/* ---- Components ------------------------------------------------------------------ */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1.5rem; margin: 2rem 0; }
+.stat { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.25rem 1rem; box-shadow: var(--shadow-md); }
+.stat .num { font-family: var(--serif); font-size: clamp(2.5rem, 4.5vw, 3.75rem); line-height: 1; color: var(--accent); font-weight: 700; letter-spacing: -0.02em; }
+.stat .unit { color: var(--muted); font-size: 0.95rem; margin-top: 0.5rem; }
+
+/* Meters / Progress Gauges */
+.meter { display: grid; gap: 0.4rem; margin: 1.2rem 0; }
+.meter-head { display: flex; justify-content: space-between; font-size: 0.85rem; font-family: var(--mono); color: var(--muted); }
+.meter-head strong { color: var(--text); }
+.meter-bar { height: 10px; background: var(--surface0); border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
+.meter-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 999px; transition: width 900ms var(--ease); }
+.meter-fill.filled { width: var(--target-pct, 0%); }
+
+/* Race Bars (Comparison Benchmarks) */
+.race-bars { display: grid; gap: 0.9rem; margin: 1.5rem 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem; box-shadow: var(--shadow-md); }
+.race-item { display: grid; grid-template-columns: clamp(5rem, 20%, 9rem) 1fr clamp(3rem, 15%, 5rem); gap: 0.8rem; align-items: center; font-size: 0.88rem; font-family: var(--mono); }
+.race-label { color: var(--text); font-weight: 500; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.race-track { height: 18px; background: var(--surface0); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.race-fill { height: 100%; width: 0%; background: var(--muted); border-radius: 3px; transition: width 1000ms var(--ease); }
+.race-fill.accent { background: var(--accent); box-shadow: 0 0 10px var(--glow); }
+.race-fill.filled { width: var(--target-pct, 0%); }
+.race-val { color: var(--text); font-weight: 600; text-align: left; }
+
+/* Quadrant Chart & 2x2 Matrix */
+.quadrant { width: 100%; margin: 2rem 0; }
+.quadrant-node { transition: transform 300ms var(--ease), filter 300ms var(--ease); cursor: pointer; }
+.quadrant-node:hover { filter: drop-shadow(0 0 8px var(--accent)); }
+
+/* Interactive Step-by-Step Stepper */
+.stepper { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem; margin: 1.5rem 0; box-shadow: var(--shadow-md); }
+.stepper-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; border-bottom: 1px solid var(--line); padding-bottom: 0.75rem; }
+.stepper-title { font-family: var(--mono); font-size: 0.82rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.stepper-nav { display: flex; align-items: center; gap: 0.75rem; }
+.step-count { font-family: var(--mono); font-size: 0.85rem; color: var(--accent); font-weight: 600; }
+.step-btn { background: var(--surface0); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 0.3em 0.75em; font-family: var(--mono); font-size: 0.8rem; cursor: pointer; transition: all 150ms var(--ease); }
+.step-btn:hover:not(:disabled) { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.step-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.step-pane { display: none; font-size: 0.95rem; line-height: 1.6; }
+.step-pane.active { display: block; animation: rise 300ms var(--ease) both; }
+[data-step] { opacity: 0.35; transition: opacity 300ms var(--ease), filter 300ms var(--ease); }
+[data-step].active-step { opacity: 1 !important; filter: drop-shadow(0 0 6px var(--accent)); }
+
+.quote { font-family: var(--serif); font-style: italic; font-size: 1.45rem; line-height: 1.4; margin: 2rem 0; padding-left: 1.25rem; border-left: 3px solid var(--accent); }
+.quote em { color: var(--accent); font-style: normal; }
+
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.panel { text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.25rem; box-shadow: var(--shadow-md); }
+.panel h4 { margin: 0 0 0.6rem; font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.panel.after { border-color: var(--accent); }
+.panel .hl { color: var(--accent); }
+.panel p:last-child, .panel ul:last-child { margin-bottom: 0; }
+
+/* Steps: ordered, sequential. Rules: unordered principles/requirements. Same shape, different marker. */
+.steps, .rules { display: grid; gap: 0.9rem; counter-reset: step; padding: 0; margin: 0; list-style: none; }
+.step, .rule { display: grid; grid-template-columns: 2.25rem 1fr; column-gap: 0.75rem; align-items: start; }
+.step::before { counter-increment: step; content: counter(step, decimal-leading-zero); }
+.rule::before { content: "—"; }
+.step::before, .rule::before { grid-column: 1; grid-row: 1 / span 2; font-family: var(--mono); color: var(--accent); font-size: 0.95rem; padding-top: 0.2rem; }
+.step > *, .rule > * { grid-column: 2; }
+.step strong, .rule strong { display: block; }
+.step span, .rule span { color: var(--muted); }
+
+.cells { display: grid; grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr)); gap: 4px; }
+/* Record / byte layout: one row of labelled fields, widths proportional to content. */
+.cells.row { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(3.5rem, auto); }
+.cells.row .cell { aspect-ratio: auto; padding: 0.55rem 0.8rem; font-size: 0.8rem; white-space: nowrap; }
+.cells.row .cell.var { min-width: 8rem; }
+.cell { aspect-ratio: 1; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+.cell.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.cell.bad { background: color-mix(in srgb, var(--err) 16%, transparent); border-color: var(--err); color: var(--text); }
+
+/* Pixel-stack bars: a bar chart built from grid cells; cells light bottom-up on reveal. */
+.pixbars { display: flex; align-items: flex-end; justify-content: center; gap: clamp(1rem, 4vw, 2.5rem); padding: 0.5rem 0 0; }
+.pixbar { display: flex; flex-direction: column-reverse; gap: 3px; align-items: stretch; width: clamp(2.5rem, 7vw, 4rem); }
+.pixbar .px { height: 10px; background: var(--grid); border-radius: 2px; transition: background 300ms var(--ease); transition-delay: calc(var(--i, 0) * 60ms); }
+.in .pixbar .px.on { background: var(--muted); }
+.in .pixbar.accent .px.on { background: var(--accent); }
+.pixbar .val { order: 1; text-align: center; font-family: var(--mono); font-size: 0.95rem; margin-bottom: 0.4rem; color: var(--text); }
+.pixbar .lbl { order: -1; text-align: center; font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-top: 0.5rem; }
+
+pre {
+  text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  padding: 1.1rem 1.25rem; overflow-x: auto; font-size: 0.92rem; line-height: 1.6; margin: 0; box-shadow: var(--code-shadow);
+}
+pre .k { color: var(--code-k); } pre .s { color: var(--code-s); } pre .c { color: var(--code-c); } pre .n { color: var(--code-n); }
+pre .hl { display: inline-block; width: 100%; background: var(--accent-soft); box-shadow: -1.25rem 0 0 var(--accent-soft), 1.25rem 0 0 var(--accent-soft); }
+
+figure:has(> .matrix), .matrix-wrap { overflow-x: auto; }
+.matrix { border-collapse: collapse; width: 100%; font-size: 0.98rem; overflow-wrap: normal; }
+.matrix th, .matrix td { padding: 0.7rem 0.9rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+.matrix thead th { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; }
+.matrix tbody th { font-weight: 500; }
+.matrix td { font-family: var(--mono); font-size: 0.9rem; color: var(--muted); }
+.matrix tr.chosen { background: var(--accent-soft); }
+.matrix tr.chosen th, .matrix tr.chosen td { color: var(--text); }
+.matrix tr.chosen th::after { content: "chosen"; color: var(--accent); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; margin-left: 0.6rem; }
+
+.formula { font-size: clamp(1.25rem, 2.2vw, 1.75rem); line-height: 1.4; text-align: center; padding: 1rem 0; }
+.formula mjx-container { color: var(--text); }
+.formula mjx-container[display="true"] { display: block !important; text-align: center !important; margin: 0 auto !important; max-width: 100%; overflow-x: auto; }
+mjx-container > svg { display: inline-block; max-width: 100%; height: auto; }   /* base svg{display:block} would pin it left */
+.formula .term { color: var(--accent); }
+.formula-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.4rem 1.5rem; color: var(--muted); font-size: 0.95rem; margin-top: 0.5rem; }
+.formula-legend code { color: var(--text); }
+.formula:not(.typeset)::after { content: attr(data-plain); display: block; font-family: var(--mono); font-size: 0.65em; color: var(--muted); }
+.formula.typeset::after { display: none; }
+
+.sources { font-size: 0.95rem; color: var(--muted); }
+.sources li { margin: 0.35rem 0; }
+
+/* ---- Responsive -------------------------------------------------------------------- */
+@media (max-width: 48rem) {
+  .panels { grid-template-columns: 1fr; }
+  figure.wide, .wide, .breakout, .full-bleed { width: 100%; margin-left: 0; transform: none; }
+  figure.wide.in, .wide.in, .breakout.in, .full-bleed.in { transform: none !important; }
+}
+
+/* ---- Print ------------------------------------------------------------------------- */
+@media print {
+  body { background-image: none; }
+  .chrome, .doc-header > * { animation: none; }
+  figure, .stats, .summary, .pop { opacity: 1 !important; transform: none !important; }
+  .draw { stroke-dashoffset: 0 !important; }
+  .grow { transform: none !important; }
+  .doc { padding: 0; max-width: 100%; }
+  figure.wide, .wide, .breakout, .full-bleed { width: 100%; margin-left: 0; transform: none !important; }
+}
+
+/* ---- Reduced motion: everything visible, nothing moves --------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  figure, .stats, .summary, .pop, .grow, .callout, .race-bars, .quadrant, .stepper { opacity: 1 !important; transform: none !important; }
+  .chrome, .doc-header > * { animation: none; opacity: 1; }
+  figure.wide, .wide, .breakout, .full-bleed { transform: translateX(-50%) !important; }
+  .draw { stroke-dashoffset: 0 !important; }
+  html { scroll-behavior: auto; }
+}
+
+details.gate { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--surface); padding: 0.9rem 1.2rem; margin: 1.25rem 0; }
+details.gate > summary { cursor: pointer; font-weight: 600; list-style: none; color: var(--accent); }
+details.gate > summary::-webkit-details-marker { display: none; }
+details.gate > summary::before { content: "+ "; font-family: var(--mono); }
+details.gate[open] > summary::before { content: "- "; }
+details.gate > summary::after { content: " (do not open until the timer ends)"; color: var(--muted); font-weight: 400; font-size: 0.85em; }
+details.gate.free > summary::after { content: ""; }
+.stage { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.timer { font-family: var(--mono); font-size: 0.85rem; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0.25rem 0.9rem; cursor: pointer; }
+.timer.running { background: var(--accent); color: var(--bg); }
+.timer.done { border-color: var(--err); color: var(--err); background: transparent; }
+.think { margin: 1rem 0 0.5rem; padding: 0.7rem 1rem; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 0.97rem; border-radius: 0 6px 6px 0; }
+.think b { color: var(--accent); }
+pre { overflow-x: auto; }
+.check { list-style: none; padding: 0; margin: 0.5rem 0; display: grid; gap: 0.4rem; }
+.check li::before { content: "[ ] "; font-family: var(--mono); color: var(--muted); }
+.matrix.wrap td { white-space: normal; }
+</style>
+</head>
+<body>
+<article class="doc">
+
+<header class="doc-header">
+  <h1>Parking Lot</h1>
+  <p class="dek">A machine-coding round, run the way the round runs: clarify, design on paper, code for an hour, then compare against a reference that stays hidden until you have typed.</p>
+</header>
+
+<section id="summary">
+  <div class="summary">
+    <p>This page is not for reading. It is a two-hour session with five timed stages. Every stage shows you only what the interviewer would show you; the answers sit behind a closed fold that you open after the timer, never before. The reference code has been compiled and run, including a two-thread race for the last spot, so what you compare against is proven, not plausible. At the end you score yourself against the tells an interviewer actually listens for and write down the three things the reference did that you did not. Those three lines are the output of the session -- not a feeling of having understood.</p>
+  </div>
+</section>
+
+<section id="context">
+  <h2>How the two hours go</h2>
+  <p class="dropcap">Stage 1, five minutes: clarify. Stage 2, ten minutes: design on paper. Stage 3, sixty minutes: code in Java, from scratch, and run a main. Stage 4, three extensions at ten minutes each. Stage 5, fifteen minutes: diff against the reference and score. Rules: the fold stays closed until the timer ends; the code must compile with <code>javac Main.java</code> and run with <code>java Main</code>; nothing is looked up except Java syntax. Missing things is the point -- the miss log at the end is what you bring back.</p>
+  <div class="stats">
+    <div class="stat"><div class="num" data-to="5">0</div><div class="unit">stages, each with a timer and a closed fold</div></div>
+    <div class="stat"><div class="num" data-to="60" data-suffix=" min">0</div><div class="unit">of typing from a blank file -- the part that is graded</div></div>
+    <div class="stat"><div class="num" data-to="3">0</div><div class="unit">extensions, in code, ten minutes each</div></div>
+    <div class="stat"><div class="num" data-to="1">0</div><div class="unit">race test the reference must pass: two gates, one spot, one winner</div></div>
+  </div>
+</section>
+
+<section id="body">
+
+<h2>Stage 1 -- Clarify</h2>
+<div class="stage"><h3 data-n="01">The interviewer says one paragraph, and the five minutes after it are graded</h3></div>
+<div class="callout insight"><h4>The prompt</h4><p>"Design a parking lot. It has multiple floors and different sizes of vehicle. Cars come in through entry gates and leave through exit gates; they get a ticket on the way in and pay on the way out. I want working code, not a diagram. Go."</p></div>
+<p class="stage"><button class="timer" data-min="5">start 5:00</button> <span>Write your clarifying questions on paper. Five to eight. Then open the fold.</span></p>
+<details class="gate"><summary>Answer key -- the questions that matter, and the answers</summary>
+<table class="matrix wrap">
+  <thead><tr><th>Ask</th><th>Answer, and what it decides</th></tr></thead>
+  <tbody>
+    <tr><th>Floors and spot sizes?</th><td>Yes: small, compact, large. Decides an enum and a per-size structure.</td></tr>
+    <tr><th>Can a big spot hold a small vehicle?</th><td>Yes -- but hand out the smallest that fits, so trucks still find large spots. Decides the fit-order table.</td></tr>
+    <tr><th>Pricing?</th><td>Flat hourly by size, rounded up; expect them to change it mid-round. Decides an interface, not a number.</td></tr>
+    <tr><th>Payment?</th><td>At exit, cash or card. Another swappable thing.</td></tr>
+    <tr><th>Many gates at once?</th><td>Yes. Decides that find-and-occupy is a critical section and where the lock lives.</td></tr>
+    <tr><th>Availability queries?</th><td>Yes: "is it full for a truck", free counts. Decides that counts are kept, not scanned.</td></tr>
+    <tr><th>Persistence, distribution?</th><td>No. In-memory, one lot. Say it out loud so nobody expects a database.</td></tr>
+    <tr><th>Out of scope?</th><td>Lost ticket, passes, EV, reservations, plate recognition -- name them, park them.</td></tr>
+  </tbody>
+</table>
+<p>Questions that waste the five minutes: what language, how many floors exactly, what currency, whether to draw a diagram. Three sentences you should have said before touching a keyboard: in-memory; one vehicle takes one spot; billing rounds up to the hour.</p>
+</details>
+
+<h2>Stage 2 -- Design on paper</h2>
+<div class="stage"><h3 data-n="02">Ten minutes of paper decides whether the next sixty are typing or thrashing</h3></div>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>On paper, in this order. Do not skip a line.</span></p>
+<ol class="steps">
+  <li>Nouns in the prompt: these are your entities. Circle the ones that have state.</li>
+  <li>Verbs: these are your use cases. Each one becomes a method on exactly one service.</li>
+  <li>For each service, what it owns -- written as <code>Map&lt;id, thing&gt;</code>, never as a list you will scan.</li>
+  <li>The one invariant that breaks under concurrency. Name the critical section and where the lock lives.</li>
+  <li>Which of the six patterns have earned a place, and the pain each one answers. If you cannot name the pain, it has not earned it.</li>
+</ol>
+<details class="gate"><summary>The intended shape -- compare against your paper</summary>
+<figure class="wide">
+<svg viewBox="0 0 960 360" role="img" aria-label="The class shape: gates call the lot, the lot owns floors and injected strategies, floors own spots, tickets reference spots and vehicles">
+  <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+  <g class="pop" style="--i:0" transform="translate(40 40)"><rect width="150" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="75" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">EntryGate</text></g>
+  <g class="pop" style="--i:0" transform="translate(40 120)"><rect width="150" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="75" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">ExitGate</text></g>
+  <path class="draw" style="--i:1" d="M190 64H240V96H280" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path class="draw" style="--i:1" d="M190 144H240V112H280" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <g class="pop" style="--i:2" transform="translate(280 72)"><rect width="170" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingLot</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">lock, active tickets</text></g>
+  <path class="draw" style="--i:3" d="M450 104H520" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="485" y="92" text-anchor="middle" font-size="12" fill="var(--muted)">owns</text>
+  <g class="pop" style="--i:4" transform="translate(520 72)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingFloor</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">size to free spots</text></g>
+  <path class="draw" style="--i:5" d="M690 104H760" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="725" y="92" text-anchor="middle" font-size="12" fill="var(--muted)">owns</text>
+  <g class="pop" style="--i:6" transform="translate(760 72)"><rect width="160" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="80" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingSpot</text><text x="80" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">size, vehicle or null</text></g>
+  <g class="pop" style="--i:7" transform="translate(280 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">3 strategies</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">pricing, assign, pay</text></g>
+  <path class="draw" style="--i:8" d="M365 220V136" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="400" y="182" text-anchor="start" font-size="12" fill="var(--muted)">injected</text>
+  <g class="pop" style="--i:7" transform="translate(520 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">Ticket</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">spot, floor, vehicle, times</text></g>
+  <path class="draw" style="--i:8" d="M690 252H840V136" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="770" y="240" text-anchor="middle" font-size="12" fill="var(--muted)">references</text>
+  <g class="pop" style="--i:7" transform="translate(760 300)"><rect width="160" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="80" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">Vehicle, 3 kinds</text></g>
+  <path class="draw" style="--i:8" d="M605 284V324H760" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="660" y="312" text-anchor="middle" font-size="12" fill="var(--muted)">references</text>
+  <g class="pop" style="--i:7" transform="translate(40 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">DisplayBoard</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">observes floors</text></g>
+</svg>
+<figcaption><strong>Owns, references, injected.</strong> Solid arrows are composition; the lot and floors own their parts. The ticket only points at things that outlive it. Dashed boxes are the swappable edges.</figcaption>
+</figure>
+<table class="matrix wrap">
+  <thead><tr><th>Line on your paper</th><th>What it should say</th></tr></thead>
+  <tbody>
+    <tr><th>Entities</th><td>Vehicle (Car, Motorcycle, Truck), ParkingSpot with a SpotType, ParkingFloor, ParkingLot, Ticket with a TicketStatus.</td></tr>
+    <tr><th>Use cases</th><td>park, unpark, availability, isFullFor -- all on ParkingLot. Gates are thin callers.</td></tr>
+    <tr><th>Owned state</th><td>Floor: <code>Map&lt;SpotType, Deque&lt;ParkingSpot&gt;&gt;</code> of free spots. Lot: <code>Map&lt;plate, Ticket&gt;</code> of active tickets, list of floors.</td></tr>
+    <tr><th>The invariant</th><td>Two gates, one last spot. Find, occupy and assign must be one atomic step. The lock lives in the lot, not the gate.</td></tr>
+    <tr><th>Patterns earned</th><td>Strategy three times (pricing, assignment, payment) because each will be asked to change. Observer once (the display board must not be wired into parking logic). One lot instance -- Singleton or injected. Decorator only when surge pricing wraps the base rule.</td></tr>
+  </tbody>
+</table>
+</details>
+
+<h2>Stage 3 -- Code</h2>
+<div class="stage"><h3 data-n="03">Sixty minutes, a blank file, and a main that runs: this is the whole score</h3></div>
+<p class="stage"><button class="timer" data-min="60">start 60:00</button> <span>One file, <code>Main.java</code>. Compile with <code>javac Main.java</code>, run with <code>java Main</code>. When the timer ends, stop typing even mid-line.</span></p>
+<p>What must exist when the timer ends, in the order you should type it:</p>
+<ul class="check">
+  <li>Two enums: vehicle type, spot type. A ticket status enum if you got there.</li>
+  <li>Vehicle and its three kinds. ParkingSpot that is dumb: free, assign, release.</li>
+  <li>The fit table: which spot sizes each vehicle may use, smallest first.</li>
+  <li>Ticket: spot, floor, vehicle, entry time, exit time, status.</li>
+  <li>An interface for pricing and one implementation. An interface for assignment and one implementation.</li>
+  <li>ParkingFloor with a per-size deque of free spots; occupy and vacate in O(1).</li>
+  <li>ParkingLot with park and unpark inside a lock; strategies injected, not constructed inside.</li>
+  <li>A main that parks a car and a truck, fails a third, unparks, and prints a fee.</li>
+</ul>
+<details class="gate"><summary>I have coded it and the timer has ended -- show the reference</summary>
+<p>The reference below is built in the order you would type it. Each step opens with the sentence you would say to yourself; the pattern gets its name only at the moment it earns it. Every line has been compiled and run; the main at the end includes a two-thread race for the last compact spot and asserts exactly one winner.</p>
+
+<h4>1. The Vehicle -- start with what enters</h4>
+<div class="think"><b>Thinking:</b> a car drives in, so start with the thing being parked. A plate and a type; Car, Motorcycle and Truck extend it so one can be special-cased later.</div>
+<div class="wide"><pre><code class="java">enum VehicleType { MOTORCYCLE, CAR, TRUCK }
+
+abstract class Vehicle {                       // the first noun: what drives in
+    final String plate;
+    final VehicleType type;
+    Vehicle(String plate, VehicleType type) { this.plate = plate; this.type = type; }
+}
+class Car        extends Vehicle { Car(String p)        { super(p, VehicleType.CAR); } }
+class Motorcycle extends Vehicle { Motorcycle(String p) { super(p, VehicleType.MOTORCYCLE); } }
+class Truck      extends Vehicle { Truck(String p)      { super(p, VehicleType.TRUCK); } }</code></pre></div>
+
+<h4>2. The ParkingSpot -- where it goes</h4>
+<div class="think"><b>Thinking:</b> a spot has a size and is either free or holding one vehicle. Keep it dumb: is it free, assign, release. Logic lives above it.</div>
+<div class="wide"><pre><code class="java">enum SpotType { SMALL, COMPACT, LARGE }        // a bigger spot fits smaller vehicles
+
+class ParkingSpot {                            // where the vehicle goes
+    final String id;
+    final SpotType type;
+    private Vehicle vehicle;                    // null == free
+    ParkingSpot(String id, SpotType type) { this.id = id; this.type = type; }
+    boolean isFree()          { return vehicle == null; }
+    void    assign(Vehicle v) { this.vehicle = v; }
+    void    release()         { this.vehicle = null; }
+}</code></pre></div>
+
+<h4>3. Fit rules -- which spot fits which vehicle</h4>
+<div class="think"><b>Thinking:</b> a big spot can hold a small car, but hand out the smallest one that fits so trucks still find large spots. Per vehicle, the sizes it may use, smallest first.</div>
+<div class="wide"><pre><code class="java">// hand out the SMALLEST fitting spot first, so large spots stay free for trucks
+final class Fit {
+    static final Map&lt;VehicleType, List&lt;SpotType&gt;&gt; ORDER = Map.of(
+        VehicleType.MOTORCYCLE, List.of(SpotType.SMALL, SpotType.COMPACT, SpotType.LARGE),
+        VehicleType.CAR,        List.of(SpotType.COMPACT, SpotType.LARGE),
+        VehicleType.TRUCK,      List.of(SpotType.LARGE));
+}</code></pre></div>
+
+<h4>4. The Ticket -- issued at entry</h4>
+<div class="think"><b>Thinking:</b> which spot, which floor, which vehicle, when it came in; the exit time is stamped later. Remembering the floor makes unpark O(1). The id comes from an atomic counter -- the original used a bare static int, safe only because park holds a lock; say which you rely on.</div>
+<div class="wide"><pre><code class="java">enum TicketStatus { ISSUED, PAID, LOST, CLOSED }
+
+class Ticket {                                 // issued at entry, priced at exit
+<span class="hl">    private static final AtomicInteger SEQ = new AtomicInteger();</span>
+    final int id;
+    final ParkingSpot spot;
+    final ParkingFloor floor;                  // remembered -&gt; unpark is O(1)
+    final Vehicle vehicle;
+    final long entryMs;
+    long exitMs;
+    TicketStatus status = TicketStatus.ISSUED;
+    Ticket(ParkingSpot spot, ParkingFloor floor, Vehicle vehicle) {
+        this.id = SEQ.incrementAndGet(); this.spot = spot; this.floor = floor; this.vehicle = vehicle;
+        this.entryMs = System.currentTimeMillis();
+    }
+}</code></pre></div>
+
+<h4>5. Pricing -- the first "make it swappable"</h4>
+<div class="think"><b>Thinking:</b> flat hourly by size, but they will ask for weekend surge. So the fee is not hard-coded; it sits behind an interface and is injected. <b>A swappable algorithm behind an interface -- that is Strategy, and this is the moment it earned its name.</b></div>
+<div class="wide"><pre><code class="java">// &quot;they&#x27;ll want to change pricing&quot; -&gt; hide it behind an interface -&gt; Strategy
+interface PricingStrategy { double price(Ticket t); }
+
+class FlatHourlyPricing implements PricingStrategy {
+    private static final Map&lt;SpotType, Integer&gt; RATE =
+        Map.of(SpotType.SMALL, 10, SpotType.COMPACT, 20, SpotType.LARGE, 40);
+    public double price(Ticket t) {
+        long ms = t.exitMs - t.entryMs;
+        long hours = Math.max(1, (long) Math.ceil(ms / 3600000.0));   // bill &gt;= 1 hr
+        return hours * RATE.get(t.spot.type);
+    }
+}</code></pre></div>
+
+<h4>6. Spot assignment -- Strategy again</h4>
+<div class="think"><b>Thinking:</b> smallest-fit today, nearest-to-exit tomorrow. Same shape, same answer: hide the choice behind an interface so the lot never changes.</div>
+<div class="wide"><pre><code class="java">// &quot;smallest fit today, nearest-to-exit tomorrow&quot; -&gt; same shape -&gt; Strategy again
+interface SpotAssignmentStrategy { ParkingSpot find(ParkingFloor floor, VehicleType type); }
+
+class SmallestFitStrategy implements SpotAssignmentStrategy {
+    public ParkingSpot find(ParkingFloor floor, VehicleType type) {
+        for (SpotType st : Fit.ORDER.get(type)) {     // smallest fitting size first
+            ParkingSpot s = floor.peekFree(st);
+            if (s != null) return s;
+        }
+        return null;
+    }
+}</code></pre></div>
+
+<h4>7. The Floor and the live board -- Observer emerges</h4>
+<div class="think"><b>Thinking:</b> a floor holds spots, and finding a free one must not scan: a map from size to a deque of free spots gives O(1). The display board must update without parking logic knowing screens exist, so the floor just publishes "occupancy changed". <b>A notifier decoupled from its listeners -- that is Observer.</b> Note occupy: the assigned spot is the head that was just peeked, so it is a poll, not a linear remove -- the original used <code>remove(s)</code>, which quietly made the O(1) claim false.</div>
+<div class="wide"><pre><code class="java">// &quot;a board should update but not be wired into parking logic&quot; -&gt; publish/subscribe -&gt; Observer
+interface ParkingObserver { void onChange(String floorId, Map&lt;SpotType, Integer&gt; free); }
+
+class DisplayBoard implements ParkingObserver {
+    public void onChange(String floorId, Map&lt;SpotType, Integer&gt; free) {
+        System.out.println(&quot;[board] &quot; + floorId + &quot; free=&quot; + free);
+    }
+}
+
+class ParkingFloor {
+    final String id;
+    private final Map&lt;SpotType, Deque&lt;ParkingSpot&gt;&gt; free = new EnumMap&lt;&gt;(SpotType.class);
+    private final Map&lt;String, ParkingSpot&gt; all = new HashMap&lt;&gt;();
+    private final List&lt;ParkingObserver&gt; observers = new ArrayList&lt;&gt;();
+
+    ParkingFloor(String id) {
+        this.id = id;
+        for (SpotType st : SpotType.values()) free.put(st, new ArrayDeque&lt;&gt;());
+    }
+    void addObserver(ParkingObserver o) { observers.add(o); }
+    void addSpot(ParkingSpot s)         { all.put(s.id, s); free.get(s.type).push(s); }
+    boolean hasSpot(String id)          { return all.containsKey(id); }
+    ParkingSpot peekFree(SpotType st)   { return free.get(st).peek(); }   // O(1)
+    int freeCount(SpotType st)          { return free.get(st).size(); }   // O(1)
+
+<span class="hl">    void occupy(ParkingSpot s) {                 // O(1): the assigned spot is the head we just peeked</span>
+<span class="hl">        Deque&lt;ParkingSpot&gt; q = free.get(s.type);</span>
+<span class="hl">        if (q.peek() == s) q.poll(); else q.remove(s);</span>
+        notifyObservers();
+    }
+    void vacate(ParkingSpot s) { free.get(s.type).push(s);   notifyObservers(); }
+
+    private void notifyObservers() {
+        Map&lt;SpotType, Integer&gt; counts = new EnumMap&lt;&gt;(SpotType.class);
+        for (SpotType st : SpotType.values()) counts.put(st, free.get(st).size());
+        for (ParkingObserver o : observers) o.onChange(id, counts);
+    }
+}</code></pre></div>
+
+<h4>8. The Lot ties it together -- the lock, and payment</h4>
+<div class="think"><b>Thinking:</b> one lot owns floors, injected strategies and active tickets. Many gates call park at once, so find-and-occupy-and-assign is one critical section under one lock. Payment at exit is another swappable thing: Strategy a third time. The same plate parking twice is rejected before anything is touched -- the original silently overwrote the ticket.</div>
+<div class="wide"><pre><code class="java">interface PaymentProcessor { boolean pay(double amount); }              // Strategy #3
+class CardPayment implements PaymentProcessor { public boolean pay(double a) { /* gateway */ return true; } }
+class CashPayment implements PaymentProcessor { public boolean pay(double a) { return true; } }
+
+class ParkingLot {                                   // one source of truth (Singleton)
+    private static ParkingLot instance;
+    private final List&lt;ParkingFloor&gt; floors = new ArrayList&lt;&gt;();
+    private final Map&lt;String, Ticket&gt; active = new ConcurrentHashMap&lt;&gt;();
+    private final ReentrantLock lock = new ReentrantLock();
+    private PricingStrategy pricing;
+    private SpotAssignmentStrategy assignment;
+
+    private ParkingLot() {}
+    static synchronized ParkingLot getInstance() {
+        if (instance == null) instance = new ParkingLot();
+        return instance;
+    }
+    void configure(PricingStrategy p, SpotAssignmentStrategy a) { pricing = p; assignment = a; }
+    void addFloor(ParkingFloor f) { floors.add(f); }
+
+    Ticket park(Vehicle v) {
+        lock.lock();                                  // critical section: find + occupy + assign
+        try {
+<span class="hl">            if (active.containsKey(v.plate)) throw new IllegalStateException(&quot;Already parked: &quot; + v.plate);</span>
+            for (ParkingFloor floor : floors) {
+                ParkingSpot spot = assignment.find(floor, v.type);
+                if (spot != null) {
+                    floor.occupy(spot);
+                    spot.assign(v);
+                    Ticket t = new Ticket(spot, floor, v);
+                    active.put(v.plate, t);
+                    return t;
+                }
+            }
+            throw new IllegalStateException(&quot;Lot full for &quot; + v.type);
+        } finally { lock.unlock(); }
+    }
+
+    double unpark(String plate, PaymentProcessor payment) {
+        lock.lock();
+        try {
+            Ticket t = active.remove(plate);
+            if (t == null) throw new NoSuchElementException(&quot;No active ticket: &quot; + plate);
+            t.exitMs = System.currentTimeMillis();
+            double fee = pricing.price(t);
+            if (!payment.pay(fee)) throw new IllegalStateException(&quot;Payment failed&quot;);
+            t.status = TicketStatus.CLOSED;
+            t.spot.release();
+            t.floor.vacate(t.spot);                   // O(1): ticket knew its floor
+            return fee;
+        } finally { lock.unlock(); }
+    }
+}</code></pre></div>
+
+<h4>9. Prove it works -- including the race</h4>
+<div class="think"><b>Thinking:</b> a main that parks, fills, rejects and unparks -- and then two gates racing for one compact spot on a thread pool. Exactly one must win; the assertion is what makes the lock a claim rather than a hope.</div>
+<div class="wide"><pre><code class="java">public class Main {
+    public static void main(String[] args) throws Exception {
+        ParkingLot lot = ParkingLot.getInstance();
+        lot.configure(new FlatHourlyPricing(), new SmallestFitStrategy());
+
+        ParkingFloor f1 = new ParkingFloor(&quot;F1&quot;);
+        f1.addObserver(new DisplayBoard());
+        f1.addSpot(new ParkingSpot(&quot;F1-S1&quot;, SpotType.SMALL));
+        f1.addSpot(new ParkingSpot(&quot;F1-C1&quot;, SpotType.COMPACT));
+        f1.addSpot(new ParkingSpot(&quot;F1-L1&quot;, SpotType.LARGE));
+        lot.addFloor(f1);
+
+        Ticket t = lot.park(new Car(&quot;KA01AB1234&quot;));       // -&gt; COMPACT
+        System.out.println(&quot;parked at &quot; + t.spot.id);
+        lot.park(new Truck(&quot;KA02CD9999&quot;));                // -&gt; LARGE
+        try { lot.park(new Car(&quot;KA03EF0001&quot;)); }          // compact+large gone, small can&#x27;t fit
+        catch (Exception e) { System.out.println(&quot;expected: &quot; + e.getMessage()); }
+        System.out.println(&quot;availability &quot; + lot.availability() + &quot; fullForCar=&quot; + lot.isFullFor(VehicleType.CAR));
+        double fee = lot.unpark(&quot;KA01AB1234&quot;, new CardPayment());
+        System.out.println(&quot;fee for car: &quot; + fee);        // 1 hr * 20 = 20
+
+<span class="hl">        // the race: two gates, one compact spot, exactly one must win</span>
+        ExitGate exit = new ExitGate(lot); EntryGate g1 = new EntryGate(lot), g2 = new EntryGate(lot);
+<span class="hl">        ExecutorService pool = Executors.newFixedThreadPool(2);</span>
+<span class="hl">        Future&lt;Ticket&gt; a = pool.submit(() -&gt; g1.admit(new Car(&quot;RACE-A&quot;)));</span>
+<span class="hl">        Future&lt;Ticket&gt; b = pool.submit(() -&gt; g2.admit(new Car(&quot;RACE-B&quot;)));</span>
+        int wins = 0;
+        for (Future&lt;Ticket&gt; f : List.of(a, b)) { try { f.get(); wins++; } catch (ExecutionException e) { System.out.println(&quot;loser: &quot; + e.getCause().getMessage()); } }
+        pool.shutdown();
+<span class="hl">        System.out.println(&quot;race winners = &quot; + wins + &quot; (must be 1)&quot;);</span>
+<span class="hl">        if (wins != 1) throw new AssertionError(&quot;double-booking!&quot;);</span>
+        System.out.println(&quot;lost ticket fee: &quot; + lot.reportLost(wins == 1 &amp;&amp; !a.isCancelled() ? plateOf(a, b) : &quot;RACE-A&quot;, new CashPayment(), 200));
+    }
+<span class="hl">    static String plateOf(Future&lt;Ticket&gt; a, Future&lt;Ticket&gt; b) throws Exception {</span>
+        try { return a.get().vehicle.plate; } catch (ExecutionException e) { return b.get().vehicle.plate; }
+    }
+}</code></pre></div>
+<div class="aside"><p>Recorded output: <code>parked at F1-C1</code>, <code>expected: Lot full for CAR</code>, <code>fee for car: 20.0</code>, <code>loser: Lot full for CAR</code>, <code>race winners = 1 (must be 1)</code>. The full file is at <code>lld/parking-lot/Main.java</code>; <code>javac Main.java &amp;&amp; java Main</code> reproduces it.</p></div>
+
+<h4>Concurrency -- the part that makes you "safe"</h4>
+<p>They almost always push on the race: two cars, one last spot. Naively both threads see it free and both assign. The critical section is find plus occupy plus assign, which is why the lock lives in the lot and not in the gate. Then the two upgrades you name without being asked: one global lock serialises every gate, so a lock per floor or per size bucket lets floors park in parallel; and the lock-free version makes each spot's occupant an <code>AtomicReference&lt;Vehicle&gt;</code> and does a compare-and-set from null to the vehicle, trying the next spot on failure -- more throughput, more code. In a distributed lot the same atomic assign becomes a conditional database update.</p>
+
+<h4>SOLID, mapped to this design</h4>
+<table class="matrix wrap">
+  <tbody>
+    <tr><th>S</th><td>Spot tracks its own occupancy, Floor its spots, Lot orchestrates, Strategy prices. No class does all of it.</td></tr>
+    <tr><th>O</th><td>A new pricing or assignment rule is a new class and zero edits to the lot -- Stage 4 proves it.</td></tr>
+    <tr><th>L</th><td>Any PricingStrategy drops in for another; the lot never checks the concrete type.</td></tr>
+    <tr><th>I</th><td>Interfaces are one method each; a payment class is never forced to implement pricing.</td></tr>
+    <tr><th>D</th><td>The lot depends on interfaces handed to it through configure, never on FlatHourlyPricing directly.</td></tr>
+  </tbody>
+</table>
+
+<h4>Decisions and complexity</h4>
+<table class="matrix wrap">
+  <thead><tr><th>Decision</th><th>Why, and the trade</th></tr></thead>
+  <tbody>
+    <tr><th>SpotType enum, not spot subclasses</th><td>Enough until a size gains real behaviour -- an EV spot with a charger is when the subclass pays.</td></tr>
+    <tr><th>Map of size to deque, not a scanned list</th><td>O(1) find and free against O(n); a few pointers of memory.</td></tr>
+    <tr><th>Singleton lot</th><td>One source of truth; the cost is testability. In tests, inject the lot instead of calling getInstance.</td></tr>
+    <tr><th>Global lock first</th><td>Simplicity now; name per-floor and CAS as the upgrades.</td></tr>
+    <tr><th>Ticket remembers its floor</th><td>Unpark is O(1) instead of scanning floors for the spot's home.</td></tr>
+  </tbody>
+</table>
+<p>Big-O: park is O(floors) to scan plus O(1) to take a spot; unpark O(1); availability O(floors x sizes); memory O(spots plus active tickets).</p>
+</details>
+
+<h2>Stage 4 -- Extensions</h2>
+<div class="stage"><h3 data-n="04">Three rule changes, ten minutes each, in code -- this is where seniors separate</h3></div>
+
+<h4>Extension 1 -- "Pricing is 1.5x on weekends, starting now."</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>Change as little as possible. Count the files you touched.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> pricing is a Strategy, so this is a new class and one changed line at the call site; lot, floors, spots and tickets do not move. Wrapping the old rule instead of rewriting it is a Decorator. That relief is the whole reason the interface existed.</div>
+<div class="wide"><pre><code class="java">// new rule live: 1.5x on weekends. A NEW class + one line — nothing else changes.
+class WeekendSurgePricing implements PricingStrategy {
+    private final PricingStrategy base;                    // wrap the existing rule (Decorator)
+    WeekendSurgePricing(PricingStrategy base) { this.base = base; }
+    public double price(Ticket t) {
+        double p = base.price(t);
+        DayOfWeek d = Instant.ofEpochMilli(t.exitMs)
+                             .atZone(ZoneId.systemDefault()).getDayOfWeek();
+        boolean weekend = (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY);
+        return weekend ? p * 1.5 : p;
+    }
+}
+// the only change at the call site — swap the injected strategy:
+// lot.configure(new WeekendSurgePricing(new FlatHourlyPricing()), new SmallestFitStrategy());</code></pre></div>
+</details>
+
+<h4>Extension 2 -- "A driver lost the ticket. What happens?"</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>They want the flow, the state, and the code.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> duration cannot be computed, so bill a flat daily cap. The ticket is a small state machine -- ISSUED, PAID, LOST, CLOSED -- and lost is one transition that charges the cap and frees the spot, not a special case sprinkled through unpark.</div>
+<figure>
+<div class="cells row"><div class="cell">ISSUED</div><div class="cell">pay fee</div><div class="cell">PAID</div><div class="cell on">CLOSED, spot freed</div><div class="cell bad">LOST: pay cap</div></div>
+<figcaption><strong>One extra edge.</strong> Lost goes ISSUED to LOST to CLOSED; the exit path is the same after the payment.</figcaption>
+</figure>
+<div class="wide"><pre><code class="java">    // lost ticket: bill the daily cap, free the spot, close it -- one transition, no special-casing elsewhere
+    double reportLost(String plate, PaymentProcessor payment, double dailyCap) {
+        lock.lock();
+        try {
+            Ticket t = active.remove(plate);
+            if (t == null) throw new NoSuchElementException(&quot;No active ticket: &quot; + plate);
+            t.exitMs = System.currentTimeMillis();
+            t.status = TicketStatus.LOST;
+            if (!payment.pay(dailyCap)) throw new IllegalStateException(&quot;Payment failed&quot;);
+            t.status = TicketStatus.CLOSED;
+            t.spot.release();
+            t.floor.vacate(t.spot);
+            return dailyCap;
+        } finally { lock.unlock(); }
+    }</code></pre></div>
+</details>
+
+<h4>Extension 3 -- "Ten entry gates, and the app needs 'is it full for a truck' every second."</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>Gates are actors; availability must not scan spots.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> gates are thin: they call park and unpark; the logic and the lock stay in the lot, which is exactly why ten gates are safe. Availability is O(1) per floor per size off the free counts the floor already keeps -- the map of counts is why nobody scans.</div>
+<div class="wide"><pre><code class="java">// entry / exit gates: thin actors. Real logic + the lock live in the lot,
+// which is exactly why concurrent gates are safe.
+class EntryGate {
+    private final ParkingLot lot;
+    EntryGate(ParkingLot lot) { this.lot = lot; }
+    Ticket admit(Vehicle v) { return lot.park(v); }        // print ticket, open barrier
+}
+class ExitGate {
+    private final ParkingLot lot;
+    ExitGate(ParkingLot lot) { this.lot = lot; }
+    double checkout(String plate, PaymentProcessor pay) {  // charge, then open barrier
+        return lot.unpark(plate, pay);
+    }
+}</code></pre></div>
+<div class="wide"><pre><code class="java">    // availability -- O(1) off the per-size free counts
+    Map&lt;SpotType, Integer&gt; availability() {
+        Map&lt;SpotType, Integer&gt; total = new EnumMap&lt;&gt;(SpotType.class);
+        for (SpotType st : SpotType.values()) total.put(st, 0);
+        for (ParkingFloor f : floors)
+            for (SpotType st : SpotType.values())
+                total.merge(st, f.freeCount(st), Integer::sum);
+        return total;
+    }
+    boolean isFullFor(VehicleType v) {
+        for (ParkingFloor f : floors)
+            for (SpotType st : Fit.ORDER.get(v))
+                if (f.freeCount(st) &gt; 0) return false;
+        return true;
+    }</code></pre></div>
+</details>
+<div class="aside"><p>Further asks, one line each: nearest spot to exit is a new assignment strategy over a min-heap by distance. A truck needing two adjacent spots gives spots an adjacency link, the ticket a list of spots, and occupy reserves all-or-nothing under the lock -- say the word atomic. Creating spots from a type string is when a Factory finally earns a place. Persistence is a repository behind the services with the maps swapped for a database.</p></div>
+
+<h2>Stage 5 -- Score</h2>
+<div class="stage"><h3 data-n="05">Score against the tells, then write the three lines that are the real output</h3></div>
+<p class="stage"><button class="timer" data-min="15">start 15:00</button> <span>Open your file and the reference side by side.</span></p>
+<table class="matrix wrap">
+  <thead><tr><th>Junior tell</th><th>Senior tell</th></tr></thead>
+  <tbody>
+    <tr><th>One ParkingLot class doing everything</th><td>Small classes, each with one job</td></tr>
+    <tr><th>Pricing hard-coded inside unpark</th><td>Pricing, assignment, payment injected</td></tr>
+    <tr><th>Scans every spot to find a free one</th><td>O(1) via the per-size free deque</td></tr>
+    <tr><th>Ignores the two-cars-one-spot race</th><td>Atomic critical section, names the CAS upgrade</td></tr>
+    <tr><th>Magic strings for sizes</th><td>Enums, and is-a / has-a said aloud</td></tr>
+    <tr><th>No full, lost or double-exit handling</th><td>States assumptions; handles full, lost, edge cases</td></tr>
+  </tbody>
+</table>
+<p>Relationships, said precisely because they listen for it: Car <em>is-a</em> Vehicle, a true kind-of. Lot <em>owns</em> Floors and Floor <em>owns</em> Spots -- composition, the parts have no life without the whole. Ticket <em>references</em> Spot and Vehicle -- they outlive it. The lot <em>depends on</em> a PricingStrategy it is handed -- injection, not ownership.</p>
+
+<h4>The miss log</h4>
+<p>On paper, three lines. Not "concurrency" -- the specific thing: "I removed from the deque by object, O(n), and claimed O(1)." "I let the same plate park twice." "I built the pricing strategy but constructed it inside the lot, so it was not injected." These three lines are what this session produced. Bring them back.</p>
+
+<h4>What they will grill, with the two-breath answers</h4>
+<table class="matrix pokes wrap">
+  <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+  <tbody>
+    <tr><th>Why a lock in the lot and not the gate?</th><td>The invariant is one free spot, one vehicle; it lives where the spot state lives. A lock per gate protects nothing shared.</td></tr>
+    <tr><th>One global lock -- ten gates queue?</th><td>Yes. Upgrade one: lock per floor or per size bucket. Upgrade two: CAS on the spot's occupant, try the next spot on failure.</td></tr>
+    <tr><th>Why a deque and not a list of spots?</th><td>Head is the next free spot: peek O(1), poll O(1), push O(1). A list means scanning.</td></tr>
+    <tr><th>Singleton -- how do you test it?</th><td>Do not call getInstance inside anything; pass the lot in. The singleton is a convenience at the edge, not a dependency in the middle.</td></tr>
+    <tr><th>Why does the ticket store the floor?</th><td>So unpark never searches: O(1) to the spot's home.</td></tr>
+    <tr><th>Truck needs two adjacent spots?</th><td>Adjacency link on spots, a contiguous run in assignment, a list of spots on the ticket, and all-or-nothing occupy under the lock.</td></tr>
+    <tr><th>Where would Factory go?</th><td>Nowhere yet. When spots or vehicles are created from config strings and the creation logic grows, SpotFactory.create earns a place.</td></tr>
+    <tr><th>Persistence?</th><td>A repository interface behind the services; the maps become a database table. Services unchanged.</td></tr>
+  </tbody>
+</table>
+
+<p class="end-mark">■</p>
+</section>
+
+<section id="caveats">
+  <h2>Where this stops being true</h2>
+  <ul>
+    <li>A real round may give 90 to 120 minutes and expect tests. The 60 here is deliberately tight: it trains the skeleton to come out fast.</li>
+    <li>The global lock is correct and slow. At ten gates and thousands of spots the per-floor lock or CAS is the real answer; name it unprompted.</li>
+    <li>Ticket ids from a static counter are process-wide; two lots in one process would share the sequence. Fine here, wrong in a multi-tenant service.</li>
+    <li>Prices are doubles for readability. Money in a real system is an integer of minor units.</li>
+    <li>Nothing here persists. A crash forgets every ticket -- the repository extension is where that answer starts.</li>
+  </ul>
+</section>
+
+<section id="sources">
+  <h2>Sources</h2>
+  <ul class="sources">
+    <li cite="parking-lot/Main.java"><a href="parking-lot/Main.java">Main.java</a> — the complete reference, compiled with OpenJDK 26, output recorded above.</li>
+    <li cite="../system-design/lld-parking-lot.html"><a href="../system-design/lld-parking-lot.html">Parking Lot -- LLD (original)</a> — the earlier reference this session was built from; three defects fixed here (O(n) deque removal, duplicate plate, non-atomic ticket id).</li>
+  </ul>
+</section>
+
+</article>
+
+<script>
+// ape-present runtime. Copy verbatim into the <script> at the end of <body>.
+// Covers: figure reveals, stat counters, live diagram motion (packets, pulses,
+// cycles, streaming channels), meter animations, inspect-node cross-highlighting,
+// interactive step-by-step walkthroughs, and theme switching.
+(() => {
+  if (window.__apePresent) return;
+  window.__apePresent = true;
+
+  const root = document.documentElement;
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // --- Theme --------------------------------------------------------------
+  {
+    const applyTheme = (t) => {
+      if (!t) return;
+      root.setAttribute('data-theme', t);
+      try { localStorage.setItem('ape-theme', t); } catch (_) {}
+    };
+
+    try {
+      const saved = localStorage.getItem('ape-theme');
+      if (saved) root.setAttribute('data-theme', saved);
+    } catch (_) {}
+
+    window.addEventListener('message', (e) => {
+      if (e && e.data && e.data.type === 'theme' && e.data.theme) {
+        applyTheme(e.data.theme);
+      }
+    });
+
+    try {
+      if (window.parent && window.parent !== window && window.parent.document && window.parent.document.documentElement) {
+        const parentTheme = window.parent.document.documentElement.getAttribute('data-theme');
+        if (parentTheme) root.setAttribute('data-theme', parentTheme);
+      }
+    } catch (_) {}
+
+    addEventListener('keydown', (e) => {
+      if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+      const cur = root.getAttribute('data-theme');
+      const isDark = cur === 'dark' || cur === 'midnight' ||
+        (!cur && matchMedia('(prefers-color-scheme: dark)').matches);
+      const next = isDark ? 'daylight' : 'midnight';
+      applyTheme(next);
+    });
+  }
+
+  // --- Counters -----------------------------------------------------------
+  const countUp = (el) => {
+    if (el.dataset.done) return;
+    el.dataset.done = '1';
+    const to = parseFloat(el.dataset.to);
+    const decimals = parseInt(el.dataset.decimals || '0', 10);
+    const fmt = (v) => (el.dataset.prefix || '') + v.toLocaleString(undefined, {
+      minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+    }) + (el.dataset.suffix || '');
+    if (reduced || isNaN(to)) { el.textContent = fmt(isNaN(to) ? 0 : to); return; }
+    const start = performance.now(), dur = 1200;
+    const tick = (now) => {
+      const p = Math.min(1, (now - start) / dur);
+      el.textContent = fmt(to * (1 - Math.pow(1 - p, 3)));
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+
+  // --- Meter / Race Bars ----------------------------------------------------
+  const animateMeter = (el) => {
+    const pct = el.dataset.pct || el.style.getPropertyValue('--pct') || '0%';
+    el.style.setProperty('--target-pct', pct);
+    el.classList.add('filled');
+  };
+
+  // --- Reveal once ----------------------------------------------------------
+  const targets = [...document.querySelectorAll('figure, .stats, .summary, .callout, .race-bars, .quadrant')];
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.classList.add('in');
+      e.target.querySelectorAll('.num[data-to]').forEach(countUp);
+      e.target.querySelectorAll('.meter-fill, .race-fill').forEach(animateMeter);
+      io.unobserve(e.target);
+    }
+  }, { threshold: 0.15 });
+  targets.forEach((t) => io.observe(t));
+
+  // --- Live motion: run only while the figure is on screen ------------------
+  const live = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      e.target.classList.toggle('live', e.isIntersecting);
+      e.target.querySelectorAll('svg').forEach((svg) => {
+        if (reduced) { svg.pauseAnimations(); return; }
+        e.isIntersecting ? svg.unpauseAnimations() : svg.pauseAnimations();
+      });
+    }
+  }, { threshold: 0.1 });
+  document.querySelectorAll('figure, .live-host').forEach((f) => live.observe(f));
+
+  // --- Cycles: [data-cycle="900"] lights its children in turn, forever ------
+  document.querySelectorAll('[data-cycle]').forEach((host) => {
+    const kids = [...host.children];
+    if (kids.length < 2) return;
+    const step = parseInt(host.dataset.cycle, 10) || 900;
+    let i = 0;
+    if (reduced) { kids[0].classList.add('lit'); return; }
+    setInterval(() => {
+      if (!host.closest('.live') && !host.classList.contains('live')) return;
+      kids.forEach((k) => k.classList.remove('lit'));
+      kids[i % kids.length].classList.add('lit');
+      i++;
+    }, step);
+  });
+
+  // --- Inspect-Node Cross-Highlighting (Prose <-> Diagram) ------------------
+  document.querySelectorAll('.inspect-node[data-target]').forEach((pill) => {
+    const targetId = pill.dataset.target;
+    const targetEl = document.getElementById(targetId);
+    if (!targetEl) return;
+
+    const svg = targetEl.closest('svg');
+
+    const activate = () => {
+      pill.classList.add('inspecting');
+      if (svg) svg.classList.add('inspect-active');
+      targetEl.classList.add('inspected');
+    };
+
+    const deactivate = () => {
+      pill.classList.remove('inspecting');
+      if (svg) svg.classList.remove('inspect-active');
+      targetEl.classList.remove('inspected');
+    };
+
+    pill.addEventListener('mouseenter', activate);
+    pill.addEventListener('mouseleave', deactivate);
+    pill.addEventListener('focus', activate);
+    pill.addEventListener('blur', deactivate);
+  });
+
+  // --- Interactive Step-by-Step Steppers -----------------------------------
+  document.querySelectorAll('.stepper').forEach((stepper) => {
+    const panes = [...stepper.querySelectorAll('.step-pane')];
+    const indicator = stepper.querySelector('.step-count');
+    const prevBtn = stepper.querySelector('.step-prev');
+    const nextBtn = stepper.querySelector('.step-next');
+    const targetSvgId = stepper.dataset.svg;
+    const svg = targetSvgId ? document.getElementById(targetSvgId) : null;
+    let current = 0;
+
+    const render = () => {
+      panes.forEach((p, idx) => p.classList.toggle('active', idx === current));
+      if (indicator) indicator.textContent = `${current + 1} / ${panes.length}`;
+      if (prevBtn) prevBtn.disabled = current === 0;
+      if (nextBtn) nextBtn.disabled = current === panes.length - 1;
+
+      if (svg) {
+        svg.querySelectorAll('[data-step]').forEach((el) => {
+          const stepVal = parseInt(el.dataset.step, 10);
+          el.classList.toggle('active-step', stepVal === current + 1);
+        });
+      }
+    };
+
+    if (prevBtn) prevBtn.addEventListener('click', () => { if (current > 0) { current--; render(); } });
+    if (nextBtn) nextBtn.addEventListener('click', () => { if (current < panes.length - 1) { current++; render(); } });
+    render();
+  });
+})();
+
+(function(){
+  // minimal Java highlighter: comments, strings, keywords, numbers -> base.css token classes
+  var KW=/\b(abstract|boolean|break|case|catch|class|continue|default|do|double|else|enum|extends|final|finally|for|if|implements|import|int|interface|long|new|null|package|private|protected|public|return|static|super|switch|synchronized|this|throw|throws|try|void|while|var|record|true|false)\b/g;
+  document.querySelectorAll('pre code.java').forEach(function(el){
+    var lines=el.innerHTML.split('\n').map(function(l){
+      var keep=l.match(/^<span class="hl">(.*)<\/span>$/); var body=keep?keep[1]:l;
+      var parts=body.split(/(\/\/.*$|"(?:[^"\\]|\\.)*")/);
+      body=parts.map(function(p,i){
+        if(i%2===1) return p.indexOf('//')===0?'<span class="c">'+p+'</span>':'<span class="s">'+p+'</span>';
+        return p.replace(KW,'<span class="k">$1</span>').replace(/\b(\d+(?:\.\d+)?)\b/g,'<span class="n">$1</span>');
+      }).join('');
+      return keep?'<span class="hl">'+body+'</span>':body;
+    });
+    el.innerHTML=lines.join('\n');
+  });
+  // stage timers
+  document.querySelectorAll('button.timer').forEach(function(b){
+    var total=parseInt(b.dataset.min,10)*60, left=total, id=null;
+    function show(){ var m=Math.floor(left/60), s=left%60; b.textContent=(id?'':'start ')+m+':'+(s<10?'0':'')+s; }
+    b.addEventListener('click',function(){
+      if(id){ clearInterval(id); id=null; b.classList.remove('running'); show(); return; }
+      if(left<=0) left=total; b.classList.remove('done'); b.classList.add('running');
+      id=setInterval(function(){ left--; show(); if(left<=0){ clearInterval(id); id=null; b.classList.remove('running'); b.classList.add('done'); b.textContent='time -- open the fold'; } },1000);
+      show();
+    });
+    show();
+  });
+})();
+</script>
+</body>
+</html>

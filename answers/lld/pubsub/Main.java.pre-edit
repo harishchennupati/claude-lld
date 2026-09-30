@@ -1,0 +1,629 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.util.function.BooleanSupplier;
+
+/** A subscription's life. ACTIVE is reading; PAUSED keeps the cursor but stops reading; STOPPED is finished. */
+enum SubState { ACTIVE, PAUSED, STOPPED }
+
+/** What the broker just did. A listener switches on this; a new case never changes the listener's one method. */
+enum EventType { PUBLISHED, DELIVERED, RETRIED, DEAD_LETTERED, SKIPPED, FAST_FORWARDED }
+
+/** One thing that happened, handed to every listener outside every lock. A value, so it is safe to share. */
+record Event(EventType type, String topic, long offset, String subscriptionId, int attempts, long atMs) {}
+
+/**
+ * One published message. Immutable on purpose: ONE object sits in the topic's log and is handed to twenty
+ * handlers on twenty threads, with no copying and no chance that a bad handler changes what the next one sees.
+ * The offset is the message's position in its topic's log and is assigned by the topic, never by the caller.
+ */
+record Message(long offset, String topic, String key, String payload, Map<String, String> headers, long atMs) {
+    /** Defensive copy of the headers, so the map the publisher kept cannot be edited under a handler's feet. */
+    Message { headers = headers == null ? Map.of() : Map.copyOf(headers); }
+    /** Short form for logs and demos: topic@offset[key] payload. */
+    @Override public String toString() { return topic + "@" + offset + (key == null ? "" : "[" + key + "]") + " " + payload; }
+}
+
+/** A message a subscription gave up on: what it was, who failed, after how many tries, and why. Parked, not dropped. */
+record Dead(Message message, String subscriptionId, int attempts, String reason, long atMs) {}
+
+/**
+ * Where time comes from, in both senses: what time is it, and how to wait. Injected, so a test can stamp a
+ * message with any instant and run a five-minute backoff schedule in no time at all.
+ */
+interface Clock {
+    /** Wall clock, milliseconds. The only place in this file that knows what "now" means. */
+    long nowMs();
+    /** Wait this long. A test's clock records what it was asked for and returns at once. */
+    default void sleepMs(long ms) throws InterruptedException { if (ms > 0) Thread.sleep(ms); }
+}
+
+// "a handler will fail, and 'I failed' must differ from 'done'" -> let onMessage throw -> the retry rule has something to read
+/**
+ * The subscriber's business code. It is ALLOWED to throw, and that is the whole contract: if a failure were
+ * swallowed, retry, dead-lettering and every delivery guarantee would be impossible to express. One method, so
+ * a handler can be a lambda.
+ */
+interface Handler {
+    /** Handle one message. Returning normally means "done, commit it"; throwing means "I failed, retry me". */
+    void onMessage(Message m) throws Exception;
+}
+
+/** Should this subscription see this message at all? One method, so a filter is a lambda. */
+interface Filter {
+    /** True if the subscription should be given this message; false means skip it and move the cursor on. */
+    boolean accepts(Message m);
+    /** The default: everybody sees everything, which is what fan-out means. */
+    static Filter all() { return m -> true; }
+}
+
+// "a flat 20ms retry hammers a struggling downstream" is a rule that WILL change mid-round -> put it behind an interface -> Strategy
+/**
+ * "Again, and how long do I wait?" — the whole retry rule in one method. A negative answer means give up: park
+ * the message in the dead-letter sink and move the cursor on. The failure is passed in so a policy can tell a
+ * timeout from a malformed payload without ever changing this signature.
+ */
+interface RetryPolicy {
+    /** Milliseconds to wait before attempt+1, or any negative number meaning "stop trying". */
+    long backoffMs(int attempt, Exception failure);
+}
+
+/** Where a message goes when the retry policy gives up. One method, because today it is a list and tomorrow a topic. */
+interface DeadLetterSink {
+    /** Park a message nobody could process. Must not throw; must not block the dispatcher for long. */
+    void park(Dead d);
+}
+
+// "the others must be told" must not sit inside the offset arithmetic -> announce after the unlock -> Observer
+/** Anyone who wants to hear what the broker did: metrics, a lag alarm, a trace. Called outside every lock. */
+interface BrokerListener {
+    /** One event. A listener that throws is logged and ignored; it can never break a publish or a delivery. */
+    void onEvent(Event e);
+}
+
+/** Wait the same amount every time, and give up after n attempts. The rule you start with; rarely the one you ship. */
+final class FixedDelayRetry implements RetryPolicy {
+    private final int maxAttempts; private final long delayMs;
+    FixedDelayRetry(int maxAttempts, long delayMs) { this.maxAttempts = maxAttempts; this.delayMs = delayMs; }
+    public long backoffMs(int attempt, Exception failure) { return attempt >= maxAttempts ? -1 : delayMs; }
+}
+
+/**
+ * Double the wait each time up to a cap, so a struggling downstream is not hammered: 10, 20, 40, 80 ... capped.
+ * A new class, not an edit: nothing inside Topic, Subscription or Broker moved to make this exist.
+ */
+final class ExponentialBackoff implements RetryPolicy {
+    private final int maxAttempts; private final long baseMs, capMs;
+    ExponentialBackoff(int maxAttempts, long baseMs, long capMs) { this.maxAttempts = maxAttempts; this.baseMs = baseMs; this.capMs = capMs; }
+    public long backoffMs(int attempt, Exception failure) {
+        if (attempt >= maxAttempts) return -1;
+        return Math.min(capMs, baseMs << Math.min(attempt - 1, 30));    // 1 -> base, 2 -> 2x base, 3 -> 4x base ...
+    }
+}
+
+// the invariant "a subscription always makes progress" must hold for policies that do not exist yet -> wrap every policy -> Decorator
+/**
+ * Wraps ANY retry policy and enforces the one thing a subscription cannot live without: progress. No policy —
+ * not even one written next year that forgets to give up — may run past maxAttempts or sleep longer than
+ * maxBackoffMs. The broker wraps every policy it is handed, so this is not an option a caller can forget.
+ */
+final class BoundedRetry implements RetryPolicy {
+    private final RetryPolicy base; private final int maxAttempts; private final long maxBackoffMs;
+    BoundedRetry(RetryPolicy base, int maxAttempts, long maxBackoffMs) {
+        this.base = base; this.maxAttempts = maxAttempts; this.maxBackoffMs = maxBackoffMs;
+    }
+    public long backoffMs(int attempt, Exception failure) {
+        if (attempt >= maxAttempts) return -1;                          // the hard stop: park it and move on
+        long wait = base.backoffMs(attempt, failure);
+        if (wait < 0) return -1;                                        // the policy gave up first: respect it
+        return Math.min(wait, maxBackoffMs);
+    }
+}
+
+/** The default sink: keep them in a list a human or a test can read. A real one writes to a topic or a table. */
+final class InMemoryDeadLetters implements DeadLetterSink {
+    private final List<Dead> parked = new CopyOnWriteArrayList<>();
+    public void park(Dead d) { parked.add(d); }
+    /** Everything parked so far, oldest first. */
+    List<Dead> all() { return List.copyOf(parked); }
+    /** How many messages nobody could process. The number that should be on a dashboard. */
+    int size() { return parked.size(); }
+}
+
+/**
+ * The aggregate root: one topic is an append-only log of messages plus ONE lock. Offsets are the thing that
+ * must never be duplicated or skipped, and this is the only class that assigns them. Retention is a fixed
+ * number of messages; the head is trimmed as the log grows, and how many were dropped is remembered rather
+ * than hidden. Two different topics never wait for each other, because the lock is per topic.
+ */
+final class Topic {
+    private final String name;
+    private final int maxRetained;
+    private final ArrayList<Message> log = new ArrayList<>();           // guarded by lock
+    private long baseOffset = 0;                                        // the offset of log.get(0); guarded by lock
+    private long dropped = 0;                                           // trimmed away by retention; guarded by lock
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition appended = lock.newCondition();
+
+    Topic(String name, int maxRetained) {
+        if (maxRetained < 1) throw new IllegalArgumentException("retention must be at least one message");
+        this.name = name; this.maxRetained = maxRetained;
+    }
+    /** The topic's name, which is the only thing a publisher needs to know. */
+    String name() { return name; }
+
+    /**
+     * The critical step, and the reason this class has a lock. Assigning an offset and storing at it are TWO
+     * operations: `long off = tail(); log.add(m);` outside a lock lets two publishers both claim offset 7, and
+     * ArrayList's own internals corrupt under a concurrent add. Both happen here as one step. The waiting
+     * dispatchers are signalled before the lock is released — the signal MUST happen under the same lock they
+     * check under, or a wakeup lands in the gap between their check and their wait and is lost.
+     */
+    Message append(String key, String payload, Map<String, String> headers, long atMs) {
+        lock.lock();
+        try {
+            Message m = new Message(baseOffset + log.size(), name, key, payload, headers, atMs);
+            log.add(m);
+            while (log.size() > maxRetained) {                          // O(n) today: rung 1 of the ladder is a ring buffer
+                log.remove(0); baseOffset++; dropped++;
+            }
+            appended.signalAll();
+            return m;
+        } finally { lock.unlock(); }
+    }
+
+    /** The message at this offset, or null if it has not been published yet or retention has dropped it. O(1). */
+    Message readAt(long offset) { lock.lock(); try { return at(offset); } finally { lock.unlock(); } }
+    private Message at(long offset) {                                   // lock must be held
+        long i = offset - baseOffset;
+        return (i < 0 || i >= log.size()) ? null : log.get((int) i);
+    }
+    /** The offset the NEXT message will be given. tail minus a cursor is that subscriber's lag. O(1). */
+    long tailOffset() { lock.lock(); try { return baseOffset + log.size(); } finally { lock.unlock(); } }
+    /** The oldest offset still retained. A cursor below this has fallen off the window. O(1). */
+    long earliestOffset() { lock.lock(); try { return baseOffset; } finally { lock.unlock(); } }
+    /** How many messages retention threw away. Counted, not hidden: visible loss beats invisible loss. */
+    long droppedCount() { lock.lock(); try { return dropped; } finally { lock.unlock(); } }
+    /** How many messages are in the window right now. */
+    int retained() { lock.lock(); try { return log.size(); } finally { lock.unlock(); } }
+
+    /**
+     * Wait for the message at this offset, up to a timeout. The emptiness check and the wait are inside ONE
+     * lock — the same lock the publisher signals under — and inside a `while`, which is what makes a lost
+     * wakeup impossible and a spurious one harmless. Returns null on timeout, on interrupt, or when the offset
+     * has been trimmed away, and the caller decides what to do about each.
+     */
+    Message awaitAt(long offset, long timeoutMs) {
+        lock.lock();
+        try {
+            long left = timeoutMs * 1_000_000L;
+            while (true) {
+                if (offset < baseOffset) return null;                   // retention overtook us; the caller fast-forwards
+                Message m = at(offset);
+                if (m != null) return m;
+                if (left <= 0) return null;
+                left = appended.awaitNanos(left);
+            }
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); return null; }
+        finally { lock.unlock(); }
+    }
+}
+
+// "the knobs are about to multiply" -> five optional settings on one call -> Builder, and here it genuinely earns its place
+/**
+ * The optional settings on a subscription: where to start, what to retry with, where to park failures, and what
+ * to filter out. Every one is optional, which is exactly when a builder beats a five-argument constructor:
+ * `opts().fromEarliest().retry(new ExponentialBackoff(5, 10, 1000)).filter(m -> "IN".equals(m.key()))`.
+ */
+final class SubscribeOptions {
+    RetryPolicy retry; DeadLetterSink sink; Filter filter = Filter.all();
+    long startAt = -1; boolean earliest = false;
+    /** Start a fresh set of options. Nothing is required. */
+    static SubscribeOptions opts() { return new SubscribeOptions(); }
+    /** Use this retry rule instead of the broker's default. It is still wrapped in BoundedRetry. */
+    SubscribeOptions retry(RetryPolicy r) { this.retry = r; return this; }
+    /** Park this subscription's failures somewhere of its own. */
+    SubscribeOptions deadLetters(DeadLetterSink s) { this.sink = s; return this; }
+    /** Only see the messages this predicate accepts; the rest advance the cursor without a handler call. */
+    SubscribeOptions filter(Filter f) { this.filter = f; return this; }
+    /** Replay everything still retained, instead of starting at the end of the log. */
+    SubscribeOptions fromEarliest() { this.earliest = true; return this; }
+    /** Start at an exact offset — what a restarted consumer that saved its cursor does. */
+    SubscribeOptions fromOffset(long offset) { this.startAt = offset; return this; }
+}
+
+/**
+ * One subscriber's read position, and the single thread that drives it. This is the class that makes fan-out
+ * cheap: three subscribers are three longs pointing into one log, not three copies of every message. One
+ * thread per subscription is also what buys per-topic ordering per subscriber for free, and what isolates a
+ * slow or throwing handler so it delays nobody but itself.
+ */
+final class Subscription implements Runnable {
+    private static final long POLL_MS = 50;                             // how long a dispatcher parks before re-checking its flags
+
+    private final String id;
+    private final Topic topic;
+    private final Handler handler;
+    private final RetryPolicy retry;
+    private final DeadLetterSink sink;
+    private final Filter filter;
+    private final Clock clock;
+    private final BrokerListener events;
+    private final AtomicLong cursor;                                    // the next offset to read; written by one thread
+    private final AtomicLong delivered = new AtomicLong(), deadLettered = new AtomicLong();
+    private final AtomicLong skipped = new AtomicLong(), missed = new AtomicLong(), retried = new AtomicLong();
+    private volatile SubState state = SubState.ACTIVE;
+    private volatile Thread worker;
+    private final ReentrantLock gate = new ReentrantLock();             // only for pause/resume, never for the log
+    private final Condition resumed = gate.newCondition();
+
+    Subscription(String id, Topic topic, Handler handler, long startOffset, RetryPolicy retry,
+                 DeadLetterSink sink, Filter filter, Clock clock, BrokerListener events) {
+        this.id = id; this.topic = topic; this.handler = handler; this.retry = retry; this.sink = sink;
+        this.filter = filter; this.clock = clock; this.events = events; this.cursor = new AtomicLong(startOffset);
+    }
+
+    /**
+     * The dispatch loop, and the whole delivery guarantee is the order of its last two statements. Read at the
+     * cursor; hand the message to the handler with NO lock held; and only when the handler has returned, or the
+     * policy has given up and the message is parked, move the cursor on. Commit after delivery means a crash in
+     * the middle redelivers: at-least-once, so handlers must be idempotent. Moving the increment above the
+     * handler call would flip this to at-most-once — that is the whole difference, one line.
+     */
+    public void run() {
+        worker = Thread.currentThread();
+        try {
+            while (state != SubState.STOPPED) {
+                if (state == SubState.PAUSED) { awaitResume(); continue; }
+                long at = cursor.get();
+                long earliest = topic.earliestOffset();
+                if (at < earliest) {                                    // retention overtook us: fast-forward and COUNT the gap
+                    missed.addAndGet(earliest - at);
+                    cursor.set(earliest);
+                    events.onEvent(new Event(EventType.FAST_FORWARDED, topic.name(), earliest, id, 0, clock.nowMs()));
+                    continue;
+                }
+                Message m = topic.awaitAt(at, POLL_MS);
+                if (m == null) continue;                                // nothing published yet, or we were woken to stop
+                if (!filter.accepts(m)) {                               // not ours: no handler call, but the cursor still moves
+                    skipped.incrementAndGet();
+                    events.onEvent(new Event(EventType.SKIPPED, topic.name(), m.offset(), id, 0, clock.nowMs()));
+                    cursor.incrementAndGet();
+                    continue;
+                }
+                if (deliver(m)) cursor.incrementAndGet();               // THE line: commit AFTER the handler
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();                         // shutting down mid-wait: the message is redelivered
+        } finally { state = SubState.STOPPED; }
+    }
+
+    /**
+     * Hand one message to the handler, outside every lock, and survive it throwing. Returns true when the
+     * message is finished with — acknowledged, or given up on and parked — which is the only condition under
+     * which the caller may commit the cursor. Returns false only when we are shutting down mid-delivery, so
+     * that message is delivered again on the next run: at-least-once, deliberately.
+     */
+    private boolean deliver(Message m) throws InterruptedException {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                handler.onMessage(m);                                   // user code: no lock of ours is held here
+                delivered.incrementAndGet();
+                events.onEvent(new Event(EventType.DELIVERED, topic.name(), m.offset(), id, attempt, clock.nowMs()));
+                return true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;                                           // do NOT commit: this one comes back
+            } catch (Exception e) {                                     // Exception, not Throwable: an OutOfMemoryError must
+                long wait = retry.backoffMs(attempt, e);                // kill the dispatcher, not be retried five times
+                if (wait < 0) {                                         // the policy gave up: park it and MOVE ON
+                    sink.park(new Dead(m, id, attempt, e.toString(), clock.nowMs()));
+                    deadLettered.incrementAndGet();
+                    events.onEvent(new Event(EventType.DEAD_LETTERED, topic.name(), m.offset(), id, attempt, clock.nowMs()));
+                    return true;                                        // giving up must never stall the subscription
+                }
+                retried.incrementAndGet();
+                events.onEvent(new Event(EventType.RETRIED, topic.name(), m.offset(), id, attempt, clock.nowMs()));
+                clock.sleepMs(wait);
+            }
+        }
+    }
+
+    /** Stop reading but keep the cursor exactly where it is. resume() carries on from there. */
+    void pause() { state = SubState.PAUSED; }
+    /** Start reading again from the kept cursor. */
+    void resume() {
+        gate.lock();
+        try { if (state == SubState.PAUSED) state = SubState.ACTIVE; resumed.signalAll(); } finally { gate.unlock(); }
+    }
+    /**
+     * End this subscription. Cooperative: a flag, a signal for a paused thread, and an interrupt, because the
+     * dispatcher may be parked in awaitNanos or in a backoff sleep. Forgetting the interrupt leaks one thread
+     * per unsubscribe.
+     */
+    void stop() {
+        state = SubState.STOPPED;
+        gate.lock();
+        try { resumed.signalAll(); } finally { gate.unlock(); }
+        Thread w = worker;
+        if (w != null) w.interrupt();
+    }
+    private void awaitResume() throws InterruptedException {
+        gate.lock();
+        try { while (state == SubState.PAUSED) resumed.await(); } finally { gate.unlock(); }
+    }
+
+    /** How far behind the end of the log this subscriber is: tail minus cursor. O(1), no scan of anything. */
+    long lag() { return Math.max(0, topic.tailOffset() - cursor.get()); }
+    /**
+     * Replay, or skip ahead. One write to one long, and no other subscriber notices — which is the entire
+     * argument for a cursor over a queue. Clamped to the retention window, because older is simply not there.
+     */
+    void seek(long offset) { cursor.set(Math.max(offset, topic.earliestOffset())); }
+
+    /** The next offset this subscription will read. */
+    long offset() { return cursor.get(); }
+    String id() { return id; }
+    String topicName() { return topic.name(); }
+    SubState state() { return state; }
+    /** Messages the handler accepted. */
+    long delivered() { return delivered.get(); }
+    /** Messages the policy gave up on and the sink parked. */
+    long deadLettered() { return deadLettered.get(); }
+    /** Messages the filter rejected without calling the handler. */
+    long skipped() { return skipped.get(); }
+    /** Messages retention threw away before this subscriber reached them. The honest number. */
+    long missed() { return missed.get(); }
+    /** How many handler calls failed and were tried again. */
+    long retried() { return retried.get(); }
+}
+
+/**
+ * The one type a caller ever touches. It owns the topics, the subscriptions and the dispatcher threads, and it
+ * holds no lock of its own — the offsets are the topic's business. A publisher names a topic and never a
+ * subscriber, and a subscriber never hears about a publisher: that is what makes this pub/sub and not a method call.
+ */
+final class Broker implements AutoCloseable {
+    /** No retry policy, whatever a caller hands in, may exceed these. See BoundedRetry. */
+    static final int MAX_ATTEMPTS = 20;
+    static final long MAX_BACKOFF_MS = 60_000;
+
+    private final Map<String, Topic> topics = new ConcurrentHashMap<>();
+    private final Map<String, Subscription> subs = new ConcurrentHashMap<>();
+    private final List<BrokerListener> listeners = new CopyOnWriteArrayList<>();
+    private final ExecutorService dispatchers = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "dispatcher");                          // daemons: a forgotten broker never holds the JVM open
+        t.setDaemon(true);
+        return t;
+    });
+    private final int retention;
+    private RetryPolicy defaultRetry = new FixedDelayRetry(3, 10);
+    private DeadLetterSink defaultSink = new InMemoryDeadLetters();
+    private Clock clock = System::currentTimeMillis;
+
+    /** A broker retaining ten thousand messages per topic. */
+    Broker() { this(10_000); }
+    /** A broker with an explicit retention window, in messages per topic. */
+    Broker(int retentionPerTopic) { this.retention = retentionPerTopic; }
+
+    /**
+     * Hand in the rules. The broker never builds a retry policy or a sink itself, and it never trusts one
+     * either: every policy is wrapped in BoundedRetry at subscribe time, so a rule that forgets to give up
+     * cannot make a subscription retry forever.
+     */
+    void configure(RetryPolicy retry, DeadLetterSink sink) {
+        this.defaultRetry = Objects.requireNonNull(retry);
+        this.defaultSink = Objects.requireNonNull(sink);
+    }
+    /** Tests hand in a clock so a message's timestamp and a backoff schedule are whatever the test says. */
+    void setClock(Clock c) { this.clock = c; }
+    /** Subscribe a listener. Setup only; listeners are called outside every lock. */
+    void addListener(BrokerListener l) { listeners.add(l); }
+
+    /**
+     * Publish. The offset is assigned and the message stored as ONE step inside the topic's lock; the listeners
+     * are told after the lock is released. This call never waits for a subscriber: a handler that takes two
+     * seconds makes its own subscription lag and nothing else. Returns the offset the message was given.
+     */
+    long publish(String topicName, String key, String payload) { return publish(topicName, key, payload, Map.of()); }
+
+    /** Publish with headers. Same critical step; the headers are copied into the immutable message. */
+    long publish(String topicName, String key, String payload, Map<String, String> headers) {
+        Topic t = topic(topicName);
+        Message m = t.append(key, payload, headers, clock.nowMs());     // the locked part: one append, microseconds
+        fire(new Event(EventType.PUBLISHED, topicName, m.offset(), null, 0, m.atMs()));
+        return m.offset();
+    }
+
+    /** The topic, created on first use. O(1). */
+    Topic topic(String name) { return topics.computeIfAbsent(name, n -> new Topic(n, retention)); }
+
+    /** Subscribe with the defaults: start at the end of the log, the broker's retry rule and sink, no filter. */
+    Subscription subscribe(String subId, String topicName, Handler h) {
+        return subscribe(subId, topicName, h, SubscribeOptions.opts());
+    }
+
+    /**
+     * Subscribe with options. The subscription is given its rules — never told to build them — and is started
+     * on its own dispatcher thread. The id must be free, so a double-subscribe is an error and not a silent
+     * second consumer.
+     */
+    Subscription subscribe(String subId, String topicName, Handler h, SubscribeOptions o) {
+        Topic t = topic(topicName);
+        long start = o.earliest ? t.earliestOffset() : t.tailOffset();
+        if (o.startAt >= 0) start = Math.max(o.startAt, t.earliestOffset());
+        Subscription s = new Subscription(subId, t, h, start,
+            new BoundedRetry(o.retry == null ? defaultRetry : o.retry, MAX_ATTEMPTS, MAX_BACKOFF_MS),
+            o.sink == null ? defaultSink : o.sink, o.filter, clock, this::fire);
+        if (subs.putIfAbsent(subId, s) != null) throw new IllegalStateException("subscription id already in use: " + subId);
+        dispatchers.execute(s);
+        return s;
+    }
+
+    /** End one subscription and free its thread. Returns false if there was no such subscription. */
+    boolean unsubscribe(String subId) {
+        Subscription s = subs.remove(subId);
+        if (s == null) return false;
+        s.stop();
+        return true;
+    }
+
+    /** The subscription, or an error. O(1). */
+    Subscription sub(String subId) {
+        Subscription s = subs.get(subId);
+        if (s == null) throw new NoSuchElementException("no such subscription: " + subId);
+        return s;
+    }
+    /** How far behind a subscriber is. O(1): one subtraction, never a scan. */
+    long lag(String subId) { return sub(subId).lag(); }
+    /** Every subscription's lag, for a dashboard. O(number of subscriptions), and nothing else. */
+    Map<String, Long> lagReport() {
+        Map<String, Long> out = new TreeMap<>();
+        subs.forEach((id, s) -> out.put(id, s.lag()));
+        return out;
+    }
+    /** Who listens to this topic. A filter over the map; publishers never see this. */
+    List<String> subscribersOf(String topicName) {
+        List<String> out = new ArrayList<>();
+        subs.forEach((id, s) -> { if (s.topicName().equals(topicName)) out.add(id); });
+        Collections.sort(out);
+        return out;
+    }
+    /** The topics that exist right now. */
+    Set<String> topicNames() { return new TreeSet<>(topics.keySet()); }
+
+    /** Tell every listener, outside every lock, and survive one that throws. */
+    private void fire(Event e) {
+        for (BrokerListener l : listeners) {
+            try { l.onEvent(e); } catch (RuntimeException ex) { System.err.println("[listener failed] " + ex.getMessage()); }
+        }
+    }
+
+    /** Stop every subscription and end every dispatcher thread. Safe to call twice. */
+    @Override public void close() {
+        subs.values().forEach(Subscription::stop);
+        subs.clear();
+        dispatchers.shutdownNow();
+    }
+}
+
+/**
+ * Proof it works: fan-out to three subscribers, a filter, a handler that fails and is retried, a message
+ * nobody can process being parked, a late subscriber replaying history, pause and resume, and finally fifty
+ * threads publishing into ONE topic at the same instant with every offset assigned exactly once.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Broker broker = new Broker(1_000);
+        InMemoryDeadLetters parked = new InMemoryDeadLetters();
+        broker.configure(new ExponentialBackoff(4, 5, 100), parked);
+        broker.addListener(e -> {
+            if (e.type() == EventType.DEAD_LETTERED)
+                System.out.println("[alarm] gave up on " + e.topic() + "@" + e.offset() + " after " + e.attempts() + " attempts");
+        });
+
+        // three subscribers on one topic. Each gets every message, and each keeps its own place in the log.
+        List<String> audit = new CopyOnWriteArrayList<>();
+        List<String> email = new CopyOnWriteArrayList<>();
+        List<String> india = new CopyOnWriteArrayList<>();
+        broker.subscribe("audit", "orders", m -> audit.add(m.payload()));
+        broker.subscribe("email", "orders", m -> email.add(m.payload()));
+        broker.subscribe("india", "orders", m -> india.add(m.payload()),
+            SubscribeOptions.opts().filter(m -> "IN".equals(m.key())));   // the same log, a narrower view
+
+        for (int i = 1; i <= 5; i++) broker.publish("orders", i % 2 == 0 ? "IN" : "US", "order-" + i);
+        awaitUntil(() -> audit.size() == 5 && email.size() == 5 && india.size() == 2, 2000);
+        System.out.println("fan-out: audit=" + audit + " email=" + email.size() + " india(filtered)=" + india);
+        System.out.println("subscribers of orders: " + broker.subscribersOf("orders") + "  lag " + broker.lagReport());
+
+        // a handler that fails twice and then works: retried per the policy, delivered once, nothing parked
+        AtomicInteger tries = new AtomicInteger();
+        List<String> flaky = new CopyOnWriteArrayList<>();
+        broker.subscribe("payments", "orders", m -> {
+            if (tries.incrementAndGet() <= 2) throw new IllegalStateException("gateway timeout");
+            flaky.add(m.payload());
+        }, SubscribeOptions.opts().fromEarliest().retry(new ExponentialBackoff(5, 5, 50)));
+        awaitUntil(() -> flaky.size() == 5, 2000);
+        System.out.println("flaky handler: " + tries.get() + " handler calls for 5 messages, delivered "
+            + broker.sub("payments").delivered() + ", retried " + broker.sub("payments").retried());
+
+        // a message nobody can process: retried, then parked, and the subscription CARRIES ON
+        List<String> strict = new CopyOnWriteArrayList<>();
+        broker.subscribe("strict", "orders", m -> {
+            if (m.payload().equals("order-3")) throw new IllegalArgumentException("malformed payload");
+            strict.add(m.payload());
+        }, SubscribeOptions.opts().fromEarliest().retry(new FixedDelayRetry(3, 1)));
+        awaitUntil(() -> strict.size() == 4, 2000);
+        System.out.println("poison message: delivered " + strict + ", parked " + parked.size()
+            + " (" + parked.all().get(0).reason() + " after " + parked.all().get(0).attempts() + " attempts)");
+
+        // a late subscriber replays what is still retained; nobody else notices
+        List<String> late = new CopyOnWriteArrayList<>();
+        broker.subscribe("late", "orders", m -> late.add(m.payload()), SubscribeOptions.opts().fromEarliest());
+        awaitUntil(() -> late.size() == 5, 2000);
+        System.out.println("late subscriber replayed " + late.size() + " messages from offset "
+            + broker.topic("orders").earliestOffset());
+
+        // pause keeps the cursor; resume picks up exactly where it stopped
+        Subscription auditSub = broker.sub("audit");
+        auditSub.pause();
+        broker.publish("orders", "IN", "order-6");
+        broker.publish("orders", "US", "order-7");
+        System.out.println("paused at offset " + auditSub.offset() + ", lag " + auditSub.lag() + ", audit still " + audit.size());
+        auditSub.resume();
+        awaitUntil(() -> audit.size() == 7, 2000);
+        System.out.println("resumed: audit=" + audit.size() + ", lag " + auditSub.lag());
+
+        // replay one subscriber only: seek is one write to one long
+        broker.unsubscribe("late");
+        System.out.println("after unsubscribe, subscribers of orders: " + broker.subscribersOf("orders"));
+
+        // -------------------------------------------------------------- fifty threads publish at the same instant
+        Broker race = new Broker(200_000);
+        race.configure(new FixedDelayRetry(3, 1), new InMemoryDeadLetters());
+        AtomicLong seen = new AtomicLong();
+        race.subscribe("counter", "ticks", m -> seen.incrementAndGet());
+        int threads = 50, each = 40;
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<List<Long>>> runs = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            final int me = t;
+            runs.add(pool.submit(() -> {
+                go.await();
+                List<Long> mine = new ArrayList<>(each);
+                for (int k = 0; k < each; k++) mine.add(race.publish("ticks", "p" + me, me + ":" + k));
+                return mine;                                             // the offsets THIS publisher was given
+            }));
+        }
+        go.countDown();
+        Set<Long> all = new HashSet<>();
+        boolean ordered = true;
+        for (Future<List<Long>> f : runs) {
+            List<Long> mine = f.get();
+            all.addAll(mine);
+            for (int k = 1; k < mine.size(); k++) if (mine.get(k) <= mine.get(k - 1)) ordered = false;
+        }
+        pool.shutdown();
+        int total = threads * each;
+        awaitUntil(() -> seen.get() == total, 5000);
+        System.out.println(threads + " publishers x " + each + ": distinct offsets=" + all.size() + "/" + total
+            + ", tail=" + race.topic("ticks").tailOffset() + ", per-publisher order kept=" + ordered
+            + ", one subscriber saw " + seen.get());
+        if (all.size() != total || race.topic("ticks").tailOffset() != total || !ordered)
+            throw new AssertionError("an offset was duplicated or lost");
+        race.close();
+        broker.close();
+    }
+
+    /** Poll until a condition holds or the budget runs out. How a demo or a test waits for a dispatcher thread. */
+    static boolean awaitUntil(BooleanSupplier cond, long budgetMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (cond.getAsBoolean()) return true;
+            Thread.sleep(2);
+        }
+        return cond.getAsBoolean();
+    }
+}

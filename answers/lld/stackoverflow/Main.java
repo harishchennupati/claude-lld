@@ -1,0 +1,677 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/** Which way a vote went. The weight is what it adds to a post's score; what it is worth in reputation is a separate table. */
+enum VoteType {
+    UP(+1), DOWN(-1);
+    final int weight;
+    VoteType(int weight) { this.weight = weight; }
+}
+
+/** What kind of post this is. It chooses the reputation row and decides what may be attached to it. */
+enum PostKind { QUESTION, ANSWER, COMMENT }
+
+/** A question's life. Answers and comments are accepted only while OPEN; DELETED is terminal and leaves the index. */
+enum QuestionState { OPEN, CLOSED, DELETED }
+
+/** Every reason reputation can move. One enum, so the whole rulebook is one table with exactly one home. */
+enum RepReason { QUESTION_UP, QUESTION_DOWN, ANSWER_UP, ANSWER_DOWN, COMMENT_UP, COMMENT_DOWN, ANSWER_ACCEPTED, ACCEPTER_BONUS }
+
+/** What a user earns the right to do, and the reputation it takes. A table, not an if-chain. */
+enum Privilege {
+    VOTE_UP(15), COMMENT(50), VOTE_DOWN(125), CLOSE(500);
+    final int minRep;
+    Privilege(int minRep) { this.minRep = minRep; }
+}
+
+/** What happened on a thread, for anybody listening. */
+enum EventKind { ASKED, ANSWERED, COMMENTED, VOTED, VOTE_RETRACTED, ACCEPTED, UNACCEPTED, ACCEPT_BONUS, CLOSED, REOPENED, DELETED }
+
+/**
+ * One thing that happened, already carrying the reputation delta that was applied. A listener never recomputes
+ * the rulebook: it is told what moved, by how much, and for whom.
+ */
+record QaEvent(EventKind kind, String questionId, String postId, String actorId, String authorId, int repDelta, long atMs) {}
+
+/** Where time comes from. Injected, so a test can stamp a post with any instant it likes. */
+interface Clock { long nowMs(); }
+
+/** The reputation rulebook: one number per reason. One method, so a whole new policy is one class and one wiring line. */
+interface ReputationRules { int pointsFor(RepReason reason); }
+
+/** How a question thread finds the people whose reputation a vote moves. Handed in, never looked up globally. */
+interface Directory { User byId(String userId); }
+
+/**
+ * How a reputation delta actually lands. The default simply adds it; a wrapper can cap it, log it or hold it back.
+ * It is separate from the rulebook because the rulebook must stay pure -- it is asked twice per vote, once for the
+ * old state and once for the new -- while this is called exactly once, with the number that really moved.
+ */
+interface RepAward { int award(User user, int delta, long atMs); }
+
+/** Anybody who wants to know what happened. Called AFTER the thread's lock is released, inside a try/catch. */
+interface PostListener { void onEvent(QaEvent e); }
+
+/** A capability, not a base class: a question and an answer carry comments, a comment does not. */
+interface Commentable { List<Comment> comments(); }
+
+/** The default Stack Overflow numbers, in one EnumMap so every delta is visible and tunable in one place. */
+final class DefaultRules implements ReputationRules {
+    private final Map<RepReason, Integer> table = new EnumMap<>(RepReason.class);
+    DefaultRules() {
+        table.put(RepReason.QUESTION_UP, 5);          // an upvoted question earns its asker 5
+        table.put(RepReason.QUESTION_DOWN, -2);       // a downvote costs the author 2, either way
+        table.put(RepReason.ANSWER_UP, 10);           // an answer is worth more than a question
+        table.put(RepReason.ANSWER_DOWN, -2);
+        table.put(RepReason.COMMENT_UP, 0);           // comments carry a score but earn no reputation
+        table.put(RepReason.COMMENT_DOWN, 0);
+        table.put(RepReason.ANSWER_ACCEPTED, 15);     // being accepted
+        table.put(RepReason.ACCEPTER_BONUS, 2);       // and a little for the asker who bothered to accept
+    }
+    public int pointsFor(RepReason reason) { return table.getOrDefault(reason, 0); }
+}
+
+/**
+ * A person. Reputation is an AtomicLong because one user is voted on from many question threads at once, each
+ * holding a different lock: it is one number with no companion invariant, so a lock-free add is exactly right.
+ */
+final class User {
+    private final String id, name;
+    private final AtomicLong rep = new AtomicLong();
+    private final Set<String> badges = ConcurrentHashMap.newKeySet();
+
+    User(String id, String name, long startingRep) { this.id = id; this.name = name; rep.set(startingRep); }
+
+    String id() { return id; }
+    String name() { return name; }
+    /** The true stored value, which may be negative. The audit path and the tests read this. */
+    long rawReputation() { return rep.get(); }
+    /** What the profile shows. The floor lives on the READ path: clamping on write would destroy reversibility. */
+    long reputation() { return Math.max(0, rep.get()); }
+    /** Apply a signed delta. Lock-free, and commutative, so the order deltas arrive in cannot change the total. */
+    void addRep(int delta) { rep.addAndGet(delta); }
+    /** Does this user have enough reputation for this action? A table lookup, not an if-chain. */
+    boolean can(Privilege p) { return reputation() >= p.minRep; }
+    void awardBadge(String badge) { badges.add(badge); }
+    Set<String> badges() { return Set.copyOf(badges); }
+    @Override public String toString() { return name + "(" + reputation() + ")"; }
+}
+
+/**
+ * The machinery every votable thing shares: an author, a body, a stored score, and the ledger of who voted which
+ * way. The score is stored and never recomputed from the ledger, so reading it is O(1). Every mutator here is
+ * called only while the owning question thread's lock is held.
+ */
+abstract class Post {
+    private final String id, authorId;
+    private final long createdAtMs;
+    private String body;
+    private int score;
+    private final Map<String, VoteType> voters = new HashMap<>();     // guarded by the thread's lock
+
+    Post(String id, String authorId, String body, long createdAtMs) {
+        this.id = id; this.authorId = authorId; this.body = body; this.createdAtMs = createdAtMs;
+    }
+
+    /** Which row of the reputation table this post uses. The one thing every subclass must answer. */
+    abstract PostKind kind();
+
+    String id() { return id; }
+    String authorId() { return authorId; }
+    long createdAtMs() { return createdAtMs; }
+    String body() { return body; }
+    int score() { return score; }
+    /** Which way this user voted, or null if they have not voted. A map entry, not an entity. */
+    VoteType voteOf(String userId) { return voters.get(userId); }
+    /** A copy of the whole ledger: who voted which way. Read under the thread's lock, for an audit or an undo. */
+    Map<String, VoteType> ledger() { return Map.copyOf(voters); }
+    int voterCount() { return voters.size(); }
+    void setBody(String newBody) { body = newBody; }
+
+    /**
+     * Write the ledger and the score in one step. `now` of null means retract. Returns the previous vote.
+     * The score moves by new-minus-old, which is why a flip and a retraction need no special case at all.
+     */
+    VoteType record(String voterId, VoteType now) {
+        VoteType before = voters.get(voterId);
+        int weightBefore = before == null ? 0 : before.weight;
+        int weightNow = now == null ? 0 : now.weight;
+        if (now == null) voters.remove(voterId); else voters.put(voterId, now);
+        score += weightNow - weightBefore;
+        return before;
+    }
+}
+
+/** A remark on a question or an answer. Votable, earns no reputation, and is deliberately not itself commentable. */
+final class Comment extends Post {
+    private final String targetPostId;
+    Comment(String id, String authorId, String body, long atMs, String targetPostId) {
+        super(id, authorId, body, atMs); this.targetPostId = targetPostId;
+    }
+    String targetPostId() { return targetPostId; }
+    PostKind kind() { return PostKind.COMMENT; }
+}
+
+/** One answer to one question. Votable, commentable, and acceptable -- but only by the asker. */
+final class Answer extends Post implements Commentable {
+    private final String questionId;
+    private final List<Comment> comments = new ArrayList<>();          // guarded by the thread's lock
+    Answer(String id, String authorId, String body, long atMs, String questionId) {
+        super(id, authorId, body, atMs); this.questionId = questionId;
+    }
+    String questionId() { return questionId; }
+    public List<Comment> comments() { return comments; }
+    PostKind kind() { return PostKind.ANSWER; }
+}
+
+/**
+ * One question thread: the question itself, its answers, every comment on them, the ledger of who voted on what,
+ * and the single lock that makes a vote atomic. This is the aggregate root -- nothing outside reaches into an
+ * answer's voter map, every write comes through a method here. Two different questions never wait for each other.
+ */
+final class Question extends Post implements Commentable {
+    private final String title;
+    private final Set<String> tags;
+    private final List<Answer> answers = new ArrayList<>();
+    private final List<Comment> comments = new ArrayList<>();
+    private final Map<String, Post> byId = new HashMap<>();            // O(1): any post in this thread, by id
+    private final ReentrantLock lock = new ReentrantLock();
+    private volatile String acceptedAnswerId;                          // volatile: readers see the winner lock-free
+    private volatile QuestionState state = QuestionState.OPEN;
+    private volatile String closeReason;
+    private boolean awardsReversed;                                    // guarded by the lock: undo runs once
+    private volatile ReputationRules rules;
+    private volatile RepAward awards = (user, delta, atMs) -> { user.addRep(delta); return delta; };
+    private volatile Clock clock;
+    private final Directory people;
+
+    Question(String id, String authorId, String title, String body, Set<String> tags, long atMs,
+             ReputationRules rules, Directory people, Clock clock) {
+        super(id, authorId, body, atMs);
+        this.title = title; this.tags = Set.copyOf(tags); this.rules = rules; this.people = people; this.clock = clock;
+        byId.put(id, this);                                            // the question is a post in its own thread
+    }
+
+    String title() { return title; }
+    Set<String> tags() { return tags; }
+    PostKind kind() { return PostKind.QUESTION; }
+    public List<Comment> comments() { return comments; }
+    QuestionState state() { return state; }
+    String closeReason() { return closeReason; }
+    String acceptedAnswerId() { return acceptedAnswerId; }
+    /** One rulebook for the whole site: the service re-points every live thread when the policy changes. */
+    void setRules(ReputationRules r) { rules = r; }
+    void setAwards(RepAward a) { awards = a; }
+    void setClock(Clock c) { clock = c; }
+
+    /** A copy, so a caller can iterate it while somebody else answers. */
+    List<Answer> answers() { lock.lock(); try { return List.copyOf(answers); } finally { lock.unlock(); } }
+    /** Any post in this thread by id, or null. One hash lookup. */
+    Post post(String postId) { lock.lock(); try { return byId.get(postId); } finally { lock.unlock(); } }
+
+    // ---------------------------------------------------------------- writes
+
+    /**
+     * Add an answer. Idempotent on the id, so a retried request cannot post twice. Only while the thread is OPEN.
+     */
+    Answer addAnswer(String answerId, User author, String body) {
+        lock.lock();
+        try {
+            requireLive();
+            if (state != QuestionState.OPEN) throw new IllegalStateException("the question is closed: " + id());
+            Post existing = byId.get(answerId);
+            if (existing instanceof Answer a) return a;
+            Answer a = new Answer(answerId, author.id(), body, clock.nowMs(), id());
+            answers.add(a); byId.put(answerId, a);
+            return a;
+        } finally { lock.unlock(); }
+    }
+
+    /** Add a comment on the question or on one of its answers. A comment on a comment is refused, by design. */
+    Comment addComment(String commentId, String targetPostId, User author, String body) {
+        lock.lock();
+        try {
+            requireLive();
+            if (state != QuestionState.OPEN) throw new IllegalStateException("the question is closed: " + id());
+            if (!author.can(Privilege.COMMENT))
+                throw new IllegalStateException(author.id() + " needs " + Privilege.COMMENT.minRep + " reputation to comment");
+            Post target = byId.get(targetPostId);
+            if (target == null) throw new NoSuchElementException("no such post in this thread: " + targetPostId);
+            if (!(target instanceof Commentable c)) throw new IllegalArgumentException("you cannot comment on a comment");
+            Post existing = byId.get(commentId);
+            if (existing instanceof Comment old) return old;
+            Comment cm = new Comment(commentId, author.id(), body, clock.nowMs(), targetPostId);
+            c.comments().add(cm); byId.put(commentId, cm);
+            return cm;
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * Cast or change a vote. THE critical step: every check happens before anything is written, and what follows
+     * is three field writes -- the ledger entry, the score, the author's counter -- that cannot fail half way.
+     * Returns the events for the caller to publish after this method has released the lock.
+     */
+    List<QaEvent> vote(String postId, User voter, VoteType type) {
+        return apply(postId, voter, Objects.requireNonNull(type, "use retract() to take a vote back"), EventKind.VOTED);
+    }
+
+    /** Take a vote back. Its own verb rather than vote(user, null): a null vote type is not a value. */
+    List<QaEvent> retract(String postId, User voter) {
+        return apply(postId, voter, null, EventKind.VOTE_RETRACTED);
+    }
+
+    private List<QaEvent> apply(String postId, User voter, VoteType type, EventKind kind) {
+        lock.lock();
+        try {
+            requireLive();
+            Post target = byId.get(postId);
+            if (target == null) throw new NoSuchElementException("no such post in this thread: " + postId);
+            if (target.authorId().equals(voter.id())) throw new IllegalArgumentException("you cannot vote on your own post");
+            if (target.kind() == PostKind.COMMENT && type == VoteType.DOWN)
+                throw new IllegalArgumentException("comments can only be upvoted");
+            if (type != null) {
+                Privilege needed = type == VoteType.UP ? Privilege.VOTE_UP : Privilege.VOTE_DOWN;
+                if (!voter.can(needed))
+                    throw new IllegalStateException(voter.id() + " needs " + needed.minRep + " reputation to " + needed);
+            }
+            VoteType before = target.voteOf(voter.id());
+            if (before == type) return List.of();                      // idempotent: the same vote twice is a no-op
+            int delta = points(target.kind(), type) - points(target.kind(), before);   // new minus old: no branching
+            long now = clock.nowMs();
+            target.record(voter.id(), type);                           // only now is anything written
+            int applied = award(target.authorId(), delta, now);
+            return List.of(new QaEvent(kind, id(), postId, voter.id(), target.authorId(), applied, now));
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * Mark exactly one answer accepted. Only the asker may do it. Re-accepting reverses the previous +15 first,
+     * so the flag and the reputation always tell the same story; the asker's bonus is granted once, on the first.
+     */
+    List<QaEvent> accept(String answerId, User actor) {
+        lock.lock();
+        try {
+            requireLive();
+            if (!authorId().equals(actor.id())) throw new IllegalArgumentException("only the asker may accept an answer");
+            Post target = byId.get(answerId);
+            if (!(target instanceof Answer answer)) throw new NoSuchElementException("no such answer in this thread: " + answerId);
+            if (answerId.equals(acceptedAnswerId)) return List.of();   // idempotent
+            long now = clock.nowMs();
+            List<QaEvent> out = new ArrayList<>(3);
+            String previous = acceptedAnswerId;
+            if (previous != null) {                                    // reverse the old award before making the new one
+                Post old = byId.get(previous);
+                int back = award(old.authorId(), -rules.pointsFor(RepReason.ANSWER_ACCEPTED), now);
+                out.add(new QaEvent(EventKind.UNACCEPTED, id(), previous, actor.id(), old.authorId(), back, now));
+            }
+            int bonus = award(answer.authorId(), rules.pointsFor(RepReason.ANSWER_ACCEPTED), now);
+            acceptedAnswerId = answerId;
+            out.add(new QaEvent(EventKind.ACCEPTED, id(), answerId, actor.id(), answer.authorId(), bonus, now));
+            if (previous == null) {                                    // the asker is paid once, not once per change
+                int askerBonus = award(actor.id(), rules.pointsFor(RepReason.ACCEPTER_BONUS), now);
+                out.add(new QaEvent(EventKind.ACCEPT_BONUS, id(), id(), actor.id(), actor.id(), askerBonus, now));
+            }
+            return out;
+        } finally { lock.unlock(); }
+    }
+
+    /** OPEN -> CLOSED. A closed thread takes no new answers or comments, but existing posts stay votable. */
+    List<QaEvent> close(User by, String reason) {
+        lock.lock();
+        try {
+            requireLive();
+            if (!by.can(Privilege.CLOSE))
+                throw new IllegalStateException(by.id() + " needs " + Privilege.CLOSE.minRep + " reputation to close");
+            if (state == QuestionState.CLOSED) return List.of();
+            state = QuestionState.CLOSED; closeReason = reason;
+            return List.of(new QaEvent(EventKind.CLOSED, id(), id(), by.id(), authorId(), 0, clock.nowMs()));
+        } finally { lock.unlock(); }
+    }
+
+    /** CLOSED -> OPEN. The only way back; DELETED has no way back. */
+    List<QaEvent> reopen(User by) {
+        lock.lock();
+        try {
+            requireLive();
+            if (!by.can(Privilege.CLOSE))
+                throw new IllegalStateException(by.id() + " needs " + Privilege.CLOSE.minRep + " reputation to reopen");
+            if (state == QuestionState.OPEN) return List.of();
+            state = QuestionState.OPEN; closeReason = null;
+            return List.of(new QaEvent(EventKind.REOPENED, id(), id(), by.id(), authorId(), 0, clock.nowMs()));
+        } finally { lock.unlock(); }
+    }
+
+    /** Terminal. Only the asker or somebody with the close privilege may; the service drops it from the index. */
+    List<QaEvent> delete(User by) {
+        lock.lock();
+        try {
+            if (!authorId().equals(by.id()) && !by.can(Privilege.CLOSE))
+                throw new IllegalStateException(by.id() + " may not delete " + id());
+            if (state == QuestionState.DELETED) return List.of();
+            state = QuestionState.DELETED;
+            return List.of(new QaEvent(EventKind.DELETED, id(), id(), by.id(), authorId(), 0, clock.nowMs()));
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * Hand back every reputation point this thread ever paid out. The ledger IS the undo log: each entry says
+     * which way that voter went, so what it was worth can be recomputed and reversed without anything extra
+     * having been remembered. One pass under the one lock, and exactly once however many times it is called.
+     * Returns the signed total that was applied, which is negative when points were taken back.
+     */
+    int reverseAwards() {
+        lock.lock();
+        try {
+            if (awardsReversed) return 0;                              // exactly once, whoever asks
+            awardsReversed = true;
+            long now = clock.nowMs();
+            int moved = 0;
+            for (Post p : byId.values())
+                for (Map.Entry<String, VoteType> e : p.ledger().entrySet())
+                    moved += award(p.authorId(), -points(p.kind(), e.getValue()), now);
+            if (acceptedAnswerId != null) {                            // and the acceptance, both halves of it
+                Post accepted = byId.get(acceptedAnswerId);
+                moved += award(accepted.authorId(), -rules.pointsFor(RepReason.ANSWER_ACCEPTED), now);
+                moved += award(authorId(), -rules.pointsFor(RepReason.ACCEPTER_BONUS), now);
+            }
+            return moved;
+        } finally { lock.unlock(); }
+    }
+
+    /** Hand the delta to the award rule and report what really landed, so the event never lies to a listener. */
+    private int award(String userId, int delta, long atMs) {
+        User u = people.byId(userId);
+        if (u == null || delta == 0) return 0;
+        return awards.award(u, delta, atMs);
+    }
+
+    /**
+     * Replace a post's body under the thread's lock and hand the OLD body back, which is what a revision log
+     * stores. Only the author, or somebody with the close privilege, may edit.
+     */
+    String editBody(String postId, User editor, String newBody) {
+        lock.lock();
+        try {
+            requireLive();
+            Post target = byId.get(postId);
+            if (target == null) throw new NoSuchElementException("no such post in this thread: " + postId);
+            if (!target.authorId().equals(editor.id()) && !editor.can(Privilege.CLOSE))
+                throw new IllegalStateException(editor.id() + " may not edit " + postId);
+            String old = target.body();
+            target.setBody(newBody);
+            return old;
+        } finally { lock.unlock(); }
+    }
+
+    private void requireLive() {
+        if (state == QuestionState.DELETED) throw new IllegalStateException("the question is deleted: " + id());
+    }
+
+    /** What one vote of this kind is worth to the post's author. No vote at all is worth nothing, which is the trick. */
+    private int points(PostKind kind, VoteType v) {
+        if (v == null) return 0;
+        RepReason reason = switch (kind) {
+            case QUESTION -> v == VoteType.UP ? RepReason.QUESTION_UP : RepReason.QUESTION_DOWN;
+            case ANSWER   -> v == VoteType.UP ? RepReason.ANSWER_UP   : RepReason.ANSWER_DOWN;
+            case COMMENT  -> v == VoteType.UP ? RepReason.COMMENT_UP  : RepReason.COMMENT_DOWN;
+        };
+        return rules.pointsFor(reason);
+    }
+}
+
+/**
+ * The inverted index: word -> question ids, tag -> question ids, author -> question ids. Concurrent maps, so
+ * indexing one question never blocks a vote on another, and a lookup is O(k) in the matches, never O(n) in the site.
+ */
+final class SearchIndex {
+    private final Map<String, Set<String>> byWord = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> byTag = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> byAuthor = new ConcurrentHashMap<>();
+
+    /** Index one question's words, tags and author. Called after the question is already in the store. */
+    void add(Question q) {
+        for (String w : words(q.title() + " " + q.body())) byWord.computeIfAbsent(w, k -> ConcurrentHashMap.newKeySet()).add(q.id());
+        for (String t : q.tags()) byTag.computeIfAbsent(t.toLowerCase(), k -> ConcurrentHashMap.newKeySet()).add(q.id());
+        byAuthor.computeIfAbsent(q.authorId(), k -> ConcurrentHashMap.newKeySet()).add(q.id());
+    }
+
+    /** Drop a deleted question out of every posting list, so search can never point at something nobody can fetch. */
+    void remove(Question q) {
+        for (String w : words(q.title() + " " + q.body())) drop(byWord, w, q.id());
+        for (String t : q.tags()) drop(byTag, t.toLowerCase(), q.id());
+        drop(byAuthor, q.authorId(), q.id());
+    }
+
+    Set<String> byTag(String tag) { return copy(byTag.get(tag == null ? "" : tag.toLowerCase())); }
+    Set<String> byWord(String word) { return copy(byWord.get(word == null ? "" : word.toLowerCase())); }
+    Set<String> byAuthor(String userId) { return copy(byAuthor.get(userId)); }
+
+    private static void drop(Map<String, Set<String>> index, String key, String id) {
+        Set<String> s = index.get(key);
+        if (s != null) { s.remove(id); if (s.isEmpty()) index.remove(key, s); }
+    }
+    private static Set<String> copy(Set<String> s) { return s == null ? Set.of() : Set.copyOf(s); }
+
+    /** Lowercase words of two letters or more. Deliberately crude: v1 has no stemming and no ranking. */
+    static List<String> words(String text) {
+        List<String> out = new ArrayList<>();
+        for (String w : text.toLowerCase().split("[^a-z0-9]+")) if (w.length() >= 2) out.add(w);
+        return out;
+    }
+}
+
+/**
+ * The one thing a caller talks to: it mints the ids, keeps the users and the threads, owns the search index, and
+ * publishes events after the thread's lock has been released. It holds no lock of its own -- every write is
+ * serialised by the one question thread it touches.
+ */
+final class QaService {
+    private final Map<String, User> users = new ConcurrentHashMap<>();
+    private final Map<String, Question> questions = new ConcurrentHashMap<>();
+    private final Map<String, String> home = new ConcurrentHashMap<>();   // any post id -> the thread that owns it
+    private final SearchIndex index = new SearchIndex();
+    private final List<PostListener> listeners = new CopyOnWriteArrayList<>();
+    private final AtomicInteger qIds = new AtomicInteger(), aIds = new AtomicInteger(), cIds = new AtomicInteger();
+    private volatile ReputationRules rules = new DefaultRules();
+    private volatile Clock clock = System::currentTimeMillis;
+    private volatile RepAward awards = (user, delta, atMs) -> { user.addRep(delta); return delta; };
+
+    /** Hand in the rulebook and the listeners. The service never builds them, which is why a test can swap both. */
+    void configure(ReputationRules newRules, PostListener... newListeners) {
+        rules = newRules;
+        for (Question q : questions.values()) q.setRules(newRules);       // one rulebook, even for live threads
+        listeners.addAll(List.of(newListeners));
+    }
+    /** Hand in how deltas land: the plain adder, or a wrapper that caps or logs them. */
+    void setAwards(RepAward a) { for (Question q : questions.values()) q.setAwards(a); awards = a; }
+    /** Time is handed in too, so a test can decide exactly what a post is stamped with. */
+    void setClock(Clock c) { clock = c; for (Question q : questions.values()) q.setClock(c); }
+
+    User register(String id, String name) { return register(id, name, 1); }
+    User register(String id, String name, long startingRep) {
+        User u = new User(id, name, startingRep);
+        users.put(id, u);
+        return u;
+    }
+    User user(String id) { return users.get(id); }
+    Question question(String id) { return questions.get(id); }
+
+    /**
+     * Ask. The order matters: the question goes into the store FIRST and is indexed second. If indexing ever
+     * threw, the question would still exist and could be re-indexed; the other order would leave the index
+     * pointing at a question nobody can fetch.
+     */
+    Question ask(String authorId, String title, String body, Set<String> tags) {
+        User author = require(authorId);
+        String qid = "q" + qIds.incrementAndGet();
+        Question q = new Question(qid, author.id(), title, body, tags, clock.nowMs(), rules, this::user, clock);
+        q.setAwards(awards);
+        questions.put(qid, q);
+        home.put(qid, qid);
+        index.add(q);
+        publish(List.of(new QaEvent(EventKind.ASKED, qid, qid, authorId, authorId, 0, clock.nowMs())));
+        return q;
+    }
+
+    /** Answer a question. The thread takes its own lock; the event goes out after it is released. */
+    Answer answer(String questionId, String authorId, String body) {
+        Question q = thread(questionId);
+        Answer a = q.addAnswer("a" + aIds.incrementAndGet(), require(authorId), body);
+        home.put(a.id(), questionId);
+        publish(List.of(new QaEvent(EventKind.ANSWERED, questionId, a.id(), authorId, authorId, 0, clock.nowMs())));
+        return a;
+    }
+
+    /** Comment on any question or answer. `postId` is the thing being commented on, not the thread. */
+    Comment comment(String postId, String authorId, String body) {
+        Question q = thread(owner(postId));
+        Comment c = q.addComment("c" + cIds.incrementAndGet(), postId, require(authorId), body);
+        home.put(c.id(), q.id());
+        publish(List.of(new QaEvent(EventKind.COMMENTED, q.id(), c.id(), authorId, authorId, 0, clock.nowMs())));
+        return c;
+    }
+
+    /** Vote on any post, anywhere. Two O(1) hops: the post's thread, then the post inside it. */
+    void vote(String postId, String voterId, VoteType type) {
+        Question q = thread(owner(postId));
+        publish(q.vote(postId, require(voterId), type));
+    }
+    void retractVote(String postId, String voterId) {
+        Question q = thread(owner(postId));
+        publish(q.retract(postId, require(voterId)));
+    }
+    void accept(String answerId, String actorId) {
+        Question q = thread(owner(answerId));
+        publish(q.accept(answerId, require(actorId)));
+    }
+    /** Edit a post's body. Returns the text that was there before, which is what a revision log keeps. */
+    String edit(String postId, String editorId, String newBody) {
+        Question q = thread(owner(postId));
+        return q.editBody(postId, require(editorId), newBody);
+    }
+    void close(String questionId, String byUserId, String reason) { publish(thread(questionId).close(require(byUserId), reason)); }
+    void reopen(String questionId, String byUserId) { publish(thread(questionId).reopen(require(byUserId))); }
+    /** Delete a thread: mark it, then drop it from the index so search stops returning it. */
+    void delete(String questionId, String byUserId) {
+        Question q = thread(questionId);
+        List<QaEvent> events = q.delete(require(byUserId));
+        if (!events.isEmpty()) index.remove(q);
+        publish(events);
+    }
+
+    // ---------------------------------------------------------------- reads
+
+    /** By tag: O(k) in the matches. This is what the inverted index is for. */
+    List<Question> byTag(String tag) { return hydrate(index.byTag(tag)); }
+    /** By keyword: also O(k), because the words of a question were indexed when it was asked. */
+    List<Question> byWord(String word) { return hydrate(index.byWord(word)); }
+    List<Question> byAuthor(String userId) { return hydrate(index.byAuthor(userId)); }
+
+    /** Best first, then newest first. A handed-in comparator is one of the follow-ups. */
+    private List<Question> hydrate(Set<String> qids) {
+        List<Question> out = new ArrayList<>(qids.size());
+        for (String id : qids) {
+            Question q = questions.get(id);
+            if (q != null && q.state() != QuestionState.DELETED) out.add(q);
+        }
+        out.sort(Comparator.<Question>comparingInt(Question::score).reversed().thenComparing(Question::createdAtMs, Comparator.reverseOrder()));
+        return out;
+    }
+
+    // ---------------------------------------------------------------- plumbing
+
+    /** Announce, after the lock. A listener that throws cannot break a vote that already happened. */
+    private void publish(List<QaEvent> events) {
+        for (QaEvent e : events)
+            for (PostListener l : listeners)
+                try { l.onEvent(e); } catch (RuntimeException ex) { /* log and carry on */ }
+    }
+    private String owner(String postId) {
+        String qid = home.get(postId);
+        if (qid == null) throw new NoSuchElementException("no such post: " + postId);
+        return qid;
+    }
+    private Question thread(String questionId) {
+        Question q = questions.get(questionId);
+        if (q == null) throw new NoSuchElementException("no such question: " + questionId);
+        return q;
+    }
+    private User require(String userId) {
+        User u = users.get(userId);
+        if (u == null) throw new NoSuchElementException("no such user: " + userId);
+        return u;
+    }
+}
+
+/** A demo of the whole flow, then fifty threads voting on one answer to show the invariant holding. */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        QaService so = new QaService();
+        boolean[] loud = { true };                     // the listener is the only thing printing the reputation moves
+        so.configure(new DefaultRules(), e -> {
+            if (loud[0] && e.repDelta() != 0)
+                System.out.println("   event " + e.kind() + " " + e.postId() + " -> " + e.authorId() + " " + (e.repDelta() > 0 ? "+" : "") + e.repDelta());
+        });
+        so.register("alice", "Alice", 300);
+        so.register("bob", "Bob", 300);
+        so.register("carol", "Carol", 300);
+        so.register("dan", "Dan", 300);
+
+        System.out.println("-- ask, answer, comment --");
+        Question q = so.ask("alice", "Why does HashMap lose my key?",
+                            "I put a mutable object in a HashMap and now get(k) returns null.", Set.of("java", "collections"));
+        Answer a1 = so.answer(q.id(), "bob", "You mutated a field used by hashCode after the put.");
+        Answer a2 = so.answer(q.id(), "carol", "Use an immutable key, or re-put after mutating.");
+        so.comment(a1.id(), "dan", "This is the actual cause, not a JDK bug.");
+        System.out.println("   " + q.title() + "  answers=" + q.answers().size());
+
+        System.out.println("-- votes --");
+        so.vote(a1.id(), "carol", VoteType.UP);        // carol +0, bob +10
+        so.vote(a1.id(), "dan", VoteType.UP);          // bob +10
+        so.vote(a1.id(), "dan", VoteType.UP);          // the same vote twice: a no-op
+        so.vote(q.id(), "bob", VoteType.UP);           // alice +5
+        so.vote(a2.id(), "dan", VoteType.DOWN);        // carol -2
+        System.out.println("   a1 score=" + q.post(a1.id()).score() + "  a2 score=" + q.post(a2.id()).score()
+            + "  question score=" + q.score());
+        System.out.println("   bob=" + so.user("bob") + " carol=" + so.user("carol") + " alice=" + so.user("alice"));
+
+        System.out.println("-- dan changes his mind, then takes it back --");
+        so.vote(a2.id(), "dan", VoteType.UP);          // carol -2 reversed and +10 applied = +12
+        so.retractVote(a2.id(), "dan");                // and all the way back to nothing
+        System.out.println("   a2 score=" + q.post(a2.id()).score() + "  carol=" + so.user("carol"));
+
+        System.out.println("-- accept, then change the accepted answer --");
+        so.accept(a1.id(), "alice");                   // bob +15, alice +2
+        so.accept(a2.id(), "alice");                   // bob -15, carol +15, alice keeps the +2
+        System.out.println("   accepted=" + q.acceptedAnswerId() + "  bob=" + so.user("bob") + " carol=" + so.user("carol"));
+
+        System.out.println("-- search --");
+        System.out.println("   tag java      -> " + so.byTag("java").size());
+        System.out.println("   word hashmap  -> " + so.byWord("hashmap").size());
+        System.out.println("   author alice  -> " + so.byAuthor("alice").size());
+
+        System.out.println("-- fifty people upvote the same answer at the same instant --");
+        loud[0] = false;                               // fifty identical lines prove nothing; the counts below do
+        Question hot = so.ask("alice", "What is the fastest way to sort?", "Sorting a big array of longs.", Set.of("java"));
+        Answer target = so.answer(hot.id(), "bob", "Arrays.sort on a primitive array is a dual-pivot quicksort.");
+        long bobBefore = so.user("bob").reputation();
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(50);
+        for (int i = 0; i < 50; i++) {
+            String voter = "v" + i;
+            so.register(voter, "Voter " + i, 200);
+            pool.submit(() -> {
+                try { go.await(); so.vote(target.id(), voter, VoteType.UP); so.vote(target.id(), voter, VoteType.UP); }
+                catch (Exception ignored) { } finally { done.countDown(); }
+            });
+        }
+        go.countDown();
+        done.await();
+        pool.shutdown();
+        System.out.println("   voters=" + hot.post(target.id()).voterCount() + "  score=" + hot.post(target.id()).score()
+            + "  bob gained " + (so.user("bob").reputation() - bobBefore) + " (50 x 10)");
+    }
+}

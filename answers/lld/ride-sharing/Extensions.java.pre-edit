@@ -1,0 +1,379 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose: a twist
+// that needs a big block means the derivation on page 02 went wrong. Nothing in Main.java changes for any of them.
+
+// ---- ext: the driver declines, or never taps accept -- the claim becomes a time-boxed lease
+/**
+ * Today reserve() is a claim that lasts forever. In real dispatch it is a LEASE: the car is held for about fifteen
+ * seconds while his phone rings, and if he declines or says nothing the hold is released and the ride is offered to
+ * the next-nearest car. The loop is the one already in requestRide with two extra lines, which is the point.
+ */
+class LeasedDispatch {
+    private final DriverIndex index;
+    private final MatchingStrategy matching;
+    private final Clock clock;
+    private final long offerMs;
+    private final AtomicInteger offers = new AtomicInteger(), refused = new AtomicInteger();
+
+    LeasedDispatch(DriverIndex index, MatchingStrategy matching, Clock clock, long offerMs) {
+        this.index = index; this.matching = matching; this.clock = clock; this.offerMs = offerMs;
+    }
+    /**
+     * Offer the ride down the candidate list until somebody accepts inside the window. `phone` stands in for the
+     * driver's app: true means he tapped accept in time. A real system replaces it with a scheduled task that
+     * releases the lease when the deadline passes.
+     */
+    Optional<Driver> dispatch(Location pickup, VehicleType type, BiPredicate<Driver, Long> phone) {
+        List<Driver> candidates = new ArrayList<>(index.nearby(pickup));
+        while (true) {
+            Optional<Driver> pick = matching.select(pickup, type, candidates);
+            if (pick.isEmpty()) return Optional.empty();
+            Driver d = pick.get();
+            if (!d.reserve()) { candidates.remove(d); continue; }     // lost the race: next car, no waiting
+            offers.incrementAndGet();
+            long deadline = clock.nowMs() + offerMs;
+            boolean accepted = phone.test(d, deadline) && clock.nowMs() <= deadline;
+            if (accepted) return Optional.of(d);
+            d.release();                                             // declined or the lease expired: back in the pool
+            refused.incrementAndGet();
+            candidates.remove(d);                                    // and he is not offered this ride again
+        }
+    }
+    /** How many offers went out and how many came back unanswered. The number the ops team actually watches. */
+    String stats() { return "offers=" + offers + " declined-or-timed-out=" + refused; }
+}
+
+// ---- ext: fairness -- nearest-first starves the car parked at the edge of the hotspot
+/**
+ * Ops says the same few cars keep winning while a driver two streets out waits an hour. This is a NEW matching
+ * rule and one line at the composition root: among the cars that are close enough, send the one who has been idle
+ * longest. Distance is still the first filter, because fairness inside a five-kilometre radius is fair; fairness
+ * across a city is a rider waiting twenty minutes.
+ */
+class LongestIdleMatching implements MatchingStrategy {
+    private static final double MAX_PICKUP_KM = 5.0;
+    private final Map<String, Long> idleSince = new ConcurrentHashMap<>();
+    private final Clock clock;
+    LongestIdleMatching(Clock clock) { this.clock = clock; }
+    /** Called when a driver comes back into the pool; stamps the start of his wait. */
+    void onAvailable(String driverId) { idleSince.put(driverId, clock.nowMs()); }
+    public Optional<Driver> select(Location pickup, VehicleType type, List<Driver> candidates) {
+        Driver best = null; long bestStamp = Long.MAX_VALUE;
+        for (Driver d : candidates) {
+            if (d.status() != DriverStatus.AVAILABLE || d.vehicle().type() != type) continue;
+            if (d.location().distanceKm(pickup) > MAX_PICKUP_KM) continue;        // still bounded by distance
+            long stamp = idleSince.getOrDefault(d.id(), 0L);                      // the oldest stamp waited longest
+            if (stamp < bestStamp) { bestStamp = stamp; best = d; }
+        }
+        return Optional.ofNullable(best);
+    }
+}
+
+// ---- ext: minutes, not kilometres -- the straight line is a lie when there is a river in the way
+/** The seam where a real routing service plugs in. One method, so a test can hand in a fixed map. */
+interface RouteProvider {
+    /** How long the car would take to reach the pickup point, in seconds. */
+    long etaSeconds(Location from, Location to);
+}
+
+/** Send the car that will ARRIVE first, which is not always the closest one. A new class, nothing else moves. */
+class EtaMatching implements MatchingStrategy {
+    private final RouteProvider routes;
+    EtaMatching(RouteProvider routes) { this.routes = routes; }
+    public Optional<Driver> select(Location pickup, VehicleType type, List<Driver> candidates) {
+        Driver best = null; long bestEta = Long.MAX_VALUE;
+        for (Driver d : candidates) {
+            if (d.status() != DriverStatus.AVAILABLE || d.vehicle().type() != type) continue;
+            long eta = routes.etaSeconds(d.location(), pickup);
+            if (eta < bestEta) { bestEta = eta; best = d; }
+        }
+        return Optional.ofNullable(best);
+    }
+}
+
+// ---- ext: coupons and tolls -- more wrappers, never more flags
+/**
+ * Twenty per cent off, capped. A wrapper, like surge, so the order of the stack is visible at the call site
+ * instead of hidden in an if-chain: surge first, then the coupon on the surged fare, then tolls on top.
+ */
+class CouponPricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final int offBasisPoints;
+    private final long capPaise;
+    CouponPricing(PricingStrategy base, int offBasisPoints, long capPaise) {
+        this.base = base; this.offBasisPoints = offBasisPoints; this.capPaise = capPaise;
+    }
+    public long price(FareBasis b) {
+        long full = base.price(b);
+        return full - Math.min(full * offBasisPoints / 10_000, capPaise);
+    }
+}
+
+/** A flat amount the rider owes whatever the meter said: a toll, an airport levy, a night charge. */
+class SurchargePricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final ToLongFunction<FareBasis> surcharge;
+    SurchargePricing(PricingStrategy base, ToLongFunction<FareBasis> surcharge) { this.base = base; this.surcharge = surcharge; }
+    public long price(FareBasis b) { return base.price(b) + surcharge.applyAsLong(b); }
+}
+
+// ---- ext: real surge -- the multiplier comes from the numbers the index already holds
+/** How many rides were asked for in this neighbourhood lately. A sliding window of timestamps per cell. */
+class DemandCounter {
+    private final Map<String, Deque<Long>> byZone = new ConcurrentHashMap<>();
+    private final long windowMs;
+    DemandCounter(long windowMs) { this.windowMs = windowMs; }
+    /** Record one request. O(1) amortised. */
+    void record(Location where, long nowMs) {
+        Deque<Long> q = byZone.computeIfAbsent(zone(where), k -> new ConcurrentLinkedDeque<>());
+        q.addLast(nowMs);
+        trim(q, nowMs);
+    }
+    /** How many requests this neighbourhood saw inside the window. */
+    int recent(Location where, long nowMs) {
+        Deque<Long> q = byZone.get(zone(where));
+        if (q == null) return 0;
+        trim(q, nowMs);
+        return q.size();
+    }
+    private void trim(Deque<Long> q, long nowMs) {
+        Long head;
+        while ((head = q.peekFirst()) != null && head < nowMs - windowMs) q.pollFirst();
+    }
+    private static String zone(Location l) {
+        return (long) Math.floor(l.lat() / 0.01) + ":" + (long) Math.floor(l.lng() / 0.01);
+    }
+}
+
+/**
+ * Surge by zone and minute: riders wanting a car divided by cars available, clamped between 1.0x and 3.0x. It
+ * reads the index and the demand counter and nothing else, so the orchestrator never learns what surge is.
+ */
+class ZoneSurge implements SurgeSource {
+    private final DriverIndex index;
+    private final DemandCounter demand;
+    ZoneSurge(DriverIndex index, DemandCounter demand) { this.index = index; this.demand = demand; }
+    public int basisPoints(FareBasis b) {
+        int supply = 0;
+        for (Driver d : index.nearby(b.pickup())) if (d.status() == DriverStatus.AVAILABLE) supply++;
+        int want = demand.recent(b.pickup(), b.atMs());
+        if (supply == 0) return want > 0 ? 30_000 : 10_000;
+        int bp = (int) Math.min(30_000L, 10_000L * want / supply);
+        return Math.max(10_000, bp);                                 // never a discount; that is a coupon's job
+    }
+}
+
+// ---- ext: pooling -- one car, several riders, one fare to divide
+/**
+ * A pooled ride is not a new state machine: it is a trip with more than one rider and a fare to divide. The rule
+ * that matters is the division, and it has exactly the Splitwise problem: the shares must add up to the fare to
+ * the paise, so the last rider absorbs the rounding.
+ */
+class PoolFare {
+    /** One rider's stretch of a pooled ride: the kilometres they were actually in the car. */
+    record Leg(String riderId, double km) {}
+    /** Divide one fare in proportion to the distance each rider travelled. The shares always sum to farePaise. */
+    static Map<String, Long> split(long farePaise, List<Leg> legs) {
+        double total = 0;
+        for (Leg l : legs) total += l.km();
+        Map<String, Long> out = new LinkedHashMap<>();
+        long allocated = 0;
+        for (int i = 0; i < legs.size(); i++) {
+            long share = (i == legs.size() - 1) ? farePaise - allocated             // the last leg absorbs the drift
+                                                : Math.round(farePaise * legs.get(i).km() / total);
+            allocated += share;
+            out.put(legs.get(i).riderId(), share);
+        }
+        return out;
+    }
+    // matching changes too, and only matching: the rule scores the DETOUR a new rider would add to the live route
+    // instead of the distance to the pickup, so it is another MatchingStrategy, not a change to the service.
+}
+
+// ---- ext: ratings -- a listener, because the money path must not wait for a star
+/**
+ * Stars, collected after a trip completes. It is an observer: the state machine announces COMPLETED and the rating
+ * book hears it. The service never learns that ratings exist, and a rating rule can later feed a matching rule.
+ */
+class RatingBook implements TripObserver {
+    private final Map<String, long[]> byDriver = new ConcurrentHashMap<>();   // driverId -> {sum, count}
+    private final Map<String, String> pending = new ConcurrentHashMap<>();    // tripId -> driverId, awaiting a star
+    public void onTrip(Trip t, TripStatus from, TripStatus to) {
+        if (to == TripStatus.COMPLETED) pending.put(t.id(), t.driver().id());
+    }
+    /** The rider taps a star. Only a trip that actually completed can be rated, and only once. */
+    void rate(String tripId, int stars) {
+        if (stars < 1 || stars > 5) throw new IllegalArgumentException("stars must be 1..5: " + stars);
+        String driverId = pending.remove(tripId);
+        if (driverId == null) throw new IllegalStateException("no completed, unrated trip " + tripId);
+        byDriver.compute(driverId, (k, v) -> v == null ? new long[]{stars, 1} : new long[]{v[0] + stars, v[1] + 1});
+    }
+    /** A driver's average, or 0 if nobody has rated him. */
+    double averageOf(String driverId) {
+        long[] v = byDriver.get(driverId);
+        return v == null ? 0 : (double) v[0] / v[1];
+    }
+}
+
+// ---- ext: a denser city -- the index is an interface, so the grid is one line at the composition root
+/**
+ * The known weakness of a uniform grid is density skew: one downtown cell holds four thousand cars and the
+ * neighbour scan degenerates. The fix is resolution, and because DriverIndex is an interface the fix is a new
+ * class: smaller cells and a wider ring downtown, bigger cells in the suburbs. A production system uses a
+ * quadtree, a geohash prefix or Google S2 cells, which is the same idea with the resolution chosen per region.
+ */
+class PrecisionIndex implements DriverIndex {
+    private final double cellDeg;
+    private final int ring;                                          // how many cells out a read scans
+    private final Map<Long, Set<Driver>> cells = new ConcurrentHashMap<>();
+    private final Map<String, Long> cellOfDriver = new ConcurrentHashMap<>();
+    PrecisionIndex(double cellDeg, int ring) { this.cellDeg = cellDeg; this.ring = ring; }
+    public void update(Driver d, Location where) {
+        d.moveTo(where);
+        long cell = cellOf(where);
+        Long old = cellOfDriver.get(d.id());
+        if (old != null && old.longValue() == cell) return;
+        if (old != null) { Set<Driver> from = cells.get(old); if (from != null) from.remove(d); }
+        cells.computeIfAbsent(cell, k -> ConcurrentHashMap.newKeySet()).add(d);
+        cellOfDriver.put(d.id(), cell);
+    }
+    public void remove(Driver d) {
+        Long cell = cellOfDriver.remove(d.id());
+        if (cell != null) { Set<Driver> from = cells.get(cell); if (from != null) from.remove(d); }
+    }
+    public List<Driver> nearby(Location pickup) {
+        long latCell = (long) Math.floor(pickup.lat() / cellDeg), lngCell = (long) Math.floor(pickup.lng() / cellDeg);
+        List<Driver> out = new ArrayList<>();
+        for (long dLat = -ring; dLat <= ring; dLat++)
+            for (long dLng = -ring; dLng <= ring; dLng++) {
+                Set<Driver> bucket = cells.get(key(latCell + dLat, lngCell + dLng));
+                if (bucket != null) out.addAll(bucket);
+            }
+        return out;
+    }
+    private long cellOf(Location l) { return key((long) Math.floor(l.lat() / cellDeg), (long) Math.floor(l.lng() / cellDeg)); }
+    private static long key(long a, long b) { return (a << 32) ^ (b & 0xffff_ffffL); }
+}
+
+// ---- ext: persistence -- the compare-and-set becomes a conditional UPDATE, which is the same thing
+/**
+ * Beyond one process the driver's status cell cannot live in a JVM. It becomes a row, and the compare-and-set
+ * becomes a conditional UPDATE: the database does exactly what the AtomicReference did, for the whole fleet.
+ */
+interface TripRepository {
+    /** Write a trip once. False means this id already existed, which is what makes a client retry safe. */
+    boolean insert(String tripId, String riderId, String driverId, TripStatus status);
+    /** Move a trip only if it is still in `from`. The guarded transition, in the database. */
+    boolean compareAndSetStatus(String tripId, TripStatus from, TripStatus to);
+    /** What a trip's status is now, or empty if there is no such trip. */
+    Optional<TripStatus> statusOf(String tripId);
+}
+
+/** The in-memory implementation, which is the same two operations the service already performs, wearing a coat. */
+class InMemoryTripRepository implements TripRepository {
+    private final Map<String, TripStatus> status = new ConcurrentHashMap<>();
+    public boolean insert(String tripId, String riderId, String driverId, TripStatus s) {
+        return status.putIfAbsent(tripId, s) == null;
+    }
+    public boolean compareAndSetStatus(String tripId, TripStatus from, TripStatus to) {
+        return status.replace(tripId, from, to);
+    }
+    public Optional<TripStatus> statusOf(String tripId) { return Optional.ofNullable(status.get(tripId)); }
+}
+// the same operations in SQL, and the service's code does not change, only what it was handed:
+//   UPDATE driver SET status = 'RESERVED', trip_id = ? WHERE id = ? AND status = 'AVAILABLE';
+//     -- 1 row updated means you won the car; 0 rows means somebody else did. That IS compareAndSet.
+//   INSERT INTO trip (id, rider_id, driver_id, status) VALUES (?,?,?,'ASSIGNED') ON CONFLICT (id) DO NOTHING;
+//     -- 0 rows inserted means a retried request: stop, the trip already exists
+//   UPDATE trip SET status = 'COMPLETED', payment_ref = ? WHERE id = ? AND status = 'COMPLETED_UNPAID';
+//     -- the guarded transition, so two settlement workers cannot both complete the same trip
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) {
+        long[] now = { 1_700_000_000_000L };
+        Clock clock = () -> now[0];
+        Location kormangala = new Location(12.9352, 77.6245);
+
+        // a lease: the first two cars ignore the offer, the third accepts
+        GridIndex index = new GridIndex();
+        List<Driver> fleet = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            Driver d = new Driver("D" + i, "driver" + i, new Vehicle("KA0" + i, VehicleType.GO),
+                                  new Location(12.9352 + i * 0.0005, 77.6245));
+            d.goOnline(); index.update(d, d.location()); fleet.add(d);
+        }
+        LeasedDispatch dispatch = new LeasedDispatch(index, new NearestDriver(), clock, 15_000);
+        Optional<Driver> accepted = dispatch.dispatch(kormangala, VehicleType.GO,
+            (d, deadline) -> d.id().equals("D2"));                          // only the third driver taps accept
+        System.out.println("lease: accepted by " + accepted.map(Driver::name).orElse("nobody") + "; " + dispatch.stats()
+            + "; the two who ignored it are " + fleet.get(0).status() + " again");
+
+        // fairness: the car that has waited longest wins, even though it is not the nearest
+        fleet.get(2).release();                                              // he finished the leased ride
+        LongestIdleMatching fair = new LongestIdleMatching(clock);
+        fair.onAvailable("D2"); now[0] += 60_000; fair.onAvailable("D1"); now[0] += 60_000; fair.onAvailable("D0");
+        System.out.println("nearest picks " + new NearestDriver().select(kormangala, VehicleType.GO, fleet).map(Driver::name).orElse("-")
+            + ", longest-idle picks " + fair.select(kormangala, VehicleType.GO, fleet).map(Driver::name).orElse("-"));
+
+        // eta instead of distance: a river makes the nearest car the slowest
+        RouteProvider routes = (from, to) -> from.equals(fleet.get(0).location()) ? 900 : 240;
+        System.out.println("by ETA the answer is " + new EtaMatching(routes)
+            .select(kormangala, VehicleType.GO, fleet).map(Driver::name).orElse("-") + " (the near car is across the river)");
+
+        // the pricing stack, in the order the call site declares it
+        FareBasis basis = new FareBasis(VehicleType.GO, 8.0, 24, kormangala, now[0]);
+        PricingStrategy plain = new NormalPricing();
+        PricingStrategy surged = new SurgePricing(plain, b -> 15_000);
+        PricingStrategy couponed = new CouponPricing(surged, 2_000, Money.rupees("50.00"));
+        PricingStrategy tolled = new SurchargePricing(couponed, b -> Money.rupees("35.00"));
+        System.out.println("fare: base " + Money.fmt(plain.price(basis)) + " -> surge " + Money.fmt(surged.price(basis))
+            + " -> 20% off, capped at 50 " + Money.fmt(couponed.price(basis))
+            + " -> +35 toll " + Money.fmt(tolled.price(basis)));
+
+        // real surge: six riders wanting a car in a zone that has three
+        DemandCounter demand = new DemandCounter(5 * 60_000L);
+        for (int i = 0; i < 6; i++) demand.record(kormangala, now[0]);
+        ZoneSurge zone = new ZoneSurge(index, demand);
+        long free = index.nearby(kormangala).stream().filter(d -> d.status() == DriverStatus.AVAILABLE).count();
+        System.out.println("zone surge: 6 requests / " + free + " free cars = " + zone.basisPoints(basis) / 10_000.0
+            + "x, so the fare is " + Money.fmt(new SurgePricing(plain, zone).price(basis)));
+
+        // pooling: one fare, three riders, and the shares add up to the paise
+        Map<String, Long> shares = PoolFare.split(Money.rupees("258.00"),
+            List.of(new PoolFare.Leg("R1", 8.0), new PoolFare.Leg("R2", 5.0), new PoolFare.Leg("R3", 3.5)));
+        long sum = shares.values().stream().mapToLong(Long::longValue).sum();
+        System.out.println("pool split of 258.00 over 8.0/5.0/3.5 km -> " + shares + " summing to " + Money.fmt(sum));
+
+        // a denser index: smaller cells, wider ring, same interface
+        PrecisionIndex fine = new PrecisionIndex(0.0025, 2);
+        for (Driver d : fleet) fine.update(d, d.location());
+        System.out.println("fine index (275 m cells, 5x5 ring) sees " + fine.nearby(kormangala).size() + " cars near the pickup");
+
+        // ratings: the observer hears COMPLETED and nothing else in the system knows
+        RideService svc = new RideService(new GridIndex());
+        RatingBook stars = new RatingBook();
+        svc.setClock(clock); svc.addObserver(stars);
+        svc.addRider(new Rider("R1", "Meera"));
+        Driver asha = new Driver("D9", "Asha", new Vehicle("KA09", VehicleType.GO), kormangala);
+        svc.goOnline(asha, kormangala);
+        Trip t = svc.requestRide("R1", kormangala, new Location(12.97, 77.59), VehicleType.GO).orElseThrow();
+        svc.driverArrived(t.id()); svc.startTrip(t.id()); now[0] += 20 * 60_000L;
+        svc.endTrip(t.id(), 6.0);
+        stars.rate(t.id(), 5);
+        System.out.println("ratings: Asha averages " + stars.averageOf("D9") + " over 1 trip; fare " + Money.fmt(t.farePaise()));
+
+        // persistence: the conditional UPDATE is the compare-and-set
+        TripRepository repo = new InMemoryTripRepository();
+        System.out.println("repo insert " + repo.insert("T1", "R1", "D9", TripStatus.ASSIGNED)
+            + ", the same insert again " + repo.insert("T1", "R1", "D9", TripStatus.ASSIGNED));
+        System.out.println("repo IN_PROGRESS->COMPLETED_UNPAID from the wrong state: "
+            + repo.compareAndSetStatus("T1", TripStatus.IN_PROGRESS, TripStatus.COMPLETED_UNPAID)
+            + ", from the right one: " + repo.compareAndSetStatus("T1", TripStatus.ASSIGNED, TripStatus.ARRIVED)
+            + ", now " + repo.statusOf("T1").orElseThrow());
+    }
+}

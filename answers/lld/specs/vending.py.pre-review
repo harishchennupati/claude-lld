@@ -1,0 +1,656 @@
+# Vending machine LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"vending/Main.java").read_text()
+ext   = (H/"vending/Extensions.java").read_text()
+tests = (H/"vending/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("buy", 30, [("coins go into the slot", "they sit in escrow, not ours yet"),
+                     ("press A1: prove the sale", "stock, price and change, all proven"),
+                     ("the motor turns", "the one act that cannot be undone"),
+                     ("commit: stock, float, tray", "kept in the tray until you take them")]),
+        ("coin return", 165, [("press coin return", "any time before the item drops"),
+                              ("the escrow, coin for coin", "the same coins, not the same total"),
+                              ("into the tray", "the machine keeps nothing"),
+                              ("back to idle", "ready for the next customer")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 150 + k*270
+        pf += _bx(x, y, 250, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+250, y+27, x+270), True)
+pf += _ar("M545 84 V95", dash=True) + _bx(330, 95, 430, 40, "sold out, too little, or no change: nothing moves", "", dash=True)
+pf += _tx(88, 262, "read", "var(--acc)", 13) + _tx(150, 262, "at any moment, without counting anything: how many are left in A1?  what is the float worth?  could you make change for a fifty?", "var(--text)", 12, "start")
+pf += _tx(88, 292, "operator", "var(--acc)", 13) + _tx(150, 292, "refill a column, top up the coin float, take the machine out of service -- and even then the coin return still works", "var(--text)", 12, "start")
+pf += _tx(615, 324, "two panels can press at the same instant: one unit is sold once, and every paise that goes in comes out as change, a refund, or the float", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 340, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("17:02  Rs 30 for a Dairy Milk", ["escrow: Rs 20 + Rs 10 = Rs 30", "Rs 5 change is proven first",
+                                         "the motor turns, then stock 3 -> 2", "float 100 -> 125; bar + Rs 5 out"], True),
+      ("17:05  Rs 10 for a Rs 35 Coke", ["Rs 25 short, so nothing happens", "not one paise of the escrow moves",
+                                          "coin return gives that Rs 10 back"], False),
+      ("17:09  Rs 40 in, float is thin", ["change due Rs 15; float: one Rs 10", "it cannot be made, so it is refused",
+                                           "Rs 40 to the tray, stock still 3"], False),
+      ("17:30  two panels, one Lays left", ["both read '1 left' at one instant", "the lock lets exactly one through",
+                                             "one item out; the loser gets Rs 30", "A1 hits 0 and the pager fires"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Coins go in one at a time and sit in escrow until a sale commits.</li>
+<li>Press a slot code: sell when there is stock, the money covers the price, and exact change can be made.</li>
+<li>Refuse with a reason &mdash; unknown code, sold out, not enough money &mdash; without touching the money.</li>
+<li>Refund everything when exact change cannot be made from the float plus the escrow.</li>
+<li>Coin return any time before the item drops: the same coins back, not the same total &mdash; and after thirty seconds with nobody pressing anything the machine hands them back by itself.</li>
+<li>The item and its change land in a tray that keeps them until somebody reaches in: a second sale never overwrites the bar the last customer forgot.</li>
+<li>Operator: restock a column, refill the coin float, take the machine out of service.</li>
+<li>The price is a rule that can change (happy hour) without touching the machine.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Two panels at the same instant: a unit is sold once, and no paise appears or disappears.</li>
+<li>Money is exact: integer paise, never a <code>double</code>.</li>
+<li>"How many are left?" and "what is the float worth?" are O(1), never a count of anything.</li>
+<li>The price rule and the change algorithm are swappable without opening the machine.</li>
+<li>One source of truth for stock and for cash: the machine's slots and coin box, behind one lock.</li>
+<li>Nothing half-done: a refusal or a jam leaves stock, float and escrow exactly as they were.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design a vending machine. Several columns of products with prices and counts, coins in, the item '
+          'and the change out, and a coin return button. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A box on a wall with a few columns of snacks. Each '
+ 'column has a code you press, one product and a count of how many are left. You push coins in one at a time; '
+ 'they sit inside the machine but they are still yours until something is sold. You press a code, and the '
+ 'machine either drops the item with your change, or tells you why it will not: no such code, that column is '
+ 'empty, you are short, or it cannot make your change from the coins it is holding. A coin return button gives '
+ 'you back exactly the coins you put in, right up to the moment the item falls, and if you wander off with money '
+ 'still inside, the machine returns it after half a minute rather than keeping it. An operator refills the columns '
+ 'and the coin float. The one thing that must always be true is that money and stock stay in step: a unit leaves '
+ 'the machine only when it has been paid for, and every paise that went in comes back as change, as a refund, or '
+ 'stays as the machine\'s float.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that buys something and prints the change. The interviewer is watching for, in this '
+ 'order: the questions you ask before typing (money first or select first, and what happens when change is '
+ 'impossible, are the first two); which classes exist and which one owns the counts and which one owns the coins; '
+ 'a sale end to end; what happens when two panels press for the last unit; where the rules that will change '
+ '(the price, the change algorithm) live, so a change is a new class and not an edit; and what the machine looks '
+ 'like after the motor jams with your money inside. Then the twists: cards, an exact-change lamp, holding an item, '
+ 'operator alerts, a bank of machines sharing stock.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>How many columns, and does each one carry its own price and count?</td><td>Several; yes, both</td><td>A Slot class and a map by code (moves 1, 5)</td></tr>'
+ '<tr><td>Coins only, or card too? And does the machine give change?</td><td>Coins now, change yes, card later</td><td>A coin box with a float, and change behind an interface (move 3)</td></tr>'
+ '<tr><td>Money first then select, or select then pay?</td><td>Money first; the coins sit in escrow</td><td>Two of the four modes, and what the coin return means (move 6)</td></tr>'
+ '<tr><td>What happens when exact change cannot be made?</td><td>Refuse and refund everything</td><td>The change is proven before anything moves (move 6)</td></tr>'
+ '<tr><td>One keypad, or can a card reader and a phone press at the same time? Do they share the coin slot?</td><td>Two can press; one coin slot</td><td>One lock in the machine, and ONE escrow rather than one per panel (moves 4, 7)</td></tr>'
+ '<tr><td>Can the motor fail after the money is inside?</td><td>Yes, and the money must come back</td><td>The drop is the irreversible step; commit after it (moves 6, 9)</td></tr>'
+ '<tr><td>Are operator actions in scope: restock, refill the float, alerts?</td><td>Yes, and one screen listens</td><td>An observer plus two operator methods (moves 3, 12)</td></tr>'
+ '<tr><td>One machine in memory, or a bank of machines on a shared service?</td><td>One machine, one process</td><td>No repository yet; a follow-up adds one (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One evening, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> money is integer paise, never a double; inserted coins sit in escrow '
+ 'and become the machine\'s only when a sale commits; the change is proven from float plus escrow before anything '
+ 'moves; the motor turning is the irreversible step, so stock goes down after it and never before; money is never '
+ 'held for ever, so an escrow nobody comes back for goes to the tray; one machine, one lock, in memory, one process. '
+ 'Named as out of scope: cards and UPI, holding an item until you pay, a bank of machines on a shared stock service, '
+ 'persistence &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a CUSTOMER pushes COINS into a MACHINE; a SLOT holds a PRODUCT and a COUNT; the COIN BOX makes CHANGE; the TRAY holds what you take", "var(--text)", 12.5)
+for k, (t, sub, acc) in enumerate([("Slot", "code, product, count", 1), ("CoinBox", "how many of each coin", 1),
+                                   ("Tray", "what is waiting to be taken", 1), ("VendingMachine", "slots, float, escrow, lock", 1),
+                                   ("Coin", "a fixed list of values: enum", 0), ("Front panel", "no state: a thin caller", 0)]):
+    x = 20 + k*200
+    m1 += _bx(x, 110, 185, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + 92))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a fixed list of values, or a caller", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("take a unit off the coil", "Slot  (owns the count)", "slot.takeOne()"),
+                                       ("pay change out of the float", "CoinBox  (owns the coin counts)", "box.withdraw(coins)"),
+                                       ("sell: press a slot", "VendingMachine  (owns both, plus the lock)", "machine.select(code)")]):
+    y = 24 + k*56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 213, "a verb whose state is spread over two classes goes to the class that owns both: that class becomes the orchestrator", "var(--muted)", 11)
+m2 += _tx(615, 232, "\"sell\" touches the count, the float, the escrow and the tray, so it belongs to the machine and to nothing smaller", "var(--muted)", 11)
+MV[2] = _mv(1230, 245, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 80, 220, 100, "VendingMachine", "configure(price, change, motor)", acc=True)
+for k, (t, sub, impl) in enumerate([("PricingStrategy", "list price, happy hour, loyalty", "ListPrice / HappyHourDiscount"),
+                                    ("ChangeStrategy", "greedy, back-off, a bounded DP", "GreedyChange / BackoffChange / DpChange"),
+                                    ("Dispenser", "the motor; a test one that jams", "Motor / a jamming stub"),
+                                    ("MachineObserver", "screen, restock pager, telemetry", "Display / RestockAlert / Telemetry")]):
+    y = 20 + k*58
+    m3 += _ar("M250 130 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 440, 44, impl, "the classes that can be handed in") + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 275, "dashed green = handed in. The machine never builds a rule, so a new change algorithm is a new class and one changed line", "var(--muted)", 11)
+m3 += _tx(615, 295, "and one price rule WRAPS another: new HappyHourDiscount(new ListPrice(), clock, 16, 18, 20). That wrapping is Decorator, born right here.", "var(--acc)", 11)
+MV[3] = _mv(1230, 310, m3)
+
+# move 4: the gap, and one owner with one lock
+m4 = _D + _bx(30, 30, 210, 44, "keypad", "reads A1: 1 left") + _bx(30, 110, 210, 44, "card reader", "reads A1: 1 left")
+m4 += _bx(360, 70, 190, 44, "slot A1", "count = 1", acc=True)
+m4 += _ar("M240 52 H360 V70") + _ar("M240 132 H360 V114") + _tx(300, 40, "read", "var(--muted)", 10.5) + _tx(300, 160, "read", "var(--muted)", 10.5)
+m4 += '<rect x="590" y="20" width="290" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(735, 45, "the gap", RED, 12) + _tx(735, 70, "both saw 1, both take one:", RED, 11) + _tx(735, 90, "two items out, one paid for", RED, 11)
+m4 += _tx(735, 130, "fix: read and write as ONE step", "var(--text)", 11)
+m4 += _bx(910, 40, 290, 100, "VendingMachine.lock", "check, drop, commit = one step", acc=True)
+m4 += _tx(1055, 165, "the lock lives where the shared state lives", "var(--muted)", 10.5)
+m4 += _tx(1055, 185, "the screen is told AFTER the unlock, never inside", "var(--muted)", 10.5)
+MV[4] = _mv(1230, 200, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("what is behind A1?", "Map&lt;code, Slot&gt;", "O(1)"),
+                                      ("how many Rs 5 coins do we hold?", "EnumMap&lt;Coin, Integer&gt;  one array slot", "O(1)"),
+                                      ("what is the whole float worth?", "sum over 5 denominations", "O(5)"),
+                                      ("is this button legal right now?", "EnumMap&lt;State, EnumSet&lt;Action&gt;&gt;", "O(1)"),
+                                      ("what has this customer put in?", "List&lt;Coin&gt; escrow, appended", "O(1) add"),
+                                      ("what is waiting in the tray?", "List&lt;Product&gt; items + List&lt;Coin&gt; coins", "O(1) add")]):
+    y = 16 + k*46
+    m5 += _bx(30, y, 360, 38, q, "the question") + _ar("M390 %s H450" % (y+19), True)
+    m5 += _bx(450, y, 520, 38, shape, "the shape", acc=True) + _ar("M970 %s H1030" % (y+19), True) + _bx(1030, y, 170, 38, cost, "")
+m5 += _tx(615, 302, "the escrow is a LIST of coins, not a total, because the coin return owes you the same coins back, not the same amount", "var(--muted)", 11)
+m5 += _tx(615, 320, "the tray is a list for a related reason: two sales before anybody reaches in must leave two bars in the bin, not one", "var(--muted)", 11)
+MV[5] = _mv(1230, 334, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D + _bx(30, 30, 165, 44, "IDLE", "insert coin", acc=True)
+m6 += _bx(225, 30, 165, 44, "HAS_MONEY", "escrow > 0", acc=True) + _bx(420, 30, 165, 44, "DISPENSING", "the flap is open", acc=True)
+m6 += _ar("M195 52 H225", True) + _ar("M390 52 H420", True)
+m6 += _bx(30, 150, 165, 44, "OUT_OF_SERVICE", "cancel still works") + _ar("M60 74 V150")
+m6 += _ar("M290 74 V92 H150 V74", True) + _tx(300, 96, "coin return, or a 30 s timeout", "var(--acc)", 10.5, "start")
+m6 += _ar("M502 74 V124 H112 V74", True) + _tx(490, 118, "commit, or refund", "var(--acc)", 10.5, "end")
+m6 += '<rect x="620" y="20" width="590" height="190" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(915, 44, "the order inside select(), and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1 three refusals that touch nothing: no such code, sold out, too little money",
+                       "2 prove the change from float + escrow -- a PURE plan; the float is not touched",
+                       "3 turn the motor: the one act that cannot be taken back",
+                       "4 only now: count -1, escrow into the float, change out, both into the tray",
+                       "a refusal or a jam leaves stock, float and escrow exactly as they were;",
+                       "the money is never kept for an item that did not fall"]):
+    m6 += _tx(635, 68 + k*24, l, "var(--muted)" if k > 3 else "var(--text)", 11, "start")
+m6 += _tx(615, 235, "an illegal action THROWS (a coin pushed in while the flap is open); a refused sale RETURNS a reason (sold out, too little, no change). Different things.", "var(--muted)", 11)
+MV[6] = _mv(1230, 250, m6)
+
+# move 7: what is inside the lock, and eight panels at the same instant
+m7 = _D + _card(30, 20, 540, 150, "inside the lock",
+                ["one map lookup for the slot: ~0.1 us", "the price rule: one call, ~0.1 us",
+                 "the change plan over 5 denominations: ~1 us", "about ten EnumMap and list writes: ~0.3 us",
+                 "and the MOTOR: about 2 SECONDS", "that last line is the whole problem"], acc=True)
+m7 += _ar("M570 95 H640", True) + _tx(605, 85, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 150, "outside the lock",
+            ["the screen and the pager: after the unlock", "telemetry and the operator dashboard: after too",
+             "the customer choosing and fishing for coins: seconds", "a broken listener cannot stall a sale",
+             "rung one of the ladder moves the motor out here"])
+m7 += _tx(615, 200, "eight panels press in the same second", "var(--text)", 12)
+for k in range(8):
+    x = 30 + k*148
+    m7 += _bx(x, 214, 136, 40, "panel %d" % (k+1), "waits %d s" % (k*2), acc=(k == 7))
+m7 += _tx(615, 282, "unlike most designs, here the queue is VISIBLE: the eighth panel waits fourteen seconds, because a two-second motor runs inside the lock.", "var(--muted)", 11)
+m7 += _tx(615, 300, "one machine has one or two panels, so today nobody notices; a bank of machines on one stock service would, which is what the ladder is for.", "var(--muted)", 11)
+MV[7] = _mv(1230, 314, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one lock per machine: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["everything except the motor: ~1.5 us of lock per sale",
+                       "a busy station machine: 300 sales a day, one every 5 minutes",
+                       "the motor at 2 s x 300 = 600 s of lock in 86,400 s: 0.7% busy",
+                       "two presses inside the same 2 s window: a handful at the evening peak",
+                       "the weak spot is not the lock, it is the 2 seconds inside it"]):
+    m8 += _tx(35, 66 + k*24, l, RED if k == 4 else "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 the motor outside the lock", "reserve the unit, drop, then commit or put it back"),
+                              ("2 a lock per column", "two panels on different columns never wait"),
+                              ("3 the count itself decides", "compareAndSet, or UPDATE slot SET qty=qty-1 WHERE qty&gt;0")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two panels press for the last unit", "one lock round the whole sale; test 1: 40 threads, one item out, the float grew by one price"),
+                                ("the float cannot make Rs 15", "prove the change before anything moves; test 2: full refund, stock and float untouched"),
+                                ("the motor jams with the money inside", "commit only after the item falls; test 4: Rs 30 back, no unit lost"),
+                                ("a coin pushed in while the flap is open", "the ALLOWED table refuses it; test 7: it throws, and so does a second press"),
+                                ("the screen throws", "publish after the unlock in a try/catch; test 6: the sale still completes"),
+                                ("he pays, walks off, and never comes back", "30 s and the escrow goes to the tray, which keeps every item; tests 9 and 10")]):
+    y = 18 + k*42
+    m9 += _bx(30, y, 320, 38, bad, "") + _ar("M350 %s H400" % (y+19), True) + _bx(400, y, 800, 38, fix, "", acc=True)
+m9 += _tx(615, 292, "every claim this design makes has a failure test: FailureTests.java runs ten of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 305, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 850)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface ChangeStrategy { List&lt;Coin&gt; plan(available, amount); }", None), ("a new change algorithm is a class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new HappyHourDiscount(new ListPrice(), clock, 16, 18, 20)", None), ("add to a price rule instead of copying it", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("publish(event) after the unlock, inside a try/catch", None), ("the screen hears; the sale never waits", None)],
+          [("State", "var(--text)"), ("move 6", None), ("ALLOWED: EnumMap&lt;MachineState, EnumSet&lt;Action&gt;&gt;", None), ("an illegal button cannot do anything", None)],
+          [("Null-safe seam", "var(--text)"), ("move 3", None), ("Dispenser handed in: the real motor, or one that jams", None), ("the physical failure is testable in one line", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("panels are HANDED the machine; nothing calls getInstance()", "var(--muted)"), ("every test builds a fresh machine", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("SlotFactory.fromConfig(\"A1|LAY|Lays|2000|8|3\") once columns come from a file", "var(--muted)"), ("today the columns arrive already typed", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("never", None), ("a slot has four fields and every one is required", "var(--muted)"), ("a pattern without a move is decoration", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 305, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 320, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Slot: its count. CoinBox: the coins. The machine: the flow and the lock.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("DpChange is a new file plus one line in configure()", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("changeRule.plan(pool, due);  never \"is this the greedy one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("PricingStrategy, ChangeStrategy, Dispenser, MachineObserver, Clock: one method each", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 9", None), ("vm.configure(new HappyHourDiscount(...), new BackoffChange(), new Motor())", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "a bounded-DP change maker, loyalty pricing", "a new class behind the existing interface plus one configure line", "", "move 3"),
+        ("someone new wants to know", "telemetry, a low-cash pager, a planogram service", "one more observer; the sale path does not change at all", "", "move 4"),
+        ("a new step in a life", "out of service, reserved, refunding", "one more row in the ALLOWED table (a class once the mode grows behaviour)", "", "move 6"),
+        ("a new invariant across items", "a combo: two columns, both or neither", "both claims inside the SAME lock: all or nothing", "", "move 4"),
+        ("state that must outlive the process", "a power cut; a bank of machines sharing stock", "the counts and the float behind a repository; the decrement becomes", "UPDATE slot SET qty = qty - 1 WHERE code = ? AND qty &gt; 0  -- 0 rows means another terminal got it", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the slot, the coin box and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>customer</b> pushes <b>coins</b> into a <b>machine</b>; a <b>slot</b> holds a "
+ "<b>product</b> and a <b>count</b>; the <b>coin box</b> makes <b>change</b>; the item and the change land in a "
+ "<b>tray</b>. A slot has a code, a product and a count, so it is a class. The coin box has how many of each coin it "
+ "holds: a class. The tray has whatever is waiting to be picked up: a class. The machine holds all of those plus the "
+ "coins this customer has pushed in so far: a class, and the only one with a lock. A coin is a fixed list of values "
+ "with a price in paise, so it is an enum, not a class. A product is a catalogue entry the slot points at. The front "
+ "panel remembers nothing, so it is a thin caller, which is exactly why adding a second panel changes no design.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Take a unit off the coil\" changes the slot's count, so <code>slot.takeOne()</code>. \"Pay change out of the "
+ "float\" changes the coin box's counts, so <code>box.withdraw(coins)</code>. \"Sell\" touches the count, the float, "
+ "the escrow and the tray at once, and only the machine sees all four, so <code>machine.select(code)</code>. When a "
+ "verb's state is spread over several classes it goes to the class that owns them all, and that class becomes the "
+ "orchestrator. That is how small dumb models and one busy machine appear without planning them. The rest fall out "
+ "the same way: the coin return touches the escrow, which belongs to the machine, so <code>machine.cancel()</code>; "
+ "emptying the bin touches what is waiting, which belongs to the tray, so <code>tray.take()</code>; refilling touches "
+ "a count, so <code>slot.refill(n)</code>, with <code>machine.restock(code, n)</code> in front of it to take the "
+ "lock. Note what did not become a verb: \"make change\" touches nothing at all, which is why it can be a pure "
+ "function and a swappable rule.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "The price will change (list price today, happy hour on Friday). How change is made will change (greedy today; a "
+ "lopsided float or odd denominations tomorrow). The motor is a physical thing a test has to be able to jam. And "
+ "somebody will want to be told when a column empties. Each becomes a one-method interface the machine is "
+ "<i>given</i> in <code>configure()</code>, never builds itself. This is where the patterns come from, not the other "
+ "way round: a swappable rule behind an interface is <b>Strategy</b>; a rule that wraps another rather than replacing "
+ "it &mdash; <code>new HappyHourDiscount(new ListPrice(), clock, 16, 18, 20)</code> &mdash; is <b>Decorator</b>; a "
+ "machine that announces \"A1 is empty\" without knowing whether anyone is listening is <b>Observer</b>. Do them; do "
+ "not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "A modern machine has a keypad, a card reader and a phone app, and all three can press for the last packet of Lays "
+ "in the same instant. Between \"I read that A1 has one left\" and \"I took it\" another caller can take it; that gap "
+ "is where two items leave and one is paid for. So the check, the drop and the commit must be one step under one "
+ "lock, in the class that owns the counts, the float and the escrow: the machine. And anything that only listens "
+ "&mdash; the screen, the restock pager, the telemetry sink &mdash; is called after the lock is released, inside a "
+ "try/catch, so a dead screen cannot stall a sale.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"What is behind A1?\": a map from code to slot. \"How many five-rupee coins do we hold?\": an <code>EnumMap</code> "
+ "from coin to count, which is an array index, not a hash. \"Is this button legal right now?\": a table from mode to "
+ "the set of allowed actions, so legality is a lookup and not an if-chain. \"What has this customer put in?\": a "
+ "<i>list</i> of coins, not a total &mdash; the coin return owes you the same coins back, not the same amount, and a "
+ "total cannot tell you which coins those were. Every scan avoided here is a question not fumbled in the concurrency "
+ "round, because the scan would have been inside the lock.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "The machine is IDLE until a coin drops, HAS_MONEY while the escrow is not empty, DISPENSING while the flap is open, "
+ "and OUT_OF_SERVICE when an operator takes it away &mdash; and even then the coin return works, because you never "
+ "strand somebody who already paid. There are two ways out of HAS_MONEY without a sale: the coin return, and thirty "
+ "seconds in which nobody presses anything, after which the coins go to the tray. Every button sweeps an expired "
+ "escrow before it runs, so that timeout costs no timer thread and nothing to get wrong. Writing the modes down "
+ "forces the question the interviewer will ask: what if the "
+ "motor jams with my money inside? The answer is an order. Refuse for free first (no such code, sold out, too little "
+ "money) without touching a paise. Then prove the change from float plus escrow with a pure function that mutates "
+ "nothing. Then turn the motor, the one act that cannot be taken back. Only when the item has fallen does anything "
+ "commit: count down one, escrow into the float, change out of the float, both into the tray. One more distinction "
+ "worth saying aloud: an illegal action throws, because it is a bug or a broken panel, while a refused sale returns a "
+ "reason, because it is a normal Tuesday.", 6),
+("Move 7: yes, the lock makes sales happen one at a time. Ask for how long, and what is inside it.",
+ "Inside the lock there is a map lookup, one call to the price rule, a change plan over five denominations and about "
+ "ten small writes: something like one and a half microseconds. Then there is the motor, which takes about two "
+ "seconds, and it is inside the lock too. That is unusual and worth saying out loud: in most designs the lock is "
+ "invisible, and here it is not. If eight panels pressed in the same second the eighth would wait fourteen seconds. "
+ "A real machine has one keypad and maybe a card reader, so nobody notices &mdash; but the moment you put a bank of "
+ "machines behind one stock service, this is the first thing that breaks, which is why the next move's ladder starts "
+ "by getting the motor out of the critical section.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "A busy station machine sells about three hundred items a day, one every five minutes. Hold the two-second motor up "
+ "against that: six hundred seconds of lock out of eighty-six thousand four hundred, so the lock is busy 0.7% of the "
+ "day, and two presses inside the same two-second window happen a handful of times at the evening peak. Nobody is "
+ "waiting, so nothing needs building yet. Then name the ladder, in the order you would climb "
+ "it: take the motor out of the lock by reserving the unit in a very short section, dropping with the lock released, "
+ "and committing or putting the reservation back in a second short section; then a lock per column, so two panels on "
+ "different columns never wait; then let the count itself decide the winner with a compare-and-set, which for a shared "
+ "stock service is the same thing as <code>UPDATE slot SET qty = qty - 1 WHERE qty &gt; 0</code>. Say the arithmetic "
+ "first: climbing the ladder without it is complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Each row of that table is a few lines in FailureTests.java, which runs ten of them and prints ALL PASS or exits "
+ "non-zero. The race is the one worth writing in front of the interviewer: forty threads on one latch, one item out, "
+ "thirty-nine full refunds, and the float grown by exactly one price &mdash; the stock invariant and the money "
+ "invariant proved in the same four assertions. The two that candidates forget are the last row: money nobody came "
+ "back for, and an item nobody took. Losing either one is losing a customer's money or a customer's chocolate, "
+ "however clean the class diagram is.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "The table is the answer; each name has one sentence behind it because a move produced it. What the table cannot "
+ "show is the bottom three rows, so say those out loud. Singleton did not earn a place: panels are handed the "
+ "machine, which is why every test can build a fresh one and no test has to reset anything global. Factory has not "
+ "earned one yet &mdash; the columns arrive already typed &mdash; and it earns one the moment they come from a "
+ "planogram file as strings, which is the <code>SlotFactory</code> in Extensions.java. Builder never will: a slot has "
+ "four fields and all four are required. A pattern without a move behind it is decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "The table is the answer; the thing to say with it is that not one of these was aimed at. Every letter is a line "
+ "that already existed because a move produced it, so the honest reply to \"which SOLID principles did you apply?\" "
+ "is \"move 2 gave me S, move 3 gave me O, L, I and D\" rather than five definitions. The one worth demonstrating "
+ "instead of claiming is I: because every interface here has exactly one method, a fake for a test is a lambda, and "
+ "<code>code -&gt; false</code> is a jammed motor in nine characters.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "Two of the five need more than the picture gives them. When a mode grows behaviour of its own &mdash; out of "
+ "service has to remember which mode to hand back to, and still let a paid customer press the coin return &mdash; "
+ "that row is promoted to a class, which is the <code>MaintenanceMode</code> in Extensions.java. And when the state "
+ "has to outlive the process, the lock-protected <code>qty--</code> becomes a conditional update where the count is "
+ "still positive: the database's compare-and-set, one atomic step deciding the winner, the same idea as the lock "
+ "one layer down. For all five the slot, the coin box and the tests do not change; that is the test that the "
+ "derivation was right. Page 05 has the code for each.", 12),
+]
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+put("panel", 10, 20, 220, "FrontPanel", ["machine: VendingMachine"],
+    ["insert(c)", "press(code): Outcome", "buy(code, coins): Outcome"])
+put("obs", 10, 170, 220, "MachineObserver", [], ["onEvent(e: MachineEvent)"], "interface")
+put("display", 10, 250, 108, "Display", [], ["onEvent(e)"])
+put("alert", 122, 250, 108, "RestockAlert", ["empty: List"], ["onEvent(e)"])
+put("clock", 10, 380, 220, "Clock", [], ["nowMs(): long"], "interface")
+put("box", 10, 470, 220, "CoinBox", ["counts: EnumMap&lt;Coin,int&gt;"],
+    ["load / deposit / withdraw", "count(c): int", "totalPaise(): int", "snapshot()", "poolWith(escrow)"])
+put("coin", 10, 640, 220, "Coin", ["R1 100, R2 200, R5 500", "R10 1000, R20 2000  (paise)"], ["total(coins): int"], "enum")
+put("tray", 10, 770, 220, "Tray", ["items: List&lt;Product&gt;", "coins: List&lt;Coin&gt;"],
+    ["put(p, change) / putCoins", "isEmpty(): boolean", "take(): Outcome"])
+put("vm", 300, 20, 310, "VendingMachine",
+    ["inventory: Inventory", "coinBox: CoinBox", "tray: Tray", "escrow: List&lt;Coin&gt;", "escrowSinceMs: long",
+     "lock: ReentrantLock", "state: MachineState", "pricing: PricingStrategy", "changeRule: ChangeStrategy",
+     "motor: Dispenser", "clock: Clock"],
+    ["configure(price, change, motor)", "setClock(c) / addObserver(o) / addSlot(s)", "insertCoin(c)",
+     "select(code): Outcome", "cancel(): List&lt;Coin&gt;",
+     "collect(): Outcome", "purchase(code, coins): Outcome", "restock(code, n) / loadFloat(c, n)", "setService(flag)",
+     "qty(code) / priceOf(code) / floatPaise()"])
+put("inv", 300, 420, 310, "Inventory", ["slots: Map&lt;code, Slot&gt;"], ["addSlot(s)", "slot(code): Slot", "counts(): Map"])
+put("slot", 300, 560, 310, "Slot", ["code: String", "product: Product", "capacity: int", "qty: int  (guarded by the lock)"],
+    ["qty(): int", "takeOne()", "refill(n): int"])
+put("event", 660, 20, 230, "MachineEvent", ["kind: String", "slotCode: String", "qtyLeft: int", "floatPaise: int"], [])
+put("outcome", 660, 140, 230, "Outcome", ["status: Status", "items: List&lt;Product&gt;", "coins: List&lt;Coin&gt;", "paise: int"],
+    ["item(): the first, or null"])
+put("status", 660, 290, 230, "Status", ["SOLD, SOLD_OUT, UNKNOWN_SLOT", "NEED_MORE, NO_CHANGE,", "JAMMED, COLLECTED"], [], "enum")
+put("mstate", 660, 396, 230, "MachineState", ["IDLE, HAS_MONEY", "DISPENSING, OUT_OF_SERVICE"], [], "enum")
+put("action", 660, 482, 230, "Action", ["INSERT, SELECT, CANCEL", "COLLECT, SERVICE"], [], "enum")
+put("legal", 660, 566, 230, "Legal", ["ALLOWED: State &rarr; Set&lt;Action&gt;"], [])
+put("product", 660, 640, 230, "Product", ["sku: String", "name: String", "listPaise: int"], [])
+put("pricing", 940, 20, 260, "PricingStrategy", [], ["priceOf(s: Slot): int"], "interface")
+put("listprice", 940, 110, 260, "ListPrice", [], ["priceOf(s): s.product.listPaise"])
+put("happy", 940, 200, 260, "HappyHourDiscount", ["base: PricingStrategy"], ["priceOf(s): base x (100-off)/100"])
+put("change", 940, 320, 260, "ChangeStrategy", [], ["plan(available, amount): List&lt;Coin&gt;"], "interface")
+put("greedy", 940, 410, 260, "GreedyChange", [], ["plan: biggest first, one pass"])
+put("backoff", 940, 500, 260, "BackoffChange", [], ["plan: greedy, then put one back", "null = it cannot be made"])
+put("dispenser", 940, 620, 260, "Dispenser", [], ["drop(slotCode): boolean"], "interface")
+put("motor", 940, 710, 260, "Motor", [], ["drop(code) &rarr; true"])
+
+edges = [
+ ln(B["display"]["t"], (80, B["obs"]["b"][1]), "inherit"),
+ ln(B["alert"]["t"], (165, B["obs"]["b"][1]), "inherit"),
+ ln(B["listprice"]["t"], B["pricing"]["b"], "inherit"),
+ ln((B["happy"]["t"][0]-70, B["happy"]["t"][1]), (B["pricing"]["b"][0]-70, B["pricing"]["b"][1]), "inherit"),
+ ln(B["happy"]["l"], (B["pricing"]["l"][0]-18, B["pricing"]["l"][1]+12), "assoc", "", [(B["pricing"]["l"][0]-18, B["happy"]["l"][1])]),
+ ln(B["greedy"]["t"], B["change"]["b"], "inherit"),
+ ln((B["backoff"]["t"][0]-70, B["backoff"]["t"][1]), (B["change"]["b"][0]-70, B["change"]["b"][1]), "inherit"),
+ ln(B["motor"]["t"], B["dispenser"]["b"], "inherit"),
+ ln(B["vm"]["b"], B["inv"]["t"], "compose", "owns"),
+ ln(B["inv"]["b"], B["slot"]["t"], "compose", "1..*"),
+ ln(B["vm"]["l"], B["box"]["r"], "compose", "owns", [(270, B["vm"]["l"][1]), (270, B["box"]["r"][1])]),
+ ln((B["vm"]["b"][0]-125, B["vm"]["b"][1]), B["tray"]["r"], "compose", "", [(285, B["vm"]["b"][1]), (285, B["tray"]["r"][1])]),
+ ln(B["box"]["b"], B["coin"]["t"], "assoc", "counts of"),
+ ln(B["slot"]["r"], B["product"]["l"], "assoc"),
+ ln((610, 69), B["event"]["l"], "assoc", ""),
+ ln((300, 230), B["obs"]["r"], "notify", ""),
+ ln(B["vm"]["r"], B["outcome"]["l"], "assoc", ""),
+ ln((610, 300), B["mstate"]["l"], "assoc", "", [(646, 300), (646, B["mstate"]["l"][1])]),
+ ln(B["outcome"]["b"], B["status"]["t"], "assoc"),
+ ln(B["action"]["t"], B["mstate"]["b"], "assoc"),
+ ln(B["legal"]["t"], B["action"]["b"], "assoc", "rows of"),
+ ln(B["panel"]["r"], (300, 73), "assoc", "calls"),
+ ln(B["clock"]["r"], (300, 300), "inject", "", [(250, B["clock"]["r"][1]), (250, 300)]),
+ ln((610, 276), B["pricing"]["l"], "inject", "", [(905, 276), (905, B["pricing"]["l"][1])]),
+ ln((610, 384), B["change"]["l"], "inject", "", [(918, 384), (918, B["change"]["l"][1])]),
+ ln((610, 392), B["dispenser"]["l"], "inject", "", [(634, 392), (634, 628), (930, 628), (930, B["dispenser"]["l"][1])]),
+]
+UMLSVG = uml_svg(1230, 950, edges, legend_y=920)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements. Filled diamond = owns: the machine owns the inventory, the coin box and the tray, and an inventory owns '
+ 'its slots. Plain arrow = references: a slot points at a product, the coin box counts coins. Dashed green = handed '
+ 'in through <code>configure()</code> or <code>setClock()</code>. Dotted blue = notifies: the one call the machine makes after it has released the lock, and the two small boxes under MachineObserver are the only two listeners in Main.java, the screen and the operator\'s pager. The plain arrows out of the machine are what it returns (an Outcome) and what it publishes (a MachineEvent), and the arrow from HappyHourDiscount back to PricingStrategy is one price rule wrapping another. <b>Where state lives:</b> a '
+ 'slot has its count; the coin box has how many of each coin; the tray has a <i>list</i> of items and a list of coins, '
+ 'because it keeps everything until somebody reaches in; the '
+ 'machine has all three plus the escrow, the moment that escrow started, the mode and the one lock, and it is the only class that writes to more than '
+ 'one of them. Everything on the right-hand column is handed in and could be replaced without opening the machine. On '
+ 'the next page this diagram is worth keeping in a second tab while you read the code.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above '
+ 'each class and method says what it does and what it guarantees; read only those first for the shape, then the '
+ 'bodies, and start with <code>VendingMachine.select</code>, which is the whole interview in thirty lines. Each copy '
+ 'button copies that whole file. Below Main.java: Extensions.java (every follow-up\'s reference code, with an '
+ '<code>ExtDemo</code> main that runs all of it) and FailureTests.java (ten claims proven; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT +
+ '</div>Before typing, write your six to eight clarifying questions; then type in the order of Main.java: the enums '
+ 'and the money (Coin, Product, Slot), the two owners (Inventory, CoinBox), the tray and the outcome, the mode and '
+ 'action table, the five one-method interfaces (clock, price, change, motor, observer) with one implementation each, '
+ 'the machine with its lock and the order inside '
+ '<code>select</code>, the front panel, and a main with the race.</div></div>')
+
+FU = [
+("Happy hour: twenty percent off between four and six, without touching VendingMachine.", "functional", 10,
+ "The price is already an interface, so happy hour is one new class that wraps the list price: it asks the wrapped "
+ "rule for the price, reads the hour from the handed-in clock, and takes twenty percent off inside the window. The "
+ "machine does not change; the only edit is the line where the price rule is handed in. Because the hour comes from "
+ "the clock and not from the wall, a test can make any minute of any day four-thirty.",
+ sect(src, "final class HappyHourDiscount", "interface ChangeStrategy")),
+
+("Two panels press for the last unit at the same instant. Prove it cannot oversell, with a test.", "non-functional", 10,
+ "The race lives between reading \"A1 has one left\" and writing \"A1 has none\". The whole sale &mdash; the checks, "
+ "the change plan, the motor, the commit &mdash; happens inside one lock, so no other panel can run in that gap. The "
+ "proof: forty threads wait on one latch, the latch opens, all forty buy the last unit, and the test counts four "
+ "things: exactly one item left the machine, the column ended at zero and never below, every one of the thirty-nine "
+ "losers got its whole thirty rupees back, and the float grew by exactly one price. The last two assertions are the "
+ "money invariant, which is the one most candidates never state.",
+ T("// 1. two terminals press", "// 2. the float cannot make change")),
+
+("One lock for the whole machine, with a two-second motor inside it. Does that scale?", "non-functional", 5,
+ "Everything except the motor is about one and a half microseconds of lock per sale: a map lookup, one price call, a "
+ "change plan over five denominations and ten small writes. The motor is two seconds and it runs inside the lock, "
+ "which is the honest weak spot &mdash; though at three hundred sales a day that is six hundred seconds of lock out "
+ "of eighty-six thousand, 0.7% busy, and a real machine has one keypad, so nobody ever waits. It stops being fine the "
+ "moment a bank of machines shares one stock service. Rung one takes the motor out: reserve the unit under a very "
+ "short lock, drop with the lock released, then commit or give the reservation back. Rung two is a lock per column, "
+ "and rung three lets the count itself decide with a compare-and-set, which is what the database's conditional update "
+ "does for a shared service.",
+ X("motor outside the lock", "a claim without a lock") + "\n" + X("a claim without a lock", "a mode with behaviour")),
+
+("Two panels, and both of them take coins. Whose money is inside the machine?", "design", 5,
+ "In Main.java the escrow is one list on the machine, which is the honest model of the thing on the wall: there is "
+ "one coin slot, so the coins inside belong to whoever is standing at it. The second panel is a card reader or a "
+ "phone, and it brings its own money, so it never touches that list. That is what <code>purchase(code, coins)</code> "
+ "is for: it takes the lock, feeds that caller's coins in, presses, and empties the tray before any other terminal "
+ "can run, so one buyer's whole transaction is atomic rather than interleaved with another's. If the machine really "
+ "does have two coin slots, the escrow stops being one list and becomes one list per panel, and every call carries a "
+ "panel id &mdash; the class below. The stock and the float stay behind the machine's single lock either way, "
+ "because what two customers fight over is the last unit, not each other's coins.",
+ sect(src, "    Outcome purchase(String code", "    // ---------------- the operator") + "\n"
+ + X("a coin slot per panel", "operator console")),
+
+("The motor jams after the money is in. What is the state of the machine, and show me the code.", "functional", 10,
+ "Nothing is half done. <code>select</code> proves everything first &mdash; stock, price, and that the change can be "
+ "made &mdash; while touching no counts at all, then turns the motor. If the motor returns false or throws, the whole "
+ "escrow goes to the tray, the mode goes back to idle, and the column and the float are exactly what they were: not "
+ "one unit lost, not one paise moved. Only after the item has fallen does anything commit, and from that point on "
+ "every step is a field write that cannot fail. The failure test jams the motor with a one-line lambda and checks all "
+ "four numbers afterwards.",
+ sect(src, "    Outcome select(String code)", "    /** Coin return")),
+
+("It cannot make change. What happens, can you warn before they pay, and is greedy even the right algorithm?", "functional", 10,
+ "The change rule is a pure function: given a copy of the float plus the coins in escrow and the amount owed, it "
+ "returns the coins or null. When it returns null the machine refuses the sale, drops the whole escrow into the tray "
+ "and goes back to idle, having touched neither the count nor the float. Warning first is the same function asked "
+ "earlier: the advisor copies the float, adds the coins the customer is about to pay with, and asks whether the change "
+ "could be made &mdash; the \"exact change only\" lamp on a real machine, and safe to run precisely because it mutates "
+ "nothing. And no, greedy alone is not right: it is provably optimal only with canonical denominations and unlimited "
+ "coins, while a real float is lopsided. Asked for six rupees from one five and three twos it takes the five, cannot "
+ "finish, and reports the change impossible &mdash; refusing a sale the machine could have made. The default rule is "
+ "greedy that puts a coin back and tries again; for arbitrary denominations the drop-in is a bounded subset-sum over "
+ "the coins actually in the float, one new class behind the same interface.",
+ X("exact change lamp", "bounded change DP") + "\n" + X("bounded change DP", "hold and pay")),
+
+("He feeds Rs 20 in and walks away. And the customer before him never took his chocolate.", "functional", 5,
+ "Two different leaks, and losing either one means losing somebody's property. Money first: the machine remembers "
+ "when the first coin went in, and every button sweeps before it runs, so thirty seconds with nobody pressing "
+ "anything puts the whole escrow in the tray &mdash; and a press after that is simply a press with no money in, "
+ "refused like any other illegal button. No timer thread is needed, because the sweep happens on the next touch, and "
+ "the test does not sleep, because the thirty seconds come from the injected clock. The item is the second leak: the "
+ "tray holds a <i>list</i> of items, not one item, so the next sale drops its bar on top of the one nobody collected "
+ "instead of silently replacing it &mdash; which is exactly what the bin in a real machine does. Test 9 moves the clock "
+ "thirty-one seconds and finds the twenty rupees in the tray; test 10 sells twice with nobody reaching in and finds "
+ "two bars.",
+ sect(src, "    void insertCoin(Coin c)", "    /**\n     * Press a slot") + "\n"
+ + sect(src, "    private void expireEscrow", "    /** Refuse an action") + "\n"
+ + sect(src, "final class Tray", "enum MachineState")),
+
+("Take a card, not just coins.", "twist", 10,
+ "The order is the same, with one swap: the card charge becomes the irreversible step instead of the motor. Check "
+ "the column has stock, charge the card, turn the motor, and only then take the unit off the coil. A card brings one "
+ "case coins cannot: the money moved and then the motor jammed, and for that there is a compensating refund back to "
+ "the card, after which the stock is untouched and the customer is whole. The escrow, the coin box and the change "
+ "rule are not involved at all, which is why this is a new class and not an edit.",
+ X("card payment", "exact change lamp")),
+
+("\"Hold my Coke, I will pay in thirty seconds.\"", "twist", 10,
+ "A hold takes the unit out of stock the moment it is made, so nobody else can buy it, and it carries the time it "
+ "expires, computed from the injected clock. Every entry point sweeps first: any hold whose time has passed puts its "
+ "unit straight back into the column. Paying a live hold just removes it; paying an expired one returns false, and "
+ "the unit is already back on sale. Because time is handed in, the test moves the clock thirty-one seconds forward "
+ "instead of sleeping. It is the same sweep-on-touch trick the abandoned escrow uses, applied to stock instead of money.",
+ X("hold and pay", "a coin slot per panel")),
+
+("Persist the float and the counts. Then: a bank of machines shares one stock service.", "twist", 5,
+ "The counts and the float go behind a repository interface with save and load, and the in-memory implementation is "
+ "all a test needs; the sale path does not change, because the machine still writes the same maps under the same "
+ "lock. For a shared service the interesting line is the decrement: what is a lock-protected <code>qty--</code> here "
+ "becomes <code>UPDATE slot SET qty = qty - 1 WHERE code = ? AND qty &gt; 0</code>, and zero rows updated means "
+ "another terminal got the last one. That is the database's compare-and-set, and it is the same idea as the lock: "
+ "one atomic step decides the winner.",
+ X("persistence", "motor outside the lock")),
+
+("The operator dashboard polls counts and cash a thousand times a second and wants low-stock alerts. No slowing the sale.", "non-functional", 5,
+ "Both halves are already there. The reads are O(1) by construction: a column's count is one map lookup, the float's "
+ "worth is a sum over five denominations, and nothing anywhere counts or scans, at any poll rate. Each read does take "
+ "the machine's lock, for nanoseconds, so a count is never torn by a sale in flight. The alerts are listeners on the "
+ "one small event every commit publishes after the lock is released, inside a try/catch: the pager records a column "
+ "that hit zero, the low-cash watcher a float under its floor, a telemetry sink the sales per column. The dashboard "
+ "itself is a separate role interface over those reads, so an operator screen can never press the customer's buttons.",
+ sect(src, "    MachineState state()", "    // ---------------- the three private helpers") + "\n" + X("operator console", "persistence")),
+
+("Where does time come from, and how do you test happy hour at midnight?", "design", 5,
+ "The machine is handed a <code>Clock</code>, a one-method interface, and the price rule reads that clock rather than "
+ "the wall. A test hands in a clock that returns a fixed moment, asks for the price at ten in the morning, moves the "
+ "same variable to half past four and asks again. The escrow timeout and the hold desk read the same clock, which is "
+ "why both of those tests move time forward instead of sleeping. Nothing in this codebase calls "
+ "<code>System.currentTimeMillis</code> except the default the machine starts with.",
+ T("// 8. the price comes from", "// 9. he feeds a coin in")),
+
+("Which pattern is where, and why did each one earn its place?", "design", 5,
+ "Each one is what a move produced, so name the move and then the line. Strategy is move 3: the price, the change "
+ "algorithm and the motor are all things that will change, so each sits behind a one-method interface the machine is "
+ "handed in <code>configure</code>. Decorator is the price rule below, which wraps the old price rule instead of "
+ "replacing it. Observer is move 4's rule that a screen must never be inside the lock: the machine announces what "
+ "happened and never learns who is listening. State is move 6: a table from mode to the actions that mode allows, "
+ "checked before every action. The two worth saying without being asked are the absences &mdash; no Singleton, "
+ "because panels are handed the machine and every test builds a fresh one, and no Factory until columns arrive from a "
+ "planogram file as strings.",
+ sect(src, "final class HappyHourDiscount", "interface ChangeStrategy")),
+
+("Which SOLID letter is where in this code?", "design", 5,
+ "Not one of them was aimed at; each is a line some move already produced, which is the only convincing way to "
+ "answer. D and I are the block below: the machine is handed its rules and never builds one, and every interface here "
+ "has exactly one method, so a fake is a lambda and <code>code -&gt; false</code> is a jammed motor. O is the same "
+ "line seen from the other side &mdash; happy hour and the DP change maker were each a new file plus one changed "
+ "argument, and VendingMachine was never opened. L is <code>changeRule.plan(pool, due)</code>: the machine never asks "
+ "which implementation it got. S is the class list itself: a slot tracks its count, the coin box the coins, the tray "
+ "what is waiting, the machine the flow and the lock.",
+ sect(src, "    void configure(PricingStrategy p", "    // ---------------- the customer's four buttons") + "\n"
+ + sect(src, "interface Dispenser", "final class Motor")),
+
+("An enum of modes, or a class per mode? And where would a Factory pay?", "design", 3,
+ "An enum plus a table, until a mode grows behaviour of its own. Four modes whose entire job is \"which buttons are "
+ "legal here\" are data: one row each, and a new mode is one more row with nothing edited. The moment a mode has to "
+ "remember something &mdash; out of service knowing which mode to hand back to, and still allowing the coin return so "
+ "a paid customer is never stranded &mdash; promote that row to a class that answers for itself. Factory pays when "
+ "columns stop being typed in code and start arriving as lines in a planogram file: one parser instead of a growing "
+ "switch.",
+ X("a mode with behaviour of its own", "columns from config") + "\n" + X("columns from config", "Runs every extension")),
+]
+
+build(dict(
+    slug="vending", title="Vending Machine",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21 &middot; demo, 10 failure tests and a 40-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=("Run these on any LLD (parking lot, elevator, Splitwise) and the class diagram, the lock, the "
+                     "tests, the patterns, SOLID and the answer to every twist fall out in that order; nothing is "
+                     "chosen up front, and nothing is named before the move that produced it."),
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT,
+    followups=FU,
+))

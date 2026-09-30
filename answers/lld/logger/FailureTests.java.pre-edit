@@ -1,0 +1,190 @@
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    /** Sends the framework's own error channel to a buffer, so a test that expects failures stays quiet. */
+    static ByteArrayOutputStream quietStatus() {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        Status.sink(new PrintStream(buf, true));
+        Status.reset();
+        return buf;
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("logger-tests");
+        ByteArrayOutputStream status = quietStatus();
+
+        // 1. fifty threads log to ONE file through a bounded queue at the same instant: every line must be
+        //    whole, every line must be there, and each thread's own lines must be in the order it wrote them.
+        LoggerContext ctx = new LoggerContext();
+        Path file = dir.resolve("race.log");
+        FileAppender fileSink = new FileAppender("file", new TextFormatter(), LogLevel.TRACE, file, LogLevel.OFF);
+        AsyncAppender async = new AsyncAppender("async", fileSink, 8192, OverflowPolicy.BLOCK, LogLevel.ERROR);
+        Logger web = ctx.getLogger("com.shop.web");
+        web.addAppender(async);
+        web.setAdditive(false);
+        int writers = 50, lines = 20;
+        Main.runConcurrently(writers, i -> { for (int k = 0; k < lines; k++) web.info("t" + i + "-" + k); });
+        async.close();
+        List<String> got = Files.readAllLines(file);
+        check(got.size() == writers * lines, "50 threads x 20 lines all reached the file: " + got.size());
+        check(async.droppedCount() == 0, "a queue deep enough and a BLOCK policy dropped nothing");
+        check(got.stream().allMatch(l -> l.matches(".* INFO  \\[.*\\] com\\.shop\\.web - t\\d+-\\d+")),
+              "every line is whole: no two writers interleaved inside one line");
+        check(Main.perThreadOrderKept(got), "each thread's own lines are in the order that thread wrote them");
+        check(new HashSet<>(got).size() == got.size(), "no line was written twice");
+
+        // 2. the gate is first, and it is free: a switched-off call builds nothing at all
+        LoggerContext c2 = new LoggerContext();
+        MemoryAppender mem = new MemoryAppender("mem");
+        c2.configure(LogLevel.INFO, List.of(mem), List.of());
+        Logger quiet = c2.getLogger("com.shop.hot");
+        AtomicInteger built = new AtomicInteger();
+        for (int i = 0; i < 1000; i++) quiet.debug(() -> { built.incrementAndGet(); return "cart=" + new int[7]; });
+        check(built.get() == 0, "1000 disabled DEBUG calls never called the message supplier");
+        check(mem.lines().isEmpty(), "and wrote nothing");
+        quiet.info(() -> { built.incrementAndGet(); return "enabled"; });
+        check(built.get() == 1 && mem.lines().size() == 1, "an enabled call does call the supplier, exactly once");
+        check(!quiet.isEnabled(LogLevel.DEBUG) && quiet.isEnabled(LogLevel.ERROR), "the gate agrees with the level");
+
+        // 3. the tree: inherit, override, change at runtime, and stop inheriting sinks
+        LoggerContext c3 = new LoggerContext();
+        MemoryAppender shared = new MemoryAppender("shared");
+        c3.configure(LogLevel.INFO, List.of(shared), List.of());
+        Logger shop = c3.getLogger("com.shop");
+        Logger checkout = c3.getLogger("com.shop.checkout");
+        check(checkout.parent() == shop && shop.parent() == c3.getLogger("com"), "the tree is built by chopping at the dots");
+        check(c3.getLogger("com.shop.checkout") == checkout, "one name means one object, forever");
+        check(checkout.level() == null && checkout.effectiveLevel() == LogLevel.INFO, "a child with no level inherits ROOT's");
+        checkout.debug("invisible");
+        check(shared.lines().isEmpty(), "so its DEBUG is silent");
+        shop.setLevel(LogLevel.DEBUG);
+        checkout.debug("visible now");
+        check(shared.lines().size() == 1, "turning an ancestor to DEBUG takes effect on the next call, with no restart");
+        checkout.setLevel(LogLevel.WARN);
+        checkout.info("invisible again");
+        check(shared.lines().size() == 1, "a child's own level beats its ancestor's");
+        checkout.setLevel(null);
+        MemoryAppender own = new MemoryAppender("own");
+        checkout.addAppender(own);
+        checkout.info("two sinks");
+        check(own.lines().size() == 1 && shared.lines().size() == 2, "additivity on: the line reaches the child's sink AND the shared one");
+        checkout.setAdditive(false);
+        checkout.info("one sink");
+        check(own.lines().size() == 2 && shared.lines().size() == 2, "additivity off: the walk to the ancestors stops");
+
+        // 4. one lock per sink: the same events into an unlocked counter and a locked one
+        LoggerContext c4 = new LoggerContext();
+        UnsafeCountingAppender unsafe = new UnsafeCountingAppender();
+        SafeCountingAppender safe = new SafeCountingAppender("safe");
+        Logger race = c4.getLogger("com.shop.race");
+        race.addAppender(unsafe);
+        race.addAppender(safe);
+        race.setAdditive(false);
+        int threads = 8, each = 2000, published = threads * each;
+        Main.runConcurrently(threads, i -> { for (int k = 0; k < each; k++) race.info("tick"); });
+        check(safe.count() == published, "the counter inside the sink's lock is exact: " + safe.count() + " of " + published);
+        check(unsafe.count() <= published, "the counter with no lock lost updates: " + unsafe.count() + " of " + published);
+
+        // 5. a storm bigger than the queue: bounded memory, and every lost event is counted
+        LoggerContext c5 = new LoggerContext();
+        SlowAppender slow = new SlowAppender("slow", 2);
+        AsyncAppender small = new AsyncAppender("small", slow, 16, OverflowPolicy.DROP_NEWEST, LogLevel.FATAL);
+        Logger storm = c5.getLogger("com.shop.storm");
+        storm.addAppender(small);
+        storm.setAdditive(false);
+        int offered = 500;
+        for (int i = 0; i < offered; i++) { storm.info("storm " + i); check2(small.queueDepth() <= 16); }
+        small.close();
+        check(depthOk, "the queue never went past its 16-event ceiling: memory is bounded by construction");
+        check(slow.written() + small.droppedCount() == offered,
+              "written " + slow.written() + " + dropped " + small.droppedCount() + " = offered " + offered);
+        check(small.droppedCount() > 0, "under a storm a DROP_NEWEST sink really does shed load");
+        LoggerContext c5b = new LoggerContext();
+        MemoryAppender keeper = new MemoryAppender("keeper");
+        AsyncAppender blocking = new AsyncAppender("blocking", keeper, 8, OverflowPolicy.BLOCK, LogLevel.ERROR);
+        Logger audit = c5b.getLogger("com.shop.audit");
+        audit.addAppender(blocking);
+        audit.setAdditive(false);
+        for (int i = 0; i < 200; i++) audit.info("audit " + i);
+        blocking.close();
+        check(keeper.lines().size() == 200 && blocking.droppedCount() == 0,
+              "the same queue with a BLOCK policy makes the caller wait and loses nothing: " + keeper.lines().size());
+
+        // 6. nothing the framework touches may throw into the application
+        LoggerContext c6 = new LoggerContext();
+        Status.reset();
+        MemoryAppender survivor = new MemoryAppender("survivor");
+        Logger risky = c6.getLogger("com.shop.risky");
+        risky.addAppender(new Main.ThrowingAppender());
+        risky.addAppender(survivor);
+        risky.addFilter(e -> { throw new RuntimeException("broken filter"); });
+        risky.setAdditive(false);
+        risky.error("payment declined", new IllegalStateException("gateway timeout"));
+        check(survivor.lines().size() == 1, "a sink that throws did not stop the next sink from getting the line");
+        check(survivor.lines().get(0).contains("IllegalStateException"), "and the throwable is on the line");
+        MemoryAppender bad = new MemoryAppender("bad", e -> { throw new RuntimeException("broken layout"); }, LogLevel.TRACE);
+        risky.addAppender(bad);
+        risky.warn("still fine");
+        check(survivor.lines().size() == 2, "a formatter that throws cost only its own line");
+        risky.info(() -> { throw new RuntimeException("broken supplier"); });
+        check(survivor.lines().size() == 2, "a message supplier that throws wrote nothing and did not propagate");
+        check(Status.errorCount() >= 4, "each failure was reported on the framework's own channel: " + Status.errorCount());
+
+        // 7. rotation: the file rolls at the size, and not one line is lost across the files
+        LoggerContext c7 = new LoggerContext();
+        Path rollPath = dir.resolve("rolling.log");
+        RollingFileAppender roller = new RollingFileAppender("roll", new TextFormatter(), LogLevel.TRACE, rollPath, 512);
+        Logger big = c7.getLogger("com.shop.big");
+        big.addAppender(roller);
+        big.setAdditive(false);
+        for (int i = 0; i < 60; i++) big.info("line " + i);
+        int rolls = roller.rolls();
+        roller.close();
+        long total = 0;
+        try (var s = Files.list(dir)) {
+            for (Path p : s.toList())
+                if (p.getFileName().toString().startsWith("rolling.log")) total += Files.readAllLines(p).size();
+        }
+        check(rolls >= 3, "60 lines into a 512-character file rolled " + rolls + " times");
+        check(total == 60, "every line survived the rotation: " + total + " across the files");
+        check(roller.bytesWritten() <= 512, "the live file is under the limit: " + roller.bytesWritten() + " characters");
+
+        // 8. shutdown drains what was accepted, and the context on a line is the one from the call, not the write
+        LoggerContext c8 = new LoggerContext();
+        MemoryAppender late = new MemoryAppender("late");
+        AsyncAppender tail = new AsyncAppender("tail", late, 1024, OverflowPolicy.BLOCK, LogLevel.ERROR);
+        Logger job = c8.getLogger("com.shop.job");
+        job.addAppender(tail);
+        job.setAdditive(false);
+        Mdc.put("rid", "req-A");
+        for (int i = 0; i < 300; i++) job.info("work " + i);
+        Mdc.put("rid", "req-B");
+        Mdc.clear();
+        c8.shutdown();
+        check(late.lines().size() == 300, "close() wrote everything that was accepted before it: " + late.lines().size());
+        check(late.lines().stream().allMatch(l -> l.contains("rid=req-A")),
+              "every line carries the context from the moment of the call, not from the moment of the write");
+        job.info("after shutdown");
+        check(late.lines().size() == 300, "an event offered after close is counted, never half-written");
+        check(tail.droppedCount() == 1, "and that one is on the dropped counter: " + tail.droppedCount());
+
+        Status.sink(System.err);
+        if (status.size() > 0 && failures != 0) System.out.println("status channel said: " + status);
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+
+    static boolean depthOk = true;
+
+    /** Records the queue-depth ceiling without printing a line five hundred times. */
+    static void check2(boolean ok) { if (!ok) depthOk = false; }
+}

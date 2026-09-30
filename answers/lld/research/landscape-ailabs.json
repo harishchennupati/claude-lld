@@ -1,0 +1,2517 @@
+[
+ {
+  "id": "concurrent-web-crawler",
+  "title": "Concurrent same-host web crawler",
+  "kind": "concurrency",
+  "prompt": "Given a start URL and an HtmlParser/LinkProvider (getUrls(url) -> list[str]), return every URL reachable from the start URL whose hostname equals the start URL's hostname, each exactly once. Start single-threaded (BFS), then make it concurrent.",
+  "levels": [
+   "L1 (sync): BFS/DFS from startUrl; filter by urlparse(start).hostname; strip #fragments before dedupe (fastprep variant); return list/set. Code must actually run (CodeSignal/CoderPad).",
+   "L2 (threads): ThreadPoolExecutor workers + thread-safe frontier queue + visited set with atomic check-and-add; correct termination when queue empty AND no task in flight.",
+   "L3 (async variant): rewrite with asyncio (Anthropic 2025-02 thread: 'sync first, then async'; LC 2026-01: 'thread pool executors and asyncio').",
+   "Depth-limited variant (Databricks): crawl only to depth k/h, then multithread it."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/6705883/",
+     "https://leetcode.com/discuss/post/7530004/",
+     "https://leetcode.com/discuss/post/7559983/",
+     "http://web.archive.org/web/20250315145442/https://www.1point3acres.com/bbs/thread-1111667-1-1.html",
+     "https://www.inbyte.org/interview/anthropic/coding-q1-web-crawler",
+     "https://darkinterview.com/collections/anthropic/questions/8641d81b-929f-45d4-be78-6a669a63dd94",
+     "https://prachub.com/interview-questions/make-a-hostname-limited-crawler-concurrent",
+     "https://www.fastprep.io/problems/anthropic-same-hostname-concurrent-web-crawler",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2025",
+    "urls": [
+     "http://web.archive.org/web/20251012211724/https://www.1point3acres.com/bbs/thread-1149658-1-1.html",
+     "https://www.hellointerview.com/blog/openai-coding-questions",
+     "https://www.hellointerview.com/community/questions/multithreaded-web-crawler/cmbsl2nhd005107adsfu8ohme"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": "2022-2023",
+    "urls": [
+     "https://leetcode.com/discuss/post/1759497/",
+     "https://leetcode.com/discuss/post/4254781/",
+     "https://leetcode.com/discuss/post/4285067/"
+    ]
+   },
+   {
+    "name": "Glean",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-rate-limited-wikipedia-crawler"
+    ]
+   }
+  ],
+  "reports": 16,
+  "followups": [
+   "thread pool size for IO-bound work; why threads help despite GIL",
+   "termination detection without busy-wait",
+   "politeness: per-host rate limit / max concurrency",
+   "retries, timeouts, failed fetches",
+   "robots.txt, URL normalization",
+   "bottlenecks (network, disk) and scaling to many machines (Databricks HLD-with-code round)",
+   "async vs threads trade-off"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "Most-reported practical question across labs. Anthropic: FH x4 (LC 2025-05, 2026-01, 2026-02 mention; 1p3a 2025-02) + AGG (inbyte 'high freq' Sep 2025-May 2026; prachub 2026-08 'Make a Hostname-Limited Crawler Concurrent'; hellointerview staff report 2026-03). OpenAI: 1p3a high-frequency summary (2025 Q3) says runnable crawler in Python, part 2 multithreading for IO blocking. Databricks FH x3 (depth-limited + multithreaded). Glean AGG: rate-limited Wikipedia crawler (2026-02). Mirrors LeetCode 1242."
+ },
+ {
+  "id": "dependency-task-scheduler",
+  "title": "Dependency-aware task / job scheduler (topological order, failures, concurrency)",
+  "kind": "practical",
+  "prompt": "Tasks declare dependencies; run or order them so every task runs after its prerequisites, handle failures (skip dependents), detect cycles, and optionally run independent tasks concurrently.",
+  "levels": [
+   "L1: deterministic topological order (ties broken lexicographically - OpenAI 2026-08 'lexicographically smallest topological order').",
+   "L2: failures - a failed task marks all transitive dependents failed/skipped (Perplexity 'Task Dependencies and Failure').",
+   "L3: concurrent execution of ready tasks with a worker pool (OpenAI 'Dependency-Aware Concurrent Tool Scheduler', Codex multi-agent request scheduler).",
+   "Variants: deadlines ('Schedule Ready Tasks by Deadline', Scale AI); cycle detect-and-break in pod dependencies (Together AI); to-do list with dependencies (Perplexity)."
+  ],
+  "companies": [
+   {
+    "name": "Scale AI",
+    "year": "2025-2026",
+    "urls": [
+     "https://prachub.com/coding-questions/schedule-ready-tasks-by-deadline",
+     "https://prachub.com/coding-questions/implement-a-dependency-aware-task-scheduler",
+     "https://prachub.com/coding-questions/implement-dependency-aware-task-scheduler"
+    ]
+   },
+   {
+    "name": "Perplexity",
+    "year": "2025-2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-task-dependencies-and-failure",
+     "https://prachub.com/coding-questions/implement-dependency-aware-to-do-list"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/order-tasks-with-dependencies-using-a-deterministic-topological-sort",
+     "https://prachub.com/coding-questions/return-the-lexicographically-smallest-topological-order",
+     "https://prachub.com/interview-questions/design-a-dependency-aware-concurrent-tool-scheduler",
+     "https://darkinterview.com/collections/openai/questions/3579c60d-f2f1-4e56-a470-5fd24cc484b5"
+    ]
+   },
+   {
+    "name": "Together AI",
+    "year": "2025",
+    "urls": [
+     "https://prachub.com/coding-questions/detect-cycles-and-break-them-in-pod-dependencies"
+    ]
+   },
+   {
+    "name": "Meta",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/execute-dependency-constrained-work-at-scale"
+    ]
+   }
+  ],
+  "reports": 11,
+  "followups": [
+   "cycle detection and reporting the cycle",
+   "retry policy vs fail-fast",
+   "max parallelism / worker pool",
+   "priority or deadline ordering",
+   "incremental add of tasks while running"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "All AGG (prachub/darkinterview), no FH post found; dates 2025-08 to 2026-08. Some entries may be design-flavoured; the Scale/Perplexity/OpenAI ones are labelled coding/technical screen."
+ },
+ {
+  "id": "codesignal-record-db",
+  "title": "CodeSignal in-memory record database (fields, scan, TTL, backup/restore or compare-and-set/history)",
+  "kind": "practical",
+  "prompt": "CodeSignal Industry Coding Framework task, 90 min, 4 levels that unlock on passing tests. Records keyed by string, each holding field->value pairs. Two reported shapes: (A) classic set/get/delete -> scan -> TTL -> backup/restore; (B) newer command-array form with COMPARE_AND_SET/COMPARE_AND_DELETE and historical reads.",
+  "levels": [
+   "Variant A L1: set(key, field, value) -> ''; get(key, field) -> value or ''; delete(key, field) -> 'true'/'false'.",
+   "Variant A L2: scan(key) -> 'f1(v1), f2(v2)' fields sorted lexicographically; scan_by_prefix(key, prefix) same format; missing record -> ''.",
+   "Variant A L3: timestamped twins set_at(key, field, value, ts), set_at_with_ttl(key, field, value, ts, ttl) alive on [ts, ts+ttl), delete_at, get_at, scan_at, scan_by_prefix_at; timestamps strictly increase; old methods must keep working (backward compatibility).",
+   "Variant A L4: backup(ts) -> number of non-empty, non-expired records (as string), saving each field's REMAINING lifespan; restore(ts, ts_to_restore) loads the latest backup taken before ts_to_restore and re-bases expiries: new_expiry = restore_ts + remaining.",
+   "Variant B (inbyte, Anthropic 2025-10..2026-05): commands arrive as arrays with ms timestamps; L1 SET/GET/DELETE plus COMPARE_AND_SET(expected, new) and COMPARE_AND_DELETE(expected); L2 SCAN / SCAN_BY_PREFIX sorted; L3 per-field TTL versions; L4 backup/restore with paused TTLs or value-at-past-timestamp queries (gist: 'historical queries'). Exact L4 signature not verified.",
+   "Variant C (practice repo only, unverified): set_or_inc / top_n_keys by modification count / lock(caller_id, key) / unlock(key)."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2023-2026",
+    "urls": [
+     "https://www.teamblind.com/post/anthropic-codesignal-experience-jzww5q7t",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/9f41902d-7e06-447a-9a0c-e1a150e8f8af",
+     "https://www.inbyte.org/interview/anthropic/oa-in-memory-database",
+     "https://aonecode.com/iq/docs/antropic/online-assessment/in-memory-db",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad",
+     "https://prachub.com/coding-questions/build-a-versioned-in-memory-database"
+    ]
+   },
+   {
+    "name": "xAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-an-in-memory-database-with-ttl-and-backup"
+    ]
+   },
+   {
+    "name": "Meta (general, MLE screen; not MSL-specific)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/read-current-and-historical-field-values-with-expiration"
+    ]
+   }
+  ],
+  "reports": 9,
+  "followups": [
+   "speed: all 4 levels in 90 min, score 200-600, ~480-520+ to pass",
+   "refactor for later levels (store expiry per field, keep history)",
+   "deep copy on backup (shallow copy corrupts snapshots)",
+   "backward compatibility of non-timestamp methods"
+  ],
+  "maps_to": "inmem-db",
+  "tier": 1,
+  "notes": "Spec text for Variant A matches the widely shared ICF task (REPO: https://github.com/EricZheng0404/LibreSignal Questions/in_memory_database). FH: Blind 2023-10 (4 rounds, 90 min, 'code VERY FAST'). prachub lists Anthropic ONSITE 'Build a Versioned In-Memory Database' (2026-05) and xAI ONSITE 'in-memory database with TTL and backup' (2026-09) - so it is not only an OA. Also used by non-labs (Ramp, Coinbase...). Meta's 'Read Current and Historical Field Values with Expiration' (MLE tech screen 2026-09) looks like the same task (fields + expiry + history) - title-level match only. Our inmem-db page (tables/indexes/transactions) does NOT match - needs its own page."
+ },
+ {
+  "id": "rate-limiter-lab-variants",
+  "title": "Rate limiter - composite rules, cost budgets, debug-and-optimize",
+  "kind": "practical",
+  "prompt": "Cursor screen: from in-memory request logs [user_id, url, body_size_bytes, ts_seconds], enforce limits per user; then generalise into a pluggable rule interface where a request is admitted only if ALL rules pass.",
+  "levels": [
+   "Cursor T1: 3 req/s per user on v1/completions/standard; denied requests are not counted.",
+   "Cursor T2: rule interface supporting 7 req/min on an endpoint, 5 req/s on another, a byte-size budget (<=100 bytes/min on an endpoint), and 7 req/hour across ALL endpoints; if any rule denies, the request is not counted by any rule (all-or-nothing).",
+   "xAI: per-key fixed-window COST limiter with ALLOW and RESET commands (weights, not counts).",
+   "OpenAI: 'Rate Limiter Debug and Optimize' (fix and speed up given code) and 'Implement a Distributed Rate Limiter' (2026-04 screen).",
+   "Databricks-adjacent: KV store exposing measure_put_load()/measure_get_load() = average calls over last 5 minutes; follow-up many calls within one second."
+  ],
+  "companies": [
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7511117/",
+     "https://leetcode.com/discuss/post/7476646/",
+     "https://prachub.com/coding-questions/implement-notification-rate-limiter",
+     "https://prachub.com/interview-questions/design-scalable-notification-rate-limiter"
+    ]
+   },
+   {
+    "name": "xAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/per-key-fixed-window-cost-limiter-with-allow-and-reset-commands"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/a8c0d262-8ca5-4364-a6dd-fbab94010bac",
+     "https://prachub.com/coding-questions/implement-a-distributed-rate-limiter"
+    ]
+   },
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-distributed-rate-limiter-5"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "do denied requests consume quota?",
+   "atomic check across multiple rules (all-or-nothing)",
+   "memory: evict old timestamps",
+   "distributed: shared counters, clock skew",
+   "weights/cost instead of count"
+  ],
+  "maps_to": "rate-limiter",
+  "tier": 1,
+  "notes": "Cursor FH (2026-01): interviewer wanted a working solution over complexity; interface + concrete rule classes. Anthropic entry is 'Design a Distributed Rate Limiter' onsite 2026-04 (likely design). Existing rate-limiter page covers algorithms; the lab twist is multi-rule composition, byte budgets and not counting denied requests."
+ },
+ {
+  "id": "time-versioned-kv",
+  "title": "Time-versioned key-value store (get value as of time t) with production follow-ups",
+  "kind": "practical",
+  "prompt": "set(key, value, timestamp) and get(key, timestamp) returning the value with the largest timestamp <= t ('' if none). OpenAI version uses real float epoch timestamps that may arrive out of order and then drills into testing, clock problems and thread safety.",
+  "levels": [
+   "P1: TimeMap.set(key, value, ts: float), get(key, ts) -> str; out-of-order inserts (bisect.insort); '' when nothing <= ts.",
+   "P2: 'How would you test this? How would you mock time?' - inject a time_provider; deterministic tests, no sleeps.",
+   "P3: enforce strictly increasing timestamps per key (reject with error vs bump) - clock skew, duplicates.",
+   "P4: multi-threaded access - global lock vs per-key lock vs read-write lock vs copy-on-write; write a concurrency test.",
+   "Perplexity variant: 'time-versioned KV store with restore' (restore to a past version). Character.ai: 'timestamped key-value map'."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2024-2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/cc1983d6-8fac-4330-b64e-6d9bc5679ba3",
+     "https://www.inbyte.org/interview/openai/time-based-kv-store",
+     "https://www.1point3acres.com/interview/problems/ec3912e2-0511-4700-b01b-5fad7ac3d781",
+     "https://www.hellointerview.com/blog/openai-coding-questions"
+    ]
+   },
+   {
+    "name": "Perplexity",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-time-versioned-kv-store-with-restore"
+    ]
+   },
+   {
+    "name": "Character.ai",
+    "year": "2025",
+    "urls": [
+     "https://prachub.com/coding-questions/design-timestamped-key-value-map"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "mockable clock / dependency injection",
+   "strictly increasing timestamps",
+   "locking strategy comparison",
+   "persistence to disk (see durable-kv)",
+   "memory growth: compaction of old versions"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "OpenAI: 1p3a problem page is literally titled 'Resumable Iterator, Unit Tests, Time-Based KV Store, and Concurrency' - so the screen can bundle two tasks. darkinterview labels OpenAI version 'Phone, Onsite ... Reported Aug 2026'; inbyte says most recent Oct 2025. Existing mt-ttl-cache/lru pages do not cover versions-by-time."
+ },
+ {
+  "id": "durable-kv-store",
+  "title": "Durable key-value store: serialize/restore, WAL, crash consistency",
+  "kind": "practical",
+  "prompt": "Build a KV store that survives restarts: serialize the whole store to bytes through a provided mock file system and rebuild it (OpenAI), or make a multithreaded single-server store crash-consistent (Baseten), or withstand failures with tight memory (Anyscale).",
+  "levels": [
+   "OpenAI L1: KVStore(file_system) with set/get; shutdown() serializes everything to bytes and saves; restore() rebuilds. No JSON/pickle.",
+   "OpenAI L2: keys/values may contain ANY character (delimiters, newlines) -> length-prefixed encoding '<keyLen>:<key><valueLen>:<value>' with 4-byte integer lengths via provided serialize_int helpers.",
+   "OpenAI follow-ups: file-size/chunk limits across multiple files, partial writes, corruption detection.",
+   "Baseten: multithreaded single-server store that is crash-consistent (WAL + fsync ordering + recovery).",
+   "Anyscale (2023): Get/Put that withstands failures with very limited memory."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/d8cf1c50-c6ed-4b1d-ada3-33752881f405",
+     "https://www.inbyte.org/interview/openai/durable-kv-store-serialization",
+     "https://www.hellointerview.com/blog/openai-coding-questions",
+     "https://prachub.com/interview-questions/serialize-and-restore-an-in-memory-key-value-store"
+    ]
+   },
+   {
+    "name": "Baseten",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/build-a-crash-consistent-single-server-key-value-store"
+    ]
+   },
+   {
+    "name": "Anyscale",
+    "year": "2023",
+    "urls": [
+     "https://leetcode.com/discuss/post/3060739/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "write-ahead log vs snapshot",
+   "fsync/rename for atomic replace",
+   "checksums",
+   "recovery after torn write",
+   "concurrent writers"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "OpenAI onsite 'Serialize and Restore an In-Memory Key-Value Store' (prachub 2026-09); inbyte: onsite, SWE+infra, most recent Nov 2025. Anthropic's LRU-durability and Databricks' WAL writer are the same skill (see those items)."
+ },
+ {
+  "id": "infection-spread-sim",
+  "title": "Infection spread grid simulation (multi-part)",
+  "kind": "practical",
+  "prompt": "Grid of healthy/infected/blocked cells; each day infected cells infect neighbours; return days until all infected (-1 if impossible), then layer rules.",
+  "levels": [
+   "P1: 4-neighbour spread, newly infected start next day, multiple sources, -1 if unreachable.",
+   "P2: threshold - a cell needs >= N infected neighbours.",
+   "P3+: immunity, recovery, delayed death, expiring immunity, interventions ('burn'), days to stabilize; efficient simulation for sparse grids."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/infection-spread-cellular-automata",
+     "https://darkinterview.com/collections/openai/questions/e4c1d386-889b-4d3e-a115-facc104f2b04",
+     "https://prachub.com/coding-questions/simulate-infection-spread-with-immunity-and-recovery",
+     "https://prachub.com/coding-questions/infection-spread-simulation-with-death-threshold",
+     "https://prachub.com/interview-questions/model-infection-immunity-delayed-death-and-burn-interventions-on-a-grid",
+     "https://prachub.com/interview-questions/plant-infection-grid-simulation-days-to-stabilize-immune-plants-expiring-immunity",
+     "http://web.archive.org/web/20260516022435/https://www.1point3acres.com/interview/problems/company/openai"
+    ]
+   },
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/simulate-threshold-infection-efficiently"
+    ]
+   }
+  ],
+  "reports": 10,
+  "followups": [
+   "clarify 4- vs 8-neighbour",
+   "simulate only the frontier",
+   "termination when nothing changes"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "inbyte: OpenAI 'very high freq' Nov 2025-Jun 2026 (phone/tech screen, SWE and MLE). Algorithmic simulation more than LLD, but multi-part practical format. Anthropic: one onsite entry 'Simulate Threshold Infection Efficiently' (2026-09)."
+ },
+ {
+  "id": "grid-game-variants",
+  "title": "Tic-tac-toe / Connect-4 engines with twists",
+  "kind": "lld",
+  "prompt": "Game engine on an N x M board with K-in-a-row win detection; twists: automatic (robot) opponent, board snapshots, gravity drop (Connect-4), counting all legal games.",
+  "levels": [
+   "N x M board, K in a row, O(K) win check",
+   "is_robot / deterministic automatic opponent",
+   "board snapshots / history",
+   "count or enumerate legal game sequences (Decagon)"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2024-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7614788/",
+     "https://leetcode.com/discuss/post/6036494/",
+     "https://prachub.com/coding-questions/tic-tac-toe-against-a-deterministic-automatic-opponent",
+     "https://prachub.com/coding-questions/tic-tac-toe-with-automatic-turns-and-board-snapshots",
+     "https://prachub.com/coding-questions/detect-a-k-in-a-row-win-on-a-rectangular-board"
+    ]
+   },
+   {
+    "name": "Glean",
+    "year": "2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/6475937/"
+    ]
+   },
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/count-legal-tic-tac-toe-games-from-the-empty-board",
+     "https://prachub.com/interview-questions/enumerate-4x4-tic-tac-toe-games"
+    ]
+   }
+  ],
+  "reports": 10,
+  "followups": [
+   "undo",
+   "AI move choice",
+   "win check in O(1) per move with counters"
+  ],
+  "maps_to": "tic-tac-toe",
+  "tier": 2,
+  "notes": "Databricks FH x2 (2024-11 DSA round 'check winning conditions' with run-the-code interruptions; 2026-02 'n*m matrix and k subsequent tokens, follow up is_robot')."
+ },
+ {
+  "id": "gpu-credit-ledger",
+  "title": "GPU credit ledger (grants with start/expiry, subtract earliest-expiring first, balance at time t)",
+  "kind": "practical",
+  "prompt": "Grants of credit are active on [start, expire). Events can arrive out of order. subtract consumes from the active grant that expires earliest (spilling to the next); get_balance(t) reports the balance at time t.",
+  "levels": [
+   "L1: create_grant/add(id, amount, start_ts, expire_ts); get_balance(ts) with no spending.",
+   "L2: subtract(amount, ts) consuming earliest-expiring active grants first; same-timestamp order: expiries, then new grants, then subtractions in input order.",
+   "L3: events out of order - replay by timestamp (sort add/expire/cost entries, adjust future expiry amounts when spending) - FH 2025-11 warns 'add all then subtract' is wrong.",
+   "Variants: subtract returns False when insufficient (FIFO credits) vs balance allowed to go negative and stay negative until later grants cover it (inbyte 'GPU Credit 2'); new-grad version: unsorted post/delete statements, balance at any timestamp (priority queue + tree map)."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2024-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/6028435/",
+     "https://leetcode.com/discuss/post/7281078/",
+     "https://leetcode.com/discuss/post/7334602/",
+     "https://www.1point3acres.com/interview/post/7100064",
+     "https://darkinterview.com/collections/openai/questions/e127d5be-2fa4-4019-b6b3-e03a7f22f376",
+     "https://www.inbyte.org/interview/openai/gpu-credits",
+     "https://prachub.com/interview-questions/design-a-time-windowed-gpu-credit-ledger",
+     "https://www.fastprep.io/problems/openai-gpu-credit-ledger"
+    ]
+   },
+   {
+    "name": "Perplexity",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/design-a-credittracker-with-expirations"
+    ]
+   }
+  ],
+  "reports": 9,
+  "followups": [
+   "O(log n) balance queries (prefix sums / segment tree)",
+   "partial consumption bookkeeping",
+   "negative balance semantics",
+   "many users"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "FH x3 on LeetCode (2024-11 new grad screen; 2025-10 'expiration_timestamp drove me nuts'; 2025-11 phone). inbyte: 'high freq', phone screen, ~75 min, Apr-Jun 2026. Perplexity has a clone ('CreditTracker with expirations', 2026-04). Not covered by digital-wallet/banking pages."
+ },
+ {
+  "id": "llm-tokenizer",
+  "title": "Tokenizer: greedy longest-match (and BPE)",
+  "kind": "practical",
+  "prompt": "Given vocab: dict[str, int] and text, emit token ids by greedy longest match at each position; if nothing matches emit UNK and advance one character.",
+  "levels": [
+   "L1: greedy longest-match with bounded scan (max token length).",
+   "L2: UNK handling - collapse consecutive UNK (-1) runs into one.",
+   "L3: trie for speed; detokenize and round-trip tests ('Debug Tokenization and Detokenization', 2026-07).",
+   "Glean: implement BPE (learn merges, encode)."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/3d7e2ee4-304d-490a-a574-634e2456bfa9",
+     "https://www.inbyte.org/interview/anthropic/coding-q6-tokenizer",
+     "https://prachub.com/interview-questions/greedy-longest-match-tokenization-of-a-string-against-a-fixed-vocabulary",
+     "https://prachub.com/coding-questions/implement-a-longest-match-tokenizer-2",
+     "https://prachub.com/interview-questions/debug-tokenization-and-detokenization",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   },
+   {
+    "name": "Glean",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-a-byte-pair-encoding-bpe-tokenizer"
+    ]
+   },
+   {
+    "name": "xAI",
+    "year": "2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/6764643/"
+    ]
+   }
+  ],
+  "reports": 9,
+  "followups": [
+   "greedy is not optimal - when does it fail?",
+   "unicode / bytes",
+   "performance on long text",
+   "streaming input"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Anthropic: phone screen + onsite (inbyte 'regular', Sep 2025-Jun 2026; prachub 2026-06/07/08). xAI FH: 'parsing tokens for LLM, super confusing'."
+ },
+ {
+  "id": "ip-cidr",
+  "title": "IPv4 / CIDR: firewall rule matching (Databricks) and IP range iterator (OpenAI)",
+  "kind": "practical",
+  "prompt": "Databricks: rules [(ALLOW|DENY, ip-or-CIDR)] checked in order, first match wins, default deny; access_ok(ip). OpenAI: iterator over IPv4 addresses in 5 unlocking parts.",
+  "levels": [
+   "Databricks L1: parse dotted quad to 32-bit int; CIDR a.b.c.d/p -> [network, broadcast] via mask; /0 and /32 edge cases.",
+   "Databricks L2: first-match-wins over ordered rules; also print the index of the deciding rule (2026-02 variant).",
+   "OpenAI P1: forward iteration from an IP to 255.255.255.255; P2: reverse to 0.0.0.0; P3: restrict to a CIDR block (size 2^(32-prefix); seed may not be the network address; stop at broadcast/network); P4: step size; P5: not captured."
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2023-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/4007625/",
+     "https://leetcode.com/discuss/post/5733913/",
+     "https://leetcode.com/discuss/post/5743277/",
+     "https://leetcode.com/discuss/post/6479010/",
+     "https://leetcode.com/discuss/post/7377977/",
+     "https://leetcode.com/discuss/post/7614788/"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/ip-address-cidr-iterator",
+     "https://darkinterview.com/collections/openai/questions/52f198d8-48a0-44dd-841b-da0096d16b82",
+     "http://web.archive.org/web/20260516022435/https://www.1point3acres.com/interview/problems/company/openai"
+    ]
+   }
+  ],
+  "reports": 9,
+  "followups": [
+   "many rules: sort ranges / trie / interval merge",
+   "IPv6",
+   "rule conflicts and shadowing"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Databricks FH x6 (screen at L4/L5/SSE; 'they like asking this a lot in screening regardless of level'; interviewer insists all tests pass). OpenAI: inbyte 'regular', phone screen, ~55 min, Feb-May 2026; next part reveals only after passing the previous under a hard time stop."
+ },
+ {
+  "id": "resumable-iterator",
+  "title": "Resumable iterator (get_state/set_state) - list, file, multi-file, 2D/3D, async",
+  "kind": "lld",
+  "prompt": "Define an abstract ResumableIterator with __iter__/__next__, get_state() -> dict and set_state(dict). Resuming from ANY captured state must continue exactly where it stopped. Often test-driven: write the tests first.",
+  "levels": [
+   "L1: abstract interface + tests that capture state at every step and resume from each captured state (TDD; 'at least three unit tests' that must pass).",
+   "L2: list iterator.",
+   "L3: file iterator - state holds a durable byte offset (not an open handle) so a fresh process can reopen and resume.",
+   "L4: multi-file iterator (state = file index + offset) / 2D matrix then 3D nested iterator skipping empty sub-lists ('Multi-Dimensional Support').",
+   "Async variant: coroutine-based iteration over multiple sources with independent serializable state (hellointerview)."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2024-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/5984554/",
+     "https://www.hellointerview.com/community/questions/resumable-iterator/cmbskz7ck004r07ad6f1jxlni",
+     "https://www.inbyte.org/interview/openai/resumable-iterator",
+     "https://darkinterview.com/collections/openai/questions/b99321c7-b9f6-4601-9521-b957cf2d0c25",
+     "https://www.fastprep.io/problems/openai-resumable-list-iterator",
+     "https://www.1point3acres.com/interview/problems/ec3912e2-0511-4700-b01b-5fad7ac3d781"
+    ]
+   },
+   {
+    "name": "xAI",
+    "year": "2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/6764643/"
+    ]
+   }
+  ],
+  "reports": 8,
+  "followups": [
+   "state must be JSON-serializable",
+   "logical position vs byte position",
+   "concurrent iterators must not share state",
+   "generators vs classes"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "FH: LC 2024-10 ('templatized iterator supporting suspension, resumption' + TDD). hellointerview: 2 OpenAI reports (2024-12 senior, 2025-10 mid). xAI FH 2025-05: 'creating iterators on a list and nested lists'. 1p3a also has an OpenAI thread on 'Iterators, Generators, and Coroutines'."
+ },
+ {
+  "id": "duplicate-file-finder",
+  "title": "Duplicate file finder (group identical files in a huge tree)",
+  "kind": "practical",
+  "prompt": "find_duplicates(root) -> list[list[str]]: walk the tree and group files with byte-identical content; omit singletons; never load whole files into memory.",
+  "levels": [
+   "L1: walk + group by full-content hash (streamed in chunks).",
+   "L2: size bucket -> partial hash (first chunk) -> full hash to cut IO.",
+   "L3: robustness - permission errors, symlinks (and symlink cycles), hard links, huge files.",
+   "L4: parallelize across cores/machines; optionally replace duplicates with hard links."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/00ba78a1-bdfe-4436-89f8-c295e04e351d",
+     "https://www.inbyte.org/interview/anthropic/coding-q2-file-deduplication",
+     "https://prachub.com/interview-questions/implement-a-duplicate-file-reporter",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   },
+   {
+    "name": "Harvey",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/find-duplicate-files-safely-at-scale",
+     "https://prachub.com/interview-questions/find-duplicate-files-while-handling-symbolic-link-cycles"
+    ]
+   }
+  ],
+  "reports": 8,
+  "followups": [
+   "hash collisions -> byte compare",
+   "memory bound",
+   "IO vs CPU parallelism",
+   "incremental rescans"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "inbyte: Anthropic 'high freq', phone + onsite, Sep 2025-Jun 2026. A search snippet says dedupe was the 'old' Q2 with a new Q2 after Sep 2025 (the LRU bug-fix+durability) - both still reported in 2026."
+ },
+ {
+  "id": "spreadsheet-lab-variants",
+  "title": "Spreadsheet with formulas and dependency updates (OpenSheet / Harvey)",
+  "kind": "lld",
+  "prompt": "setCell(name, value) where value is a number string or a formula like '=A1 + A2'; getCell(name) returns the evaluated float; changing a cell updates dependents; circular references must be detected and reported.",
+  "levels": [
+   "L1: numbers + '+' formulas over cell refs; missing cells read as 0 (or None).",
+   "L2: dependency graph; recompute dependents on update (topological order).",
+   "L3: cycle detection with an error instead of infinite recursion.",
+   "Harvey variants: eager recompute so reads are O(1); full formula engine with cycle detection; frontend variant: virtualized React spreadsheet."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/9158e4c4-dccf-4963-9464-14fd3ff655da",
+     "https://www.inbyte.org/interview/openai/opensheet-spreadsheet",
+     "https://www.hellointerview.com/blog/openai-coding-questions",
+     "http://web.archive.org/web/20260516022435/https://www.1point3acres.com/interview/problems/company/openai"
+    ]
+   },
+   {
+    "name": "Harvey",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/eager-spreadsheet-formulas-with-constant-time-reads",
+     "https://prachub.com/coding-questions/implement-a-formula-spreadsheet",
+     "https://prachub.com/coding-questions/spreadsheet-formula-engine-with-cycle-detection"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "lazy vs eager evaluation",
+   "cache invalidation",
+   "more operators / functions (SUM ranges)",
+   "undo"
+  ],
+  "maps_to": "spreadsheet",
+  "tier": 2,
+  "notes": "inbyte marks OpenAI version 'reported once, Nov 2025, onsite'; Harvey has 3 separate 2026 entries (Aug-Sep 2026)."
+ },
+ {
+  "id": "concurrent-api-fanout",
+  "title": "Concurrent HTTP/API client with retries (fleet actions, parallel downloads)",
+  "kind": "concurrency",
+  "prompt": "Call an unreliable HTTP API for many targets in parallel with clean error handling: e.g. a CLI that reboots a fleet of servers via POST /reboot, or parallelizes blocking API calls/chunked downloads and verifies integrity.",
+  "levels": [
+   "CoreWeave P1: POST {serial} to localhost:3000/reboot, parse {result, reason}, print.",
+   "P2: timeouts, connection errors, invalid JSON -> meaningful output.",
+   "P3: reboot many servers concurrently - ThreadPoolExecutor + requests (async + requests blocks the event loop - noted trap).",
+   "P4: how to unit test (mock requests, error cases).",
+   "Baseten: replace sequential blocking API calls with a thread pool; parallel chunked file download + integrity check."
+  ],
+  "companies": [
+   {
+    "name": "CoreWeave (W&B)",
+    "year": "2025-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7518478/",
+     "https://prachub.com/interview-questions/build-a-resilient-concurrent-python-cli-for-local-service-lookups",
+     "https://prachub.com/interview-questions/design-batch-reboots-for-machines"
+    ]
+   },
+   {
+    "name": "Baseten",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/parallelize-blocking-api-calls-with-a-thread-pool",
+     "https://prachub.com/coding-questions/parallelize-chunked-file-download-and-verify-integrity"
+    ]
+   },
+   {
+    "name": "Scale AI",
+    "year": "2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/6782775/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "bounded concurrency",
+   "retry with backoff + idempotency",
+   "collect partial failures",
+   "async vs threads with blocking libs",
+   "rate limits of the remote API"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "CoreWeave FH 2026-01 (60 min CoderPad, Python, 4 parts). Scale AI FH 2025-05 is the sequential cousin: Google Places API -> Routes API travel times -> TSP ordering."
+ },
+ {
+  "id": "job-scheduler-durable",
+  "title": "Job scheduler: delayed/cron jobs, durability, concurrent execution",
+  "kind": "practical",
+  "prompt": "Schedule jobs to run at a time or on a cron cadence, persist them across restarts, and run them with workers; one OpenAI onsite hands you a buggy concurrent job scheduler to fix.",
+  "levels": [
+   "Delayed tasks: schedule(task, run_at), worker loop pops due tasks (heap + condition variable).",
+   "Cron cadence: next-run computation, missed runs after downtime.",
+   "Durability: survive restart without double-running (Cursor 'durable cron', Decagon 'durable delayed task scheduler').",
+   "OpenAI onsite 2026-09: 'Debug a Concurrent Job Scheduler' (find races/deadlocks in given code)."
+  ],
+  "companies": [
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-durable-cron-job-scheduler",
+     "https://prachub.com/interview-questions/design-a-ci-cd-job-scheduler"
+    ]
+   },
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-durable-delayed-task-scheduler"
+    ]
+   },
+   {
+    "name": "Scale AI",
+    "year": "2025-2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-durable-task-scheduling-service",
+     "https://prachub.com/interview-questions/design-a-streaming-job-scheduler"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/debug-a-concurrent-job-scheduler"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "exactly-once vs at-least-once",
+   "clock changes",
+   "cancellation",
+   "priority",
+   "graceful shutdown"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "All AGG; several are labelled 'Design ...' in technical screens so expect code + design mix. Close to existing mt-blocking-queue / mt-producer-consumer mechanics but the durability + time trigger parts are new."
+ },
+ {
+  "id": "api-sql-table-db",
+  "title": "Mini SQL table engine via API (create/insert/select/where/order by/joins)",
+  "kind": "lld",
+  "prompt": "Implement a Database with create_table(name, columns), insert(table, row_dict), select(table, columns, where=..., order_by=...) - no SQL string parsing - built part by part with your own tests.",
+  "levels": [
+   "L1: create_table + insert + select(columns).",
+   "L2: WHERE filters (equality, then compound conditions).",
+   "L3: ORDER BY (multi-column, asc/desc).",
+   "L4: delete (tombstones; LSM-style compaction discussion) / joins (Glean part 4-5)."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2024-2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/5984554/",
+     "https://darkinterview.com/collections/openai/questions/77978a9d-eb80-4ef9-a2fa-ab6c5667dcde",
+     "https://www.inbyte.org/interview/openai/in-memory-database-sql",
+     "https://www.hellointerview.com/blog/openai-coding-questions"
+    ]
+   },
+   {
+    "name": "Glean",
+    "year": "2025",
+    "urls": [
+     "https://leetcode.com/discuss/post/6487496/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "indexes for where",
+   "type handling",
+   "join algorithms",
+   "tombstones + compaction"
+  ],
+  "maps_to": "inmem-db",
+  "tier": 2,
+  "notes": "FH: OpenAI LC 2024-10 ('implement a DB. add where clause, order by, delete command (via tombstone, LSM)'); Glean LC 2025-03 (2-hour, 5-part table module; expectation ~4/5 parts). Our inmem-db has typed columns/indexes/transactions - close, but check the select/where/order_by API shape and the tombstone delete."
+ },
+ {
+  "id": "gpu-job-scheduler",
+  "title": "GPU pod/job scheduler (placement on 1- and 8-GPU slots, drain a node)",
+  "kind": "practical",
+  "prompt": "Place jobs needing 1 or 8 GPUs (or pods) onto nodes, respecting capacity; drain a node by rescheduling its pods; route inference to an 8-GPU pool.",
+  "levels": [
+   "first-fit placement",
+   "fragmentation: large vs small jobs",
+   "drain node / reschedule",
+   "batching + routing across GPUs"
+  ],
+  "companies": [
+   {
+    "name": "Together AI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/schedule-gpu-pods-and-drain-a-node",
+     "https://prachub.com/interview-questions/design-a-gpu-aware-pod-scheduler"
+    ]
+   },
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/schedule-one-gpu-and-eight-gpu-model-jobs",
+     "https://prachub.com/interview-questions/route-and-batch-inference-with-eight-gpus",
+     "https://prachub.com/interview-questions/schedule-large-and-small-model-inference-on-an-eight-gpu-pool"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "bin packing heuristics",
+   "preemption",
+   "fairness"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Anthropic entries ('Schedule One-GPU and Eight-GPU Model Jobs' onsite 2026-09; 'Route and Batch Inference with Eight GPUs' tech screen 2026-08) may be design rounds - coding vs design not confirmed."
+ },
+ {
+  "id": "card-game-sim",
+  "title": "Card game simulation (4-player game; poker deal and hand compare)",
+  "kind": "lld",
+  "prompt": "Model a deck, deal to players by the given rules, play turns and decide winners; rules sent in advance (Scale AI) or given in parts (OpenAI poker with fold rules).",
+  "levels": [
+   "deck + deal",
+   "turn loop + rules",
+   "hand ranking / winner",
+   "rule twists (fold rules, alternating dealing)"
+  ],
+  "companies": [
+   {
+    "name": "Scale AI",
+    "year": "2024-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/5510819/",
+     "https://prachub.com/interview-questions/design-and-simulate-a-four-player-card-game"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/68943802-0c46-4ecf-b075-66dea8a4a3b4",
+     "https://prachub.com/interview-questions/design-alternating-card-dealing-and-hand-comparison",
+     "https://www.fastprep.io/problems/openai-modal-and-fair-modal-locks"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "deterministic shuffling for tests",
+   "extensible rules"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Scale AI FH 2024-07: onsite 'they have sent me the card game deck' in advance. The fastprep URL is the page whose 'More OpenAI problems' sidebar lists 'Poker Deal and Hand-Winner Simulation - phone screen - seen Sep 2026'."
+ },
+ {
+  "id": "inference-batching-loop",
+  "title": "Dynamic batching / inference request batcher (coding form)",
+  "kind": "concurrency",
+  "prompt": "Batch incoming generation requests to a mock model: fill up to B slots, run decode steps, and refill slots as sequences finish (continuous batching); or a request batcher that flushes on size or timeout.",
+  "levels": [
+   "static batch: flush on size or max wait",
+   "continuous batching with slot refilling",
+   "per-request streaming of results",
+   "fairness / max tokens"
+  ],
+  "companies": [
+   {
+    "name": "xAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/dynamic-batching-decode-loop-for-a-mock-language-model-with-slot-refilling"
+    ]
+   },
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://prachub.com/interview-questions/design-an-llm-request-batching-system",
+     "https://prachub.com/interview-questions/design-gpu-inference-request-batching",
+     "https://prachub.com/interview-questions/design-a-dynamically-batched-inference-api"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/93f99c70-fd7a-445d-a151-f494c0f561b5"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "timeouts vs throughput",
+   "backpressure",
+   "cancellation"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Coding evidence = 1 (xAI onsite, 2026-09). Anthropic/OpenAI batching entries are SYSTEM DESIGN ('LLM Request Batching API', 'Design GPU inference request batching', 'High-Concurrency GPT Inference Batching'). The lead 'Anthropic batching/inference-queue coding task' is NOT confirmed as a coding round."
+ },
+ {
+  "id": "snapshot-set",
+  "title": "Set with snapshots / snapshot iterator",
+  "kind": "lld",
+  "prompt": "A set supporting add/remove/contains plus an iterator (or snapshot handle) that sees the set exactly as it was when the snapshot was taken, even while the set keeps changing; ordered iteration; cheap snapshots.",
+  "levels": [
+   "L1: add/remove/contains.",
+   "L2: snapshot/iterator frozen at creation time (versioned entries: add_version, remove_version).",
+   "L3: ordered snapshots (cannot rely on built-in hash set order); make snapshot fetch fast / constant time."
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7736707/",
+     "https://prachub.com/coding-questions/build-a-constant-time-snapshot-set-iterator"
+    ]
+   },
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/implement-a-set-with-readable-snapshots"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "garbage-collect versions no snapshot needs",
+   "memory per snapshot",
+   "thread safety"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Databricks FH 2026-04 (senior onsite, 'hire'). OpenAI onsite 'Implement a Set with Readable Snapshots' (prachub 2026-08). Same idea as social-network snapshots."
+ },
+ {
+  "id": "streaming-text-parser",
+  "title": "Streaming text parsers for LLM output (code fences, markdown chunks, line-balanced splits)",
+  "kind": "practical",
+  "prompt": "Consume text arriving in arbitrary chunks (as from a streaming LLM) and emit structure incrementally: code-fence blocks, header-aware markdown chunks, or line-balanced parts.",
+  "levels": [
+   "whole-string version",
+   "chunked input with state carried across chunk boundaries",
+   "edge cases: fences split across chunks, nested/unterminated blocks"
+  ],
+  "companies": [
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/build-a-streaming-markdown-code-fence-parser"
+    ]
+   },
+   {
+    "name": "Sierra",
+    "year": "2025",
+    "urls": [
+     "https://prachub.com/coding-questions/split-markdown-into-header-aware-chunks"
+    ]
+   },
+   {
+    "name": "Together AI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/split-a-chunked-text-stream-into-line-balanced-parts"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "O(1) memory per chunk",
+   "flush at end",
+   "unicode boundaries"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "AGG only; Sierra entry is an online assessment (2025-11)."
+ },
+ {
+  "id": "transactional-kv",
+  "title": "KV store / cart with nested transactions (begin/commit/rollback)",
+  "kind": "lld",
+  "prompt": "set/get/delete plus begin/commit/rollback that nest; rollback undoes only the innermost open transaction.",
+  "levels": [
+   "L1: set/get/delete",
+   "L2: begin/commit/rollback single level",
+   "L3: nested transactions",
+   "Decagon: same on a shopping cart (add/remove items) + undo/redo + space-efficient versions"
+  ],
+  "companies": [
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-an-in-memory-transactional-key-value-store"
+    ]
+   },
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/add-nested-begin-commit-and-abort-semantics-to-a-shopping-cart"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "count(value) queries inside transactions",
+   "memory of undo logs"
+  ],
+  "maps_to": "inmem-db",
+  "tier": 2,
+  "notes": "AGG only (2026-07). Lead said Databricks asks 'KV store with transactions' - no evidence found for Databricks."
+ },
+ {
+  "id": "hierarchical-flags-config",
+  "title": "Feature flags / settings with inheritance (channels, users, teams)",
+  "kind": "lld",
+  "prompt": "Channels hold feature->bool maps and parent channels; get_feature returns the value from the channel, else the closest parent that defines it, else false.",
+  "levels": [
+   "create_channel(id, features, parents), get_feature, set_feature, delete_channel",
+   "multiple parents - define 'closest'",
+   "read-optimized lookups at scale (cache/invalidation)",
+   "Cursor: versioned IDE settings layered user/team"
+  ],
+  "companies": [
+   {
+    "name": "CoreWeave (W&B)",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7537691/"
+    ]
+   },
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-versioned-ide-settings-for-users-and-teams"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "reads >> writes: precompute effective values",
+   "invalidate on parent change",
+   "cycles in parents"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "CoreWeave FH 2026-01 onsite."
+ },
+ {
+  "id": "anthropic-filesystem-oa",
+  "title": "CodeSignal file systems (path tree, quotas or LLM-flavoured level)",
+  "kind": "practical",
+  "prompt": "In-memory FS addressed by /a/b/c paths; commands as [verb, args] returning strings ('true'/'').",
+  "levels": [
+   "L1-L2: create/read/list via hierarchical traversal",
+   "L3 (varies): multi-user quota management OR flag bugs in a supplied helper (LLM-flavoured)",
+   "L4: not captured"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/oa-file-systems"
+    ]
+   },
+   {
+    "name": "Perplexity",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/implement-an-in-memory-file-system-5"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": "file-system",
+  "tier": 2,
+  "notes": "inbyte Feb-May 2026; Perplexity OA 'Implement an In-Memory File System' (2026-02)."
+ },
+ {
+  "id": "interval-utilities",
+  "title": "Interval utilities: global GPU idle intervals; overlaps/gaps",
+  "kind": "practical",
+  "prompt": "Given busy intervals per GPU find globally idle windows; detect overlaps and gaps.",
+  "levels": [
+   "sort + sweep"
+  ],
+  "companies": [
+   {
+    "name": "Fireworks AI",
+    "year": "undated",
+    "urls": [
+     "https://prachub.com/coding-questions/find-global-gpu-idle-intervals"
+    ]
+   },
+   {
+    "name": "Sierra",
+    "year": "undated",
+    "urls": [
+     "https://prachub.com/coding-questions/process-time-intervals-and-detect-overlaps-gaps"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "prachub, undated."
+ },
+ {
+  "id": "stack-samples-to-trace-events",
+  "title": "Profiler: convert sampled call stacks into start/end trace events",
+  "kind": "practical",
+  "prompt": "Input: list of Sample(ts, stack) sorted by ts, stack[0] outermost. Output the ordered start/end events a tracing profiler would show.",
+  "levels": [
+   "L1: first sample -> start events outer->inner; between samples keep the longest common prefix; emit end events for popped frames inner->outer, then start events for pushed frames outer->inner; handle recursion (compare by position, not name) and same-timestamp ordering.",
+   "L2 (noise filter): a frame must appear in N consecutive samples before it is emitted; start time back-dated to its first sighting.",
+   "Other rotations: enter/exit log -> stack at every step with adjacent identical stacks compressed into duration runs; compare by suffix instead of prefix; only the last m frames visible."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7559983/",
+     "https://www.1point3acres.com/interview/thread/1121522",
+     "https://www.1point3acres.com/interview/problems/post/7100016",
+     "https://www.inbyte.org/interview/anthropic/coding-q3-stack-trace",
+     "https://darkinterview.com/collections/anthropic/questions/e1b18a69-2327-4609-aef2-491a3c92522a",
+     "https://prachub.com/interview-questions/convert-sampled-call-stacks-into-timestamped-function-start-and-end-events",
+     "https://prachub.com/coding-questions/convert-streaming-call-stack-samples-into-function-events",
+     "https://prachub.com/coding-questions/generate-function-profiling-events-from-stack-samples",
+     "https://www.fastprep.io/problems/anthropic-convert-stack-samples-to-trace-events",
+     "https://github.com/ryanhestin/anthropic-challenge",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   }
+  ],
+  "reports": 12,
+  "followups": [
+   "streaming input (emit as samples arrive)",
+   "flush open frames at the end",
+   "memory for deep stacks"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH: LC 2026-02 ('I was asked the Stack Trace problem'). inbyte 'high freq' phone+onsite Sep 2025-Jun 2026; prachub entries 2026-07/08 incl. senior. Signature Anthropic question (also a public 'viral video' rendition on GitHub)."
+ },
+ {
+  "id": "distributed-mode-median",
+  "title": "Distributed mode and median across 10 nodes (send/recv, minimize traffic)",
+  "kind": "practical",
+  "prompt": "Data is spread over 10 machines; only send(worker_id, data)/recv() exist; compute the global mode, then the median (and sometimes a sort), minimizing network bytes (network much slower than local reads).",
+  "levels": [
+   "L1: mode - local counts, aggregate (naive) then hash-partition keys to owners.",
+   "L2: median - global count, then bisection over value ranges / histograms (or sketches).",
+   "L3: distributed sort around a helper contract; cost/time estimates."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.1point3acres.com/interview/thread/1102889",
+     "https://www.1point3acres.com/interview/post/7100009",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/7c2a108d-b864-413d-9d20-5527b5ec58aa",
+     "https://www.inbyte.org/interview/anthropic/coding-q4-distributed-mode-median",
+     "https://prachub.com/interview-questions/compute-exact-mode-and-median-across-distributed-nodes",
+     "https://prachub.com/interview-questions/mode-median-and-sort-across-10-nodes-with-send-receive-while-minimizing-traffic",
+     "https://prachub.com/interview-questions/find-a-distributed-mode-efficiently"
+    ]
+   }
+  ],
+  "reports": 8,
+  "followups": [
+   "exact vs approximate",
+   "skewed keys",
+   "node failure"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular', hard, Oct 2025-May 2026; prachub 2026-06/07/08."
+ },
+ {
+  "id": "memory-allocator",
+  "title": "Memory allocator (malloc/free over a fixed arena)",
+  "kind": "lld",
+  "prompt": "Allocator(capacity): malloc(size) -> address, free(address) -> bool, over one contiguous region.",
+  "levels": [
+   "L1: first-fit over free gaps sorted by address; exact fit removes gap, else shrink it.",
+   "L2: free with validation + merge adjacent free blocks.",
+   "L3: best-fit / better than O(n) (sorted structure) - interviewer rejects linked-list O(n).",
+   "Variants: allocate consecutive units and free by owner id (LeetCode 2502 style); buddy allocator."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/memory-allocator",
+     "https://darkinterview.com/collections/openai/questions/62d12301-1d6a-4ae8-8624-fc201f2804b0",
+     "https://www.fastprep.io/problems/openai-memory-allocator",
+     "https://www.1point3acres.com/interview/problems/company/openai/memory-allocator",
+     "https://prachub.com/interview-questions/implement-a-simple-memory-allocator",
+     "https://prachub.com/interview-questions/design-first-fit-and-best-fit-memory-allocation-2",
+     "https://prachub.com/interview-questions/leftmost-fit-memory-allocator-allocate-consecutive-units-and-free-by-owner"
+    ]
+   }
+  ],
+  "reports": 8,
+  "followups": [
+   "fragmentation",
+   "alignment",
+   "thread safety"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular', hard, phone screen ~75 min, Dec 2025-Jun 2026."
+ },
+ {
+  "id": "batch-image-processor",
+  "title": "Batch image processor (JSON transform specs, threads vs processes)",
+  "kind": "concurrency",
+  "prompt": "process_images(image_dir, transformation_dir, output_dir, get_output_path): for each JSON spec and each image apply the listed transforms in order and save to the given output path; then make it fast.",
+  "levels": [
+   "P1: pick Pillow/OpenCV; implement grayscale, flip_horizontal, flip_vertical, scale(factor), blur(radius), rotate(angle); sequential and correct on small images.",
+   "P2: meet a time target on large images - ProcessPoolExecutor (CPU-bound, GIL) vs ThreadPoolExecutor (IO).",
+   "Follow-ups: memory for huge images, error handling/retries, reuse shared intermediate results across pipelines, millions of images across machines."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://darkinterview.com/collections/anthropic/questions/83483569-c5c2-4d3f-ab0b-b9798ba623d0",
+     "https://www.inbyte.org/interview/anthropic/coding-q1-image-processing",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://prachub.com/interview-questions/compare-threads-and-processes-for-image-processing",
+     "https://prachub.com/interview-questions/reuse-work-across-multiprocess-image-pipelines",
+     "https://prachub.com/interview-questions/design-a-concurrent-image-processing-service"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "why processes beat threads here",
+   "chunking work",
+   "partial failure reporting"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte: 'high freq', phone+onsite, Oct 2025-Jun 2026. Grader reads files from disk (return value ignored)."
+ },
+ {
+  "id": "lru-bugfix-durable",
+  "title": "LRU memoization cache: fix the key bug, then make it durable (WAL)",
+  "kind": "practical",
+  "prompt": "Given a skeleton LRU with generate_key(*args, **kwargs) and call(func, *args, **kwargs) (lookup, call on miss, evict LRU): fix generate_key so it is hashable and kwarg-order-stable; then persist the cache so it survives a crash/restart.",
+  "levels": [
+   "L1: debug generate_key (tuple of args + sorted kwargs items; unhashable args).",
+   "L2: verify eviction/recency with tests.",
+   "L3: durability - write-ahead log or snapshot; restore entries AND recency order after restart; crash-resilient writes."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/coding-q2-lru-cache-durability",
+     "https://darkinterview.com/collections/anthropic/questions/17fcade9-dff4-4f31-a70c-d90a4b6a141a",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://prachub.com/interview-questions/fix-a-buggy-lru-cache-then-make-it-durable-with-a-write-ahead-log",
+     "https://prachub.com/interview-questions/debug-python-lru-cache-key-construction",
+     "https://prachub.com/coding-questions/implement-a-crash-resilient-lru-cache",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "log compaction",
+   "fsync cost",
+   "thread safety"
+  ],
+  "maps_to": "lru",
+  "tier": 3,
+  "notes": "inbyte: 'high freq', phone+onsite, Oct 2025-Jun 2026 ('In-Memory Cache: Bug-Fix + Durability'). prachub: 2026-04 (debug key), 2026-05 (fix+WAL), 2026-08 (crash-resilient)."
+ },
+ {
+  "id": "anthropic-bank-oa",
+  "title": "CodeSignal bank system (4 levels)",
+  "kind": "practical",
+  "prompt": "Timestamps (ms, strictly increasing) on every call. Variant A is the widely shared ICF bank; Variant B (inbyte) replaces immediate transfers with hold + accept.",
+  "levels": [
+   "A-L1: create_account(ts, id)->bool; deposit(ts, id, amount)->new balance|None; transfer(ts, src, dst, amount)->src balance|None (missing account, same account, insufficient funds -> None).",
+   "A-L2: top_spenders(ts, n)->['id(total_outgoing)', ...] by outgoing desc, then id asc; outgoing = transfers out + payments; cashback not counted.",
+   "A-L3: pay(ts, id, amount)->'payment<k>' (global counter)|None; 2% cashback (floored) credited at ts+86_400_000 before other ops at that ts; get_payment_status(ts, id, payment)->'IN_PROGRESS'|'CASHBACK_RECEIVED'|None (None also when the payment belongs to another account).",
+   "A-L4: merge_accounts(ts, id1, id2)->bool (balance, outgoing totals, pending cashbacks and payment ids move to id1; id2 removed); get_balance(ts, id, time_at)->balance after all ops at time_at, None if the account did not exist then; merged account inherits history.",
+   "B-L3: transfer(from, to, amount) puts funds on hold; transfer_accept(transfer_id) completes it (sender's available balance drops while pending, recipient unchanged). B-L4: merge_account(from, into) keeps histories and pending transfers; a merged-away id can be re-created later."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/45a1f39c-9083-4922-99f8-13038e59b06d",
+     "https://www.inbyte.org/interview/anthropic/oa-bank-system",
+     "https://prachub.com/coding-questions/banking-system-simulation",
+     "https://www.fastprep.io/problems/anthropic-banking-system-part-4",
+     "https://github.com/EricZheng0404/LibreSignal",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "refactor for history (balance timeline per account)",
+   "process due cashbacks before each op"
+  ],
+  "maps_to": "banking",
+  "tier": 3,
+  "notes": "Spec text for A matches the ICF task shared in REPO (LibreSignal bank_system). prachub lists 'Implement a Banking System' as an Anthropic ONSITE item (2026-08). Our banking page (statements/interest) does not match this spec."
+ },
+ {
+  "id": "count-machines-tree",
+  "title": "Count machines in a tree via async messages (+ topology)",
+  "kind": "practical",
+  "prompt": "Each node is a machine that can only message its parent/children via sendAsyncMessage(to, msg); implement receiveMessage(from, msg) so the root learns the machine count, then the full topology.",
+  "levels": [
+   "P1: 'count' fans out to children; leaves reply 1; parents sum child responses and reply up; root reports.",
+   "P2: 'topology' / 'topologyResponse' messages returning the tree structure.",
+   "P3 (sometimes): debug a provided tree class that should keep the max in each subtree."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20251012211724/https://www.1point3acres.com/bbs/thread-1149658-1-1.html",
+     "https://leetcode.com/discuss/post/7572435/",
+     "https://www.inbyte.org/interview/openai/distributed-cluster-count-topology",
+     "https://darkinterview.com/collections/openai/questions/b8e12a1c-55a0-4552-a13f-3df3e4ec7ba9",
+     "https://prachub.com/interview-questions/count-machines-and-recover-a-distributed-tree-topology"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "message loss / timeouts",
+   "duplicate messages",
+   "very deep trees"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "This is the lead's 'node/worker count' exercise - confirmed. FH LC 2026-02 (final coding round)."
+ },
+ {
+  "id": "social-network-snapshots",
+  "title": "Social network: follow graph, snapshots, time travel, recommendations",
+  "kind": "lld",
+  "prompt": "Directed follow graph built up over 4 levels.",
+  "levels": [
+   "L1: add_user, follow, unfollow, get_followers, get_followees (unknown user -> error; self/duplicate follow no-op; unfollow missing -> no-op).",
+   "L2: create_snapshot() -> immutable Snapshot with is_following(a, b); must stay correct as the graph changes; cheap.",
+   "L3: follow_at / unfollow_at / is_following_at(a, b, t) with half-open [follow, unfollow) intervals; re-follow allowed.",
+   "L4: who-to-follow - 2-hop candidates ranked by number of intermediaries, top-K."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/e4fec9ad-ebb5-450a-8fc7-96ea07aeb2f6",
+     "https://www.inbyte.org/interview/openai/social-network-follow-graph",
+     "https://www.1point3acres.com/interview/problems/post/7100180",
+     "https://aonecode.com/iq/docs/openai/coding/social-network",
+     "https://prachub.com/interview-questions/follow-graph-with-cheap-snapshots-and-top-k-follow-recommendations"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "snapshot cost O(1) via versioning",
+   "scaling recommendations"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'high freq' phone screen Jan-Jun 2026; darkinterview 'Reported Aug 2026, High Frequency'."
+ },
+ {
+  "id": "openai-misc-practical",
+  "title": "Other OpenAI practical titles (one source each)",
+  "kind": "practical",
+  "prompt": "Message event aggregation; command dispatch + telemetry reconciliation for unreliable devices (smart grid); in-memory KV cache; count connected friend groups.",
+  "levels": [
+   "titles only"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/34fe9e0f-0dfc-4aa2-b1a1-edafb98510f1",
+     "https://darkinterview.com/collections/openai/questions/dcd6e794-aa8c-443c-8eff-e8b0b431b065",
+     "https://prachub.com/interview-questions/design-command-dispatch-and-telemetry-reconciliation-for-unreliable-devices",
+     "https://prachub.com/interview-questions/monitor-devices-over-an-unreliable-network",
+     "https://prachub.com/interview-questions/design-an-in-memory-key-value-cache",
+     "http://web.archive.org/web/20260515131401/https://www.1point3acres.com/interview/company/OpenAI"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Smart-grid/device items appear 5x on prachub (Aug-Sep 2026) but may be design rounds. 1p3a post titled 'Coding New Problem on Event Counting' (2026-05)."
+ },
+ {
+  "id": "merkle-repo-diff",
+  "title": "Merkle tree over a repository: hash, lookup, diff changed files",
+  "kind": "practical",
+  "prompt": "Build a deterministic Merkle tree over a directory/repo, look up hashes, and diff two trees to find changed files.",
+  "levels": [
+   "deterministic file + directory hashing (sorted children)",
+   "hash lookup by path",
+   "tree diff pruning equal subtrees",
+   "incremental update on file change"
+  ],
+  "companies": [
+   {
+    "name": "Cursor (Anysphere)",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/implement-and-explain-a-merkle-tree",
+     "https://prachub.com/interview-questions/implement-deterministic-merkle-hashing-for-a-repository",
+     "https://prachub.com/interview-questions/implement-a-merkle-tree-for-repository-contents",
+     "https://prachub.com/interview-questions/build-a-merkle-tree-over-a-directory-with-hash-lookup-and-tree-diff",
+     "https://prachub.com/coding-questions/implement-a-merkle-tree-repo-diff",
+     "https://prachub.com/interview-questions/hash-a-repository-with-a-merkle-tree-and-find-changed-files"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "renames",
+   "large files streaming hash",
+   "sync protocol"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Cursor signature: 6 prachub entries Feb-Aug 2026 (technical screen; new grad and general)."
+ },
+ {
+  "id": "toy-type-system",
+  "title": "Toy language type system with generics",
+  "kind": "lld",
+  "prompt": "Node (primitive/generic/tuple) and Function (params -> return) classes.",
+  "levels": [
+   "P1: __str__ - tuples '[int,[str,T1]]', functions '(int,T1) -> [T1,str]' (confirm spacing).",
+   "P2: get_return_type(params, function) - bind generics T1, T2 by matching actual params (nested tuples), substitute into the return type; raise on arg-count mismatch, concrete mismatch, or conflicting bindings."
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20251012211724/https://www.1point3acres.com/bbs/thread-1149658-1-1.html",
+     "https://leetcode.com/discuss/post/7572435/",
+     "https://darkinterview.com/collections/openai/questions/f6791008-88f4-49af-93c1-4fce89292822",
+     "https://www.inbyte.org/interview/openai/toy-language-type-inference",
+     "http://web.archive.org/web/20260516022435/https://www.1point3acres.com/interview/problems/company/openai"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "generics inside nested tuples",
+   "unification both ways"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'high freq' phone screen Dec 2025-May 2026; darkinterview 'Reported Jul 2026, High Frequency'."
+ },
+ {
+  "id": "shard-rebalancing",
+  "title": "Shard rebalancing over overlapping key ranges",
+  "kind": "practical",
+  "prompt": "rebalance(limit, shards) where each shard is 'id:start:end' (inclusive); no key may be covered by more than limit shards.",
+  "levels": [
+   "process shards by start then end; a later shard gives up the overlapping part (shift its start)",
+   "delete shards that become empty/invalid",
+   "extend shards to fill gaps",
+   "class variant Shard(limit) with incremental adds; consistent-hashing ring with virtual nodes variant"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/shard-rebalance",
+     "https://darkinterview.com/collections/openai/questions/6f8133d8-74fe-4c10-afc9-618940cdc64a",
+     "https://www.1point3acres.com/interview/problems/post/7100238",
+     "https://prachub.com/coding-questions/consistent-hashing-ring-with-virtual-nodes-for-shard-rebalancing"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular' phone screen Mar-Jun 2026."
+ },
+ {
+  "id": "data-labeling-scheduler",
+  "title": "Data labeling task scheduler (tasks x models x human labelers)",
+  "kind": "practical",
+  "prompt": "Given t tasks, m models, h labelers and k (min tasks per human), produce a schedule of (task, model, human) triples under uniqueness and fairness rules, or None if infeasible.",
+  "levels": [
+   "P1: feasibility + uniqueness (each human labels a task at most once)",
+   "P2: prefix balance - in any prefix, per-task model counts and human counts differ by at most 1",
+   "P3: incremental updates as new tasks/labelers arrive"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/data-labeling-task-scheduler",
+     "https://darkinterview.com/collections/openai/questions/9e276442-0e25-4a35-9a1d-433f002e80b0",
+     "https://www.1point3acres.com/interview/problems/company/openai/data-labeling-task-scheduler",
+     "https://prachub.com/coding-questions/generate-data-labeling-schedules"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular' Feb-May 2026; 1p3a post 2026-05."
+ },
+ {
+  "id": "ordered-log-writer",
+  "title": "Log writer: ordered multithreaded writes, background flush, WAL batching",
+  "kind": "concurrency",
+  "prompt": "Start with a synchronous logger writing to a file; make it multi-threaded while keeping writes ordered and well-formed; then buffer with a background flush thread / batch WAL writes.",
+  "levels": [
+   "L1: sync append to file",
+   "L2: many producer threads, single ordered writer (queue + writer thread)",
+   "L3: buffered writer with background flush thread; flush on size/time",
+   "L4: durability - WAL with batch fsync, crash recovery"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7736707/",
+     "https://prachub.com/interview-questions/implement-a-concurrent-buffered-file-logger",
+     "https://prachub.com/interview-questions/design-a-thread-safe-buffered-writer-with-a-background-flush-thread",
+     "https://prachub.com/interview-questions/design-a-durable-concurrent-event-writer",
+     "https://prachub.com/interview-questions/design-a-write-ahead-log-writer-with-batch-writes"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "backpressure when buffer full",
+   "shutdown flush",
+   "ordering guarantees across threads"
+  ],
+  "maps_to": "logger",
+  "tier": 3,
+  "notes": "FH LC 2026-04 (LLD round, 'hire'). prachub 2026-07/08 x4."
+ },
+ {
+  "id": "anthropic-recipe-oa",
+  "title": "CodeSignal recipe manager",
+  "kind": "practical",
+  "prompt": "RecipeManager behaving like a small in-memory DB over 4 levels.",
+  "levels": [
+   "L1: add_recipe(recipe_id, name, ingredients) - False if id exists or name clashes case-insensitively; get_recipe -> dict(id, name, ingredients); update_recipe (fails if missing or new name collides with ANOTHER recipe); delete_recipe.",
+   "L2-L4: not captured verbatim; inbyte tags them 'Versioning' and 'User System'; an older gist describes search by ingredient, cook-time filters and meal suggestions from available ingredients."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/oa-recipe-manager",
+     "https://darkinterview.com/collections/anthropic/questions/6263f083-661c-4bac-b644-f024a6fd169c",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular' Nov 2025-Jun 2026. Later levels unverified - do not build L2-L4 as fact."
+ },
+ {
+  "id": "version-dependency",
+  "title": "Find first working version with minimal API calls (and delayed-feedback binary search)",
+  "kind": "practical",
+  "prompt": "Versions 'major.minor.patch' given lexicographically sorted; an API says whether a feature works; find the earliest working version with few calls.",
+  "levels": [
+   "parse and sort numerically (1.10.0 > 1.9.0)",
+   "binary search on the monotone predicate",
+   "variant: binary search where each answer arrives one call late"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/version-dependency",
+     "https://darkinterview.com/collections/openai/questions/37e3b4bc-6426-42dc-bb6c-cb8f5301a3de",
+     "https://darkinterview.com/collections/openai/questions/0af84c96-b897-4764-8a37-0211e57a3fba",
+     "https://prachub.com/interview-questions/reason-about-binary-search-with-one-call-delayed-feedback"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'regular' phone screen Jan-May 2026 (75 min considered tight)."
+ },
+ {
+  "id": "modal-lock",
+  "title": "ModalLock and FairModalLock (mode-compatible shared lock)",
+  "kind": "concurrency",
+  "prompt": "Python threading: threads acquire(mode)/release(mode); holders of the SAME mode share the lock, different modes exclude each other; FairModalLock serves waiters in arrival order (FIFO groups of same-mode waiters enter together).",
+  "levels": [
+   "L1: ModalLock - arbitrary string modes, condition variable, release validates a matching acquire, idle when last holder leaves",
+   "L2: FairModalLock - FIFO queue of mode groups; later same-mode arrivals may not overtake earlier waiters; avoid starvation and deadlock at mode switches"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/modal-lock-fair-modal-lock",
+     "https://darkinterview.com/collections/openai/questions/41e693bf-e838-4b8a-ac28-22be586dd1f9",
+     "https://www.1point3acres.com/interview/thread/1187539",
+     "https://www.fastprep.io/problems/openai-modal-and-fair-modal-locks"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "compare to RW lock",
+   "starvation proof",
+   "timeouts"
+  ],
+  "maps_to": "mt-rwlock",
+  "tier": 3,
+  "notes": "inbyte: 'reported once', onsite, Mar 2026, SWE+MLE (1p3a: 'for ML Infra roles'); 1p3a thread lists it for a phone screen too. Generalises our RW lock to N modes + fairness."
+ },
+ {
+  "id": "cd-path-resolution",
+  "title": "Implement cd (path normalization, ~, symlinks)",
+  "kind": "practical",
+  "prompt": "cd(current_dir, destination) -> normalized absolute path using string processing only.",
+  "levels": [
+   "P1: relative destinations with ., .., //, trailing /; clamp at /",
+   "P2: absolute destinations and ~ (home)",
+   "P3: symlink map - resolve links, detect cycles"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025",
+    "urls": [
+     "http://web.archive.org/web/20251012211724/https://www.1point3acres.com/bbs/thread-1149658-1-1.html",
+     "https://www.inbyte.org/interview/openai/implement-cd-command",
+     "https://darkinterview.com/collections/openai/questions/1dc27079-988e-4f74-a3c4-ed92231868cd",
+     "https://www.hellointerview.com/blog/openai-coding-questions"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [],
+  "maps_to": "file-system",
+  "tier": 3,
+  "notes": "inbyte 'reported once', onsite, Dec 2025; 1p3a 2025 summary lists it among high-frequency coding."
+ },
+ {
+  "id": "kv-load-metrics",
+  "title": "KV store with windowed load metrics / hit counting",
+  "kind": "practical",
+  "prompt": "put/get plus measure_put_load()/measure_get_load() returning average calls over the last 5 minutes.",
+  "levels": [
+   "L1: put/get",
+   "L2: sliding-window counters",
+   "L3: many calls within one second (sub-second buckets / circular array)"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2023-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/6525129/",
+     "https://leetcode.com/discuss/post/4285067/",
+     "https://prachub.com/interview-questions/add-sliding-window-get-and-put-activity-metrics-to-a-key-value-store",
+     "https://prachub.com/interview-questions/design-a-key-value-store-with-hit-counting"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [],
+  "maps_to": "rate-limiter",
+  "tier": 3,
+  "notes": "FH LC 2025-03 (machine coding round) and 2023-11 (hit counter; interviewer wanted circular array)."
+ },
+ {
+  "id": "rolling-window-tracker",
+  "title": "Rolling-window metric tracker (CSAT / conversation score / average)",
+  "kind": "practical",
+  "prompt": "Record scores with timestamps; query the average over the last W seconds/items; call timing stats.",
+  "levels": [
+   "fixed window",
+   "sliding window with deque",
+   "per-agent/per-conversation tracking"
+  ],
+  "companies": [
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-a-csat-sliding-window-tracker",
+     "https://prachub.com/coding-questions/design-sliding-window-average-tracker",
+     "https://prachub.com/coding-questions/design-rolling-window-conversation-score-tracker",
+     "https://prachub.com/coding-questions/implement-csat-tracking-and-call-timing"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [],
+  "maps_to": "rate-limiter",
+  "tier": 3,
+  "notes": "prachub Feb-Mar 2026."
+ },
+ {
+  "id": "anthropic-cloud-storage-oa",
+  "title": "CodeSignal cloud storage (files, largest-N, users/capacity, backup/restore)",
+  "kind": "practical",
+  "prompt": "String-command form: each query is [OP, args...] and every result is a string.",
+  "levels": [
+   "L1: ADD_FILE name size -> 'true'/'false'; GET_FILE_SIZE name -> size|''; DELETE_FILE name -> deleted size|''.",
+   "L2: GET_N_LARGEST prefix n -> 'name(size), ...' by size desc then name asc; '' if none.",
+   "L3: ADD_USER id capacity; ADD_FILE_BY id name size -> remaining capacity|'' (ADD_FILE = admin, unlimited); MERGE_USER id1 id2 -> id1 remaining capacity|'' (files + unused capacity move, id2 deleted).",
+   "L4: BACKUP_USER id -> #files|''; RESTORE_USER id -> #files restored|'' (no backup = delete all the user's files; skip names now taken by others; capacity unchanged; merge does not touch id1's backup, deletes id2's)."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://darkinterview.com/collections/anthropic/questions/4ffffcaa-3df8-41f7-af5c-6821240c52f3",
+     "https://github.com/EricZheng0404/LibreSignal"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "deep copies in backups",
+   "prefix search index"
+  ],
+  "maps_to": "file-system",
+  "tier": 3,
+  "notes": "Anthropic attribution from 1p3a problem list (Jan 2026) + darkinterview; spec from REPO reconstruction (LibreSignal storage). Also the official CodeSignal example 'File Hosting' (upload/get/copy -> top-10 prefix search -> *_at with TTL -> rollback(ts)) is the template these follow: https://github.com/packageIncoming/CodeSignal_Practice_Industry_Coding_Framework"
+ },
+ {
+  "id": "anthropic-employee-oa",
+  "title": "CodeSignal employee / workforce management (clock-ins, promotions, double pay)",
+  "kind": "practical",
+  "prompt": "Track office sessions and pay.",
+  "levels": [
+   "L1: add_employee/ADD_WORKER(id, position, compensation); clock_in/clock_out or REGISTER(id, ts) toggling in/out; GET total time over finished sessions.",
+   "L2: top workers by office time (optionally per position) -> 'id(time), ...' desc, ties by id.",
+   "L3: PROMOTE(id, new_position, new_comp, start_ts) effective from the first entry at/after start_ts; CALC_SALARY(id, start, end) paying only finished sessions overlapping the window at the rate in force.",
+   "L4: SET_DOUBLE_PAID(start, end) - hours inside such periods pay 2x."
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/anthropic/questions/6d5a6517-f7fa-44de-a7c3-30b06b86522d",
+     "https://www.inbyte.org/interview/anthropic/oa-worker-management",
+     "http://web.archive.org/web/20260102111132/https://www.1point3acres.com/interview/problems/company/anthropic",
+     "https://github.com/EricZheng0404/LibreSignal"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "interval overlap math",
+   "pending promotion state"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "darkinterview: 'Reported May 2026'; inbyte Jan-May 2026 (clock_in repeated is undefined in some rotations, no-op in others)."
+ },
+ {
+  "id": "anthropic-task-manager-oa",
+  "title": "CodeSignal task manager (TTL + time-travel listing)",
+  "kind": "practical",
+  "prompt": "Per-user task CRUD with optional ttl; get_task_list(user, at_timestamp) must answer for any past moment by replaying timestamped operations.",
+  "levels": [
+   "L1-L2: add_task(user, task_id, ...), update, delete, list",
+   "L3: ttl - expired tasks behave as deleted",
+   "L4: time-travel queries (no per-call snapshots)"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/oa-task-management",
+     "https://darkinterview.com/collections/anthropic/questions/28d2d597-05ef-4039-8790-db9e6b48d7b7",
+     "https://gist.github.com/nito-Q/3b0e09676de3b1176f85e2db3d09a9ad"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte most recent May 2026; an explicit-timestamp API variant exists. Gist's 'Task Tracker' (priorities, prefix search, deadlines, overdue report) may be an older rotation."
+ },
+ {
+  "id": "monster-battle",
+  "title": "Monster battle system (turn-based OOP simulation)",
+  "kind": "lld",
+  "prompt": "Monster(name, health, attack), Team(name, monsters). Teams alternate; the first living monster attacks the first living enemy; damage = attack; death at health <= 0; return the battle log.",
+  "levels": [
+   "P1: core loop + log",
+   "later parts not captured (expect abilities/order/speed twists)"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/monster-battle-system",
+     "https://darkinterview.com/collections/openai/questions/f119ba95-d56e-4ec8-9273-3072e80cc105",
+     "http://web.archive.org/web/20260516022435/https://www.1point3acres.com/interview/problems/company/openai"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte 'high freq' phone+onsite Dec 2025-Jun 2026."
+ },
+ {
+  "id": "chatbot-refactor",
+  "title": "Chat bot system refactoring (OOP + tests)",
+  "kind": "practical",
+  "prompt": "Refactor a given messy chat bot codebase into clean OOP without changing behaviour; add tests.",
+  "levels": [
+   "title/tags only"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/openai/chat-bot-system-refactoring",
+     "https://darkinterview.com/collections/openai/questions/11b5121d-455e-4796-bdce-4aae60438deb",
+     "https://prachub.com/interview-questions/design-a-chatbot-with-object-oriented-principles"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte onsite Nov 2025; prachub 2026-08 'Design a Chatbot with Object-Oriented Principles'."
+ },
+ {
+  "id": "versioned-cart-undo",
+  "title": "Shopping/recipe cart with undo/redo and space-efficient versions",
+  "kind": "lld",
+  "prompt": "Add/remove items with undo/redo, keep versions cheaply, and (separately) nested begin/commit/abort.",
+  "levels": [
+   "add/remove",
+   "undo/redo stacks",
+   "space-efficient versioning",
+   "nested transactions (see transactional-kv)"
+  ],
+  "companies": [
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/shopping-cart-with-undo-and-redo-for-add-and-remove-operations",
+     "https://prachub.com/interview-questions/design-a-space-efficient-versioned-recipe-shopping-cart",
+     "https://prachub.com/coding-questions/implement-a-recipe-cart"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": "text-editor",
+  "tier": 3,
+  "notes": "prachub 2026-08/09."
+ },
+ {
+  "id": "mpmc-ring-buffer",
+  "title": "MPMC circular buffer; thread-safe ref-counted smart pointer (C++)",
+  "kind": "concurrency",
+  "prompt": "Bounded multi-producer multi-consumer ring buffer; shared_ptr-like class with atomic refcount.",
+  "levels": [
+   "mutex + two condition variables",
+   "lock-free variant discussion",
+   "atomic refcount + destruction ordering"
+  ],
+  "companies": [
+   {
+    "name": "NVIDIA",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-multi-producer-multi-consumer-circular-buffer",
+     "https://prachub.com/interview-questions/implement-a-thread-safe-reference-counted-smart-pointer-in-cplusplus",
+     "https://prachub.com/interview-questions/implement-and-explain-a-cplusplus-smart-pointer"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": "mt-blocking-queue",
+  "tier": 3,
+  "notes": "prachub Sep 2026."
+ },
+ {
+  "id": "scale-api-llm-service",
+  "title": "LLM-backed HTTP service / API integration practical",
+  "kind": "practical",
+  "prompt": "Call real external APIs and combine results (Google Places -> Routes -> TSP), or build a CSV-upload endpoint that classifies rows with GPT and returns JSON.",
+  "levels": [
+   "P1: call API 1, parse",
+   "P2: call API 2 per pair",
+   "P3: algorithm on combined data (TSP)",
+   "CSV variant: upload -> batch classify -> JSON"
+  ],
+  "companies": [
+   {
+    "name": "Scale AI",
+    "year": "2025-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/6782775/",
+     "https://prachub.com/interview-questions/build-a-csv-to-json-classification-service",
+     "https://prachub.com/interview-questions/design-csv-upload-endpoint-with-gpt-classification"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH LC 2025-05 (India backend). Prep materials describe the round in advance."
+ },
+ {
+  "id": "scale-party-timezones",
+  "title": "Party hours per town/zone and dead-zone gaps",
+  "kind": "practical",
+  "prompt": "Map time zones -> cities -> parties; compute party hours per zone and the 'dead' hours between first start and last end.",
+  "levels": [
+   "interval union",
+   "gaps"
+  ],
+  "companies": [
+   {
+    "name": "Scale AI",
+    "year": "2025-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/6782775/",
+     "https://prachub.com/coding-questions/compute-party-hours-per-town-and-city-gaps",
+     "https://prachub.com/coding-questions/compute-party-time-blocks-per-neighborhood"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH LC 2025-05 phone screen."
+ },
+ {
+  "id": "glean-misc",
+  "title": "Glean practical: 2048 game logic; document assignment to indexers",
+  "kind": "lld",
+  "prompt": "Implement 2048 moves/merges; simulate assigning documents to indexer workers.",
+  "levels": [
+   "tilt/merge rules",
+   "scoring",
+   "assignment simulation"
+  ],
+  "companies": [
+   {
+    "name": "Glean",
+    "year": "2025-2026",
+    "urls": [
+     "https://prachub.com/coding-questions/implement-2048-game-logic",
+     "https://prachub.com/coding-questions/implement-2048-tilt-move",
+     "https://prachub.com/coding-questions/simulate-document-assignment-to-indexers"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "prachub 2025-11 to 2026-05."
+ },
+ {
+  "id": "harvey-text-spans",
+  "title": "Highlight whole-word matches and merge overlapping spans (+ citations)",
+  "kind": "practical",
+  "prompt": "Find whole-word phrase matches in text, merge overlapping highlight spans, rank citations.",
+  "levels": [
+   "tokenize on word boundaries",
+   "interval merge",
+   "ranking"
+  ],
+  "companies": [
+   {
+    "name": "Harvey",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/highlight-whole-word-matches-and-merge-overlapping-spans",
+     "https://prachub.com/interview-questions/highlight-overlapping-phrases-in-a-sentence",
+     "https://prachub.com/interview-questions/merge-exact-word-highlights-and-rank-their-citations"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "prachub 2026-04 to 2026-08."
+ },
+ {
+  "id": "bootloader-simulator",
+  "title": "Bootloader instruction simulator (find and fix the infinite loop)",
+  "kind": "practical",
+  "prompt": "Program lines 'plus n' (add to accumulator), 'next n' (no-op, go to next line), 'jump n' (relative jump). Exactly one corrupted line causes an infinite loop: detect the first revisited line, flip the faulty instruction, run to completion and return the accumulator.",
+  "levels": [
+   "run until a line repeats or the end",
+   "identify the culprit and repair",
+   "return final accumulator"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/anthropic/questions/c8644eff-f47e-445f-aa9f-56fe3a3a5220",
+     "https://www.inbyte.org/interview/anthropic/coding-bootloader"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "which flip is correct if several candidates",
+   "parsing robustness"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "AGG only ('now and then', most recent Jun 2026). Same shape as Advent of Code 2020 day 8."
+ },
+ {
+  "id": "anthropic-dns-resolver-oa",
+  "title": "DNS resolver (CodeSignal, Anthropic Fellows)",
+  "kind": "practical",
+  "prompt": "Partial codebase + stepwise spec (tests unlock per step).",
+  "levels": [
+   "normalize names (case-fold, strip trailing dot)",
+   "A-record lookup and recursive CNAME resolution",
+   "fallback chains with specified exception behaviour",
+   "alias cycle detection",
+   "TTL-based response cache"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/oa-fellows-dns-resolver",
+     "https://darkinterview.com/collections/anthropic/questions/23819882-0b34-47c6-82a1-474696f82b46"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Fellows program OA (most recent May 2026)."
+ },
+ {
+  "id": "circuit-breaker-db-routing",
+  "title": "Circuit breaker for leader-follower DB routing",
+  "kind": "lld",
+  "prompt": "Route requests to leader/followers and trip per-node circuit breakers according to given rules (closed/open/half-open).",
+  "levels": [
+   "breaker state machine",
+   "routing reads/writes",
+   "recovery probing"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2023-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/4285067/",
+     "https://prachub.com/interview-questions/design-circuit-breaker-aware-database-routing"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH LC 2023-11 (long statement, compiled running code expected); prachub 2026-08."
+ },
+ {
+  "id": "databricks-misc",
+  "title": "Databricks one-offs: SluggishArray (lazy chained map), RLE + bit-packing codec",
+  "kind": "practical",
+  "prompt": "SluggishArray.map(fn) chains lazily; getIndexOf(v) applies only as much as needed. Encoder/decoder with run-length + bit packing.",
+  "levels": [
+   "lazy evaluation of chained maps",
+   "early stop",
+   "RLE encode/decode, then bit-packing"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2023-2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/4254781/",
+     "https://leetcode.com/discuss/post/7736707/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH each once."
+ },
+ {
+  "id": "boolean-filter-expressions",
+  "title": "Row filter with boolean condition expressions (W&B)",
+  "kind": "lld",
+  "prompt": "Rows are dicts; conditions like (duration > 22) AND (a > 1 OR b < 3); you choose the representation (no parsing needed).",
+  "levels": [
+   "P1: expression tree with <, >, AND, OR over float values; missing keys",
+   "P2 (choose one): pretty-print the expression, or add equality for strings/bools"
+  ],
+  "companies": [
+   {
+    "name": "CoreWeave (W&B)",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7502269/",
+     "https://prachub.com/interview-questions/represent-and-evaluate-boolean-predicate-expressions"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH LC 2026-01 phone screen."
+ },
+ {
+  "id": "xai-concurrency-onsite",
+  "title": "xAI concurrency onsite: fix racy BankAccount without editing the class (Python + Go); hand-written parallel sort",
+  "kind": "concurrency",
+  "prompt": "Make deposits thread-safe by wrapping/composing rather than editing the class, in two languages; sort with multiple worker threads/processes and merge.",
+  "levels": [
+   "wrapper/decorator with lock",
+   "Go: mutex vs channel owner goroutine",
+   "parallel sort: partition, sort chunks, k-way merge"
+  ],
+  "companies": [
+   {
+    "name": "xAI",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/make-a-racy-bankaccount-deposit-thread-safe-without-editing-the-class-in-python-and-go",
+     "https://prachub.com/interview-questions/hand-write-a-parallel-sort-using-multiple-worker-threads-or-processes"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [],
+  "maps_to": "mt-striped-map",
+  "tier": 3,
+  "notes": "prachub 2026-09 onsite."
+ },
+ {
+  "id": "weighted-data-batcher",
+  "title": "Weighted data batcher with checkpointing (resume byte-identical batches)",
+  "kind": "practical",
+  "prompt": "Given registry.get_iterator(name, offset=0) -> Iterator[Example], build DataBatcher(registry, weights, batch_size) that mixes datasets in proportion to weights with a fixed in-batch order, plus state_dict()/load to resume producing identical batches.",
+  "levels": [
+   "P1: batch_size divisible by weight sum; deterministic ordering",
+   "P2: checkpoint/resume through offsets",
+   "P3: non-divisible sizes, exhausted datasets"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2025-2026",
+    "urls": [
+     "https://www.inbyte.org/interview/anthropic/coding-design-data-batcher"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "determinism across restarts",
+   "epoch boundaries"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "inbyte only ('regular', MLE/RE roles, Oct 2025-May 2026). Same skill family as OpenAI's resumable iterator."
+ },
+ {
+  "id": "streaming-token-cost",
+  "title": "Streaming token-usage cost calculator",
+  "kind": "practical",
+  "prompt": "Compute running costs from streamed LLM usage events (input/output tokens, per-model prices).",
+  "levels": [
+   "title only - levels not captured"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/calculate-streaming-token-usage-costs"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "AGG only: prachub technical screen 2026-07. Treat as unverified."
+ },
+ {
+  "id": "ai-assisted-pr-review",
+  "title": "Review and improve AI-assisted pull requests",
+  "kind": "practical",
+  "prompt": "Review four AI-generated TypeScript PRs: find bugs, risky changes, and improve them.",
+  "levels": [
+   "title only"
+  ],
+  "companies": [
+   {
+    "name": "Anthropic",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/interview-questions/review-and-improve-four-ai-assisted-typescript-pull-requests"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "prachub 2026-08 (labelled HR screen stage). New format signal; unverified."
+ },
+ {
+  "id": "work-queue-dlq",
+  "title": "Work queue with reserve / complete / fail and dead-letter queue",
+  "kind": "concurrency",
+  "prompt": "Reserve a job (lease), complete it, or fail it; retries then dead-letter after max attempts.",
+  "levels": [
+   "title only - levels not captured"
+  ],
+  "companies": [
+   {
+    "name": "OpenAI",
+    "year": "2026",
+    "urls": [
+     "https://darkinterview.com/collections/openai/questions/30361629-e453-4be4-9e68-b62971195301"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "lease timeout re-delivery",
+   "idempotent completion"
+  ],
+  "maps_to": "mt-blocking-queue",
+  "tier": 3,
+  "notes": "darkinterview title only."
+ },
+ {
+  "id": "cached-remote-file",
+  "title": "CachedFile: range reads over remote storage with chunk cache + parallel fetch",
+  "kind": "concurrency",
+  "prompt": "Given StorageClient.getFileSize(uri) and fetch(uri, offset, length, buffer), build CachedFile(uri).read(start, end) that serves repeated/overlapping ranges efficiently and minimizes network calls.",
+  "levels": [
+   "chunk-align ranges into fixed buckets",
+   "cache buckets (memory/disk)",
+   "fetch missing buckets in parallel with a thread pool",
+   "dedupe concurrent fetches of the same bucket"
+  ],
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": "2026",
+    "urls": [
+     "https://leetcode.com/discuss/post/7614788/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "eviction",
+   "failure/retry",
+   "duplicate in-flight fetches"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "FH LC 2026-02 (LLD round). Cousin of Baseten's parallel chunked download."
+ },
+ {
+  "id": "llm-provider-pool",
+  "title": "Resilient LLM provider pool (failover, retries, health)",
+  "kind": "practical",
+  "prompt": "Route requests across several LLM providers with retries, failover and health tracking.",
+  "levels": [
+   "title only"
+  ],
+  "companies": [
+   {
+    "name": "Perplexity",
+    "year": "2025",
+    "urls": [
+     "https://prachub.com/interview-questions/implement-resilient-llm-provider-pool"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "prachub 2025-08."
+ },
+ {
+  "id": "multi-channel-mq",
+  "title": "Multi-channel message queue",
+  "kind": "lld",
+  "prompt": "Queue with multiple channels/topics, publish/consume per channel.",
+  "levels": [
+   "title only"
+  ],
+  "companies": [
+   {
+    "name": "Cerebras",
+    "year": "2025",
+    "urls": [
+     "https://prachub.com/interview-questions/design-a-multi-channel-message-queue"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": "pubsub",
+  "tier": 3,
+  "notes": "prachub 2025-09 senior."
+ },
+ {
+  "id": "keystroke-compression",
+  "title": "Compress editor keystrokes into insert/delete/skip ops",
+  "kind": "practical",
+  "prompt": "Turn a sequence of editor keystrokes into a compact list of insert/delete/skip operations.",
+  "levels": [
+   "title only"
+  ],
+  "companies": [
+   {
+    "name": "Replit",
+    "year": "undated",
+    "urls": [
+     "https://prachub.com/coding-questions/compress-editor-keystrokes-into-insert-delete-skip"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": "text-editor",
+  "tier": 3,
+  "notes": "prachub, undated."
+ },
+ {
+  "id": "exclusive-cpu-time",
+  "title": "Exclusive CPU time from nested start/end logs",
+  "kind": "practical",
+  "prompt": "Given nested function start/end logs, compute exclusive time per function (LeetCode 636 style).",
+  "levels": [
+   "stack of open calls",
+   "subtract child time"
+  ],
+  "companies": [
+   {
+    "name": "Decagon",
+    "year": "2026",
+    "urls": [
+     "https://prachub.com/coding-questions/compute-exclusive-cpu-time-from-nested-logs"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "prachub 2026-01 onsite. Same stack skill as Anthropic's stack-trace task."
+ }
+]

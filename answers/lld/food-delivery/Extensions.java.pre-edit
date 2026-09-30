@@ -1,0 +1,347 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: eta -- how long until it arrives, from the state the order already has
+/**
+ * "Where is my order?" answered as a number of minutes: what the kitchen still owes, plus the ride. It reads
+ * the order's own timestamps and an injected clock, so it is a pure function of state and testable to the minute.
+ */
+final class Eta {
+    private final Clock clock;
+    private final double kmPerHour;
+
+    Eta(Clock clock, double kmPerHour) { this.clock = clock; this.kmPerHour = kmPerHour; }
+
+    /** Minutes from now until this order lands. rider may be null (nobody assigned yet). */
+    long minutesFor(Order o, Restaurant r, DeliveryPartner rider) {
+        long cooked = Math.max(0, (clock.nowMs() - o.placedAtMs()) / 60_000);
+        long kitchen = switch (o.state()) {
+            case PLACED, ACCEPTED, PREPARING -> Math.max(0, r.prepMinutes() - cooked);
+            default -> 0;                                   // READY or later: the food exists
+        };
+        double km = o.state() == OrderState.PICKED_UP && rider != null
+                  ? rider.at().kmTo(o.dropAt())                              // already on the way
+                  : (rider == null ? 0 : rider.at().kmTo(r.at())) + r.at().kmTo(o.dropAt());
+        return kitchen + Math.round(km / kmPerHour * 60);
+    }
+}
+
+// ---- ext: multi-restaurant basket -- one tap, two kitchens, and the honest answer about the payment
+/**
+ * One basket spanning two restaurants fans out into one order per restaurant, because stock, prep and the
+ * rider all belong to a restaurant. There is no distributed transaction here: if the second order fails, the
+ * first is cancelled, which refunds it. That compensation IS the answer -- say it rather than hiding it.
+ */
+final class MultiRestaurantBasket {
+    private final Map<String, Map<String, Integer>> byRestaurant = new LinkedHashMap<>();
+
+    /** Add an item, tagged with the restaurant it came from. */
+    void add(String restaurantId, String itemId, int qty) {
+        byRestaurant.computeIfAbsent(restaurantId, k -> new LinkedHashMap<>()).merge(itemId, qty, Integer::sum);
+    }
+
+    /** Place one order per restaurant. Each key is derived from the tap, so a retry of the tap is still safe. */
+    List<Order> checkout(OrderService svc, String customerId, Geo dropAt, String tapKey, List<String> coupons) {
+        List<Order> placed = new ArrayList<>();
+        try {
+            for (Map.Entry<String, Map<String, Integer>> e : byRestaurant.entrySet()) {
+                svc.openCart(customerId, e.getKey(), dropAt);
+                e.getValue().forEach((item, qty) -> svc.addToCart(customerId, e.getKey(), item, qty));
+                placed.add(svc.placeOrder(tapKey + "#" + e.getKey(), customerId, coupons));
+            }
+            return placed;
+        } catch (RuntimeException fail) {
+            for (Order done : placed) svc.cancel(done.id());      // compensate; each order refunds itself
+            throw fail;
+        }
+    }
+}
+
+// ---- ext: scheduled orders -- a booking released at "serve at" minus the prep time
+/**
+ * A pre-order is not a new state: it is a booking that becomes an ordinary order later. The scheduler releases
+ * it when the kitchen must start, and the id it uses is derived from the booking, so a tick that runs twice --
+ * or on two servers -- places it exactly once.
+ */
+final class Scheduler {
+    /** What the customer booked and when they want to eat. */
+    record Booking(String id, String customerId, String restaurantId, Geo dropAt,
+                   Map<String, Integer> items, long serveAtMs) {}
+
+    private final List<Booking> pending = new ArrayList<>();
+
+    void book(Booking b) { pending.add(b); }
+
+    /** Place every booking whose kitchen must start by now. Safe to call as often as you like. */
+    List<Order> tick(OrderService svc, long nowMs) {
+        List<Order> released = new ArrayList<>();
+        for (Iterator<Booking> it = pending.iterator(); it.hasNext(); ) {
+            Booking b = it.next();
+            Restaurant r = svc.restaurant(b.restaurantId());
+            long startBy = b.serveAtMs() - r.prepMinutes() * 60_000L;
+            if (nowMs < startBy) continue;
+            svc.openCart(b.customerId(), b.restaurantId(), b.dropAt());
+            b.items().forEach((item, qty) -> svc.addToCart(b.customerId(), b.restaurantId(), item, qty));
+            released.add(svc.placeOrder("booking:" + b.id(), b.customerId(), List.of()));
+            it.remove();
+        }
+        return released;
+    }
+}
+
+// ---- ext: pooling -- one rider, two drops: the boolean flip becomes a permit
+/**
+ * Batching changes exactly one thing: a rider's free/busy flag was a single boolean, so a compare-and-set
+ * fitted; with capacity it becomes a counter, so the same "one indivisible claim" is a Semaphore permit.
+ * Everything else -- the ranking, the queue, the terminal release -- is untouched.
+ */
+final class PooledPartner {
+    private final String id;
+    private final Semaphore seats;
+    private final Set<String> carrying = ConcurrentHashMap.newKeySet();
+
+    PooledPartner(String id, int capacity) { this.id = id; this.seats = new Semaphore(capacity); }
+
+    String id() { return id; }
+    /** Take one seat for this order, or fail. The atomic step, same role as DeliveryPartner.claim(). */
+    boolean claim(String orderId) {
+        if (!seats.tryAcquire()) return false;
+        carrying.add(orderId);
+        return true;
+    }
+    /** Give the seat back when that drop is done. */
+    void release(String orderId) {
+        if (carrying.remove(orderId)) seats.release();
+    }
+    /** Seats still free. A ranking rule prefers a rider already going your way with a seat left. */
+    int freeSeats() { return seats.availablePermits(); }
+    /** The orders on this trip. */
+    Set<String> carrying() { return Set.copyOf(carrying); }
+}
+
+// ---- ext: the rider says no -- an offer with a deadline, and a ranking that remembers
+/**
+ * Push assignment lies a little: a reserved rider can still refuse or go silent. An offer holds him, asks, and
+ * hands him straight back on a no or a timeout, then the search continues with the next candidate. The refusal
+ * is recorded, and the ranking rule below pushes a flaky rider down the list instead of banning him.
+ */
+final class OfferDesk {
+    /** How a rider answers an offer. In production this is a push notification and a reply with a deadline. */
+    interface Rider { boolean accepts(String orderId, long deadlineMs); }
+
+    private final Map<String, Integer> misses = new ConcurrentHashMap<>();
+
+    /** True if he took it. On a no, he is released before this returns, so the pool never leaks a rider. */
+    boolean offer(DeliveryPartner p, Order o, Rider rider, long deadlineMs) {
+        if (!p.claim(o.id())) return false;                     // somebody else got him first
+        boolean yes;
+        try { yes = rider.accepts(o.id(), deadlineMs); }
+        catch (RuntimeException e) { yes = false; }             // silence counts as a refusal
+        if (yes) return true;
+        p.release();
+        misses.merge(p.id(), 1, Integer::sum);
+        return false;
+    }
+
+    /** How many offers this rider has turned down. */
+    int missesOf(String partnerId) { return misses.getOrDefault(partnerId, 0); }
+
+    /** Nearest first, but each refusal costs a rider half a kilometre of rank. A new class; nothing else moves. */
+    AssignmentRule ranking(double penaltyKmPerMiss) {
+        return (free, pickup) -> {
+            List<DeliveryPartner> sorted = new ArrayList<>(free);
+            sorted.sort(Comparator.comparingDouble(
+                p -> p.at().kmTo(pickup) + penaltyKmPerMiss * missesOf(p.id())));
+            List<String> ids = new ArrayList<>();
+            for (DeliveryPartner p : sorted) ids.add(p.id());
+            return ids;
+        };
+    }
+}
+
+// ---- ext: a new pricing rule -- membership, which waives the fee and the surge
+/**
+ * The whole point of the pricing chain: a new commercial rule is a new class and one line in the list. It must
+ * sit after the fee rules, because it discounts what they added.
+ */
+final class MembershipWaiver implements PricingRule {
+    private final Set<String> members;
+    MembershipWaiver(Set<String> members) { this.members = members; }
+    public Bill apply(Bill running, PriceCtx ctx) {
+        if (!members.contains(ctx.customerId())) return running;
+        return running.addDiscount(running.delivery() + running.surge());
+    }
+}
+
+// ---- ext: live tracking -- high-frequency GPS, deliberately off the state path
+/**
+ * The rider's position arrives a few times a second; an order changes state six times in an hour. Putting the
+ * first through the state observers would drown them, so location gets its own topic per order. Nothing here
+ * touches an order lock, which is why a slow map client cannot stall a transition.
+ */
+final class LocationStream {
+    private final Map<String, List<Consumer<Geo>>> byOrder = new ConcurrentHashMap<>();
+
+    /** The customer's map subscribes to one order. */
+    void subscribe(String orderId, Consumer<Geo> sink) {
+        byOrder.computeIfAbsent(orderId, k -> new CopyOnWriteArrayList<>()).add(sink);
+    }
+    /** The rider app pushes a fix. A broken subscriber is skipped, exactly as on the state path. */
+    void push(String orderId, Geo where) {
+        for (Consumer<Geo> sink : byOrder.getOrDefault(orderId, List.of())) {
+            try { sink.accept(where); } catch (RuntimeException ignored) { }
+        }
+    }
+    /** Drop the topic once the order is terminal, so a finished order costs no memory. */
+    void close(String orderId) { byOrder.remove(orderId); }
+}
+
+// ---- ext: persistence -- the repository, the conditional UPDATE, and the outbox
+/**
+ * Beyond one process the order's lock cannot help, so the guarded transition becomes a conditional UPDATE and
+ * the database performs the same atomic step:
+ *
+ *   INSERT INTO orders (id, key, state, total) VALUES (?, ?, 'PLACED', ?) ON CONFLICT (key) DO NOTHING;
+ *   UPDATE orders SET state = ? WHERE id = ? AND state = ?;    -- 0 rows = somebody else moved it first
+ *   INSERT INTO outbox (order_id, event) VALUES (?, ?);        -- same transaction as the UPDATE
+ *
+ * The outbox is why the notification is exactly-once-ish: the event is committed with the state change, and a
+ * separate sender drains it, so a crash between the two is impossible.
+ */
+interface OrderRepository {
+    /** Insert unless this idempotency key is already there. False means the retry found the first order. */
+    boolean insertIfAbsent(String orderId, String idempotencyKey, OrderState state);
+    /** The conditional UPDATE. False means the row was not in `expected` any more: somebody else won. */
+    boolean compareAndSetState(String orderId, OrderState expected, OrderState next);
+    /** Append an event in the same transaction as the state change. */
+    void appendOutbox(String orderId, String event);
+    /** Take everything the sender has not sent yet. */
+    List<String> drainOutbox();
+}
+
+/** A map-backed stand-in, so the seam can be demonstrated without a database. */
+final class InMemoryOrderRepository implements OrderRepository {
+    private final Map<String, OrderState> states = new ConcurrentHashMap<>();
+    private final Map<String, String> byKey = new ConcurrentHashMap<>();
+    private final Queue<String> outbox = new ConcurrentLinkedQueue<>();
+
+    public boolean insertIfAbsent(String orderId, String key, OrderState state) {
+        if (byKey.putIfAbsent(key, orderId) != null) return false;
+        states.put(orderId, state);
+        return true;
+    }
+    public boolean compareAndSetState(String orderId, OrderState expected, OrderState next) {
+        return states.replace(orderId, expected, next);
+    }
+    public void appendOutbox(String orderId, String event) { outbox.add(orderId + ":" + event); }
+    public List<String> drainOutbox() {
+        List<String> out = new ArrayList<>();
+        for (String e = outbox.poll(); e != null; e = outbox.poll()) out.add(e);
+        return out;
+    }
+    /** The stored state, for the demo. */
+    OrderState stateOf(String orderId) { return states.get(orderId); }
+}
+
+/** Runs every extension once, so the follow-up code on page 05 is code that has actually executed. */
+class ExtDemo {
+    public static void main(String[] args) {
+        long[] now = { 1_700_000_000_000L };
+        Clock clock = () -> now[0];
+        FakeGateway gateway = new FakeGateway();
+        OrderService svc = new OrderService();
+        svc.setClock(clock);
+        svc.configure(List.of(new ItemTotal(),
+                              new DistanceFee(Money.rupees("20.00"), Money.rupees("8.00")),
+                              new SurgeFee(15_000),
+                              new MembershipWaiver(Set.of("anita"))),
+                      new NearestFree(), new StandardCancellation(Money.rupees("50.00")), gateway);
+        svc.setDemand((r, t) -> true);
+
+        Restaurant truffles = new Restaurant("r-kora", "Truffles", new Geo(12.9352, 77.6245), 18);
+        truffles.put(new MenuItem("paneer", "Paneer Tikka", Money.rupees("249.00")), 50);
+        Restaurant sweets = new Restaurant("r-sweet", "Adyar Ananda", new Geo(12.9360, 77.6250), 6);
+        sweets.put(new MenuItem("jamun", "Gulab Jamun", Money.rupees("90.00")), 50);
+        svc.register(truffles);
+        svc.register(sweets);
+        DeliveryPartner rider = new DeliveryPartner("p-1", new Geo(12.9355, 77.6250));
+        svc.register(rider);
+        Geo home = new Geo(12.9352, 77.6495);
+
+        // a member pays no delivery fee and no surge: a new rule, one line in the list
+        svc.openCart("anita", "r-kora", home);
+        svc.addToCart("anita", "r-kora", "paneer", 1);
+        Order member = svc.placeOrder("m-1", "anita", List.of());
+        System.out.println("membership: " + member.bill());
+
+        // eta, from the order's own state
+        Eta eta = new Eta(clock, 22);
+        System.out.println("eta just after placing: " + eta.minutesFor(member, truffles, null) + " min");
+        now[0] += 10 * 60_000;
+        svc.accept(member.id());
+        svc.startPreparing(member.id());
+        System.out.println("eta ten minutes later:  " + eta.minutesFor(member, truffles, null) + " min");
+
+        // live tracking: its own topic, off the state path
+        LocationStream gps = new LocationStream();
+        gps.subscribe(member.id(), where -> System.out.println("   [map] rider at " + where.lat() + "," + where.lng()));
+        svc.markReady(member.id());
+        gps.push(member.id(), rider.at());
+        gps.close(member.id());
+
+        // the rider says no, twice, and drops down the ranking
+        OfferDesk desk = new OfferDesk();
+        svc.pickUp(member.id());
+        svc.deliver(member.id());                                       // rider back in the pool
+        Order next = place(svc, "anita", "r-kora", home, "m-2");
+        boolean took = desk.offer(rider, next, (id, deadline) -> false, now[0] + 15_000);
+        System.out.println("rider refused: took=" + took + " misses=" + desk.missesOf("p-1")
+            + " still available=" + rider.isAvailable());
+
+        // one tap, two restaurants
+        MultiRestaurantBasket basket = new MultiRestaurantBasket();
+        basket.add("r-kora", "paneer", 1);
+        basket.add("r-sweet", "jamun", 2);
+        List<Order> both = basket.checkout(svc, "bala", home, "tap-9", List.of());
+        System.out.println("multi-restaurant: " + both.size() + " orders, totals "
+            + Money.fmt(both.get(0).bill().total()) + " + " + Money.fmt(both.get(1).bill().total()));
+
+        // a pre-order, released when the kitchen must start, and a tick that runs twice
+        Scheduler sched = new Scheduler();
+        long dinner = now[0] + 3 * 3600_000L;
+        sched.book(new Scheduler.Booking("b-1", "carol", "r-kora", home, Map.of("paneer", 2), dinner));
+        System.out.println("scheduled: released now = " + sched.tick(svc, now[0]).size());
+        now[0] = dinner - 18 * 60_000L;
+        List<Order> released = sched.tick(svc, now[0]);
+        List<Order> twice = sched.tick(svc, now[0]);
+        System.out.println("scheduled: released at T-prep = " + released.size() + ", a second tick = " + twice.size());
+
+        // pooling: one rider, two drops
+        PooledPartner pooled = new PooledPartner("pp-1", 2);
+        System.out.println("pooling: claims " + pooled.claim("o-a") + " " + pooled.claim("o-b")
+            + " " + pooled.claim("o-c") + " (third must be false), seats free " + pooled.freeSeats());
+        pooled.release("o-a");
+        System.out.println("pooling: after one drop, seats free " + pooled.freeSeats());
+
+        // persistence: the conditional UPDATE and the outbox
+        OrderRepository repo = new InMemoryOrderRepository();
+        System.out.println("repo insert " + repo.insertIfAbsent("o-1", "k-1", OrderState.PLACED)
+            + ", the same key again " + repo.insertIfAbsent("o-2", "k-1", OrderState.PLACED));
+        boolean first = repo.compareAndSetState("o-1", OrderState.PLACED, OrderState.ACCEPTED);
+        boolean second = repo.compareAndSetState("o-1", OrderState.PLACED, OrderState.CANCELLED);
+        repo.appendOutbox("o-1", "ACCEPTED");
+        System.out.println("two servers move the same order: " + first + " / " + second
+            + ", outbox " + repo.drainOutbox());
+    }
+
+    /** Helper: open a cart, add one paneer, place it. */
+    private static Order place(OrderService svc, String who, String restaurantId, Geo drop, String key) {
+        svc.openCart(who, restaurantId, drop);
+        svc.addToCart(who, restaurantId, "paneer", 1);
+        return svc.placeOrder(key, who, List.of());
+    }
+}

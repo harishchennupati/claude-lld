@@ -1,0 +1,204 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+/**
+ * Targeted failure tests: each one proves a claim the design makes on page 02, move 9. Run with
+ * javac Main.java Extensions.java FailureTests.java && java FailureTests -- it prints ALL PASS or exits non-zero.
+ */
+public class FailureTests {
+    static int failures = 0;
+    /** One assertion, printed either way, counted when it fails. */
+    static void check(boolean ok, String what) {
+        System.out.println((ok ? "PASS " : "FAIL ") + what);
+        if (!ok) failures++;
+    }
+    /** A bank whose clock is the array the caller can move, so "six months later" costs no time at all. */
+    static Bank bankAt(long[] now, Map<AccountKind, InterestRule> rules) {
+        Bank b = new Bank();
+        b.configure(rules, () -> now[0]);
+        b.addCustomer(new Customer("c1", "Asha"));
+        b.addCustomer(new Customer("c2", "Bharat"));
+        return b;
+    }
+
+    public static void main(String[] args) throws Exception {
+        long day = 24L * 3600 * 1000;
+        long[] now = { 1_700_000_000_000L };
+
+        // 1. an overdraft is a CURRENT-account thing. Savings stops at its floor; current sinks to its ceiling
+        //    and refuses the step past it. Same code path, different rule objects.
+        Bank bank = bankAt(now, Map.of(AccountKind.SAVINGS, new SimpleInterest(400)));
+        SavingsAccount savings = bank.openSavings("SB-1", "c1", Money.inr("10000.00"), Money.inr("1000.00"));
+        CurrentAccount current = bank.openCurrent("CA-1", "c2", Money.inr("10000.00"), Money.inr("50000.00"));
+        try {
+            savings.withdraw(Money.inr("9500.00"), "would break the floor");
+            check(false, "a savings withdrawal through the minimum balance must be refused");
+        } catch (RuleViolation e) { check(true, "savings refused: " + e.getMessage()); }
+        current.withdraw(Money.inr("55000.00"), "supplier");
+        check(current.balance().equals(Money.inr("-45000.00")), "a current account may run to " + current.balance());
+        try {
+            current.withdraw(Money.inr("6000.00"), "past the ceiling");
+            check(false, "a current withdrawal past the overdraft ceiling must be refused");
+        } catch (RuleViolation e) { check(true, "current refused at the ceiling: " + e.getMessage()); }
+        check(current.balance().equals(Money.inr("-45000.00")), "and the refused step left the balance alone");
+
+        // 2. a refused withdrawal writes NOTHING: not a row, not a paise, not an alert.
+        Money before = savings.balance();
+        int rowsBefore = savings.rowCount();
+        try { savings.withdraw(Money.inr("100000.00"), "far too much"); } catch (RuleViolation ignored) {}
+        check(before.equals(savings.balance()) && rowsBefore == savings.rowCount(),
+              "the refused withdrawal changed neither the balance nor the ledger");
+
+        // 3. interest for a period, on the injected clock, and only for the kind that earns it.
+        //    INR 100000.00 at 4.00% for 365 days is exactly INR 4000.00, in integer paise.
+        long[] t3 = { 1_700_000_000_000L };
+        Bank b3 = bankAt(t3, Map.of(AccountKind.SAVINGS, new SimpleInterest(400)));
+        SavingsAccount s3 = b3.openSavings("SB-3", "c1", Money.inr("100000.00"), Money.inr("0.00"));
+        CurrentAccount c3 = b3.openCurrent("CA-3", "c2", Money.inr("100000.00"), Money.inr("0.00"));
+        t3[0] += 365 * day;
+        List<Txn> posted = b3.accrueInterest(365);
+        check(posted.size() == 1 && posted.get(0).accountId().equals("SB-3"),
+              "one interest row, on the savings account only");
+        check(s3.balance().equals(Money.inr("104000.00")), "365 days at 4.00% on INR 100000 is " + s3.balance());
+        check(c3.balance().equals(Money.inr("100000.00")), "the current account earned nothing");
+        check(new SimpleInterest(400).interest(Money.inr("100000.00"), 30).equals(Money.inr("328.76")),
+              "thirty days is INR 328.76, rounded down to the paise");
+        check(new PromoInterest(new SimpleInterest(400), 50).interest(Money.inr("100000.00"), 365)
+                  .equals(Money.inr("4500.00")),
+              "the festival wrapper adds 0.50% without touching the rule it wraps");
+
+        // 4. sixty-four threads firing transfers in BOTH directions between four accounts: no deadlock, and the
+        //    bank's total assets are exactly what they were. A lost update would show up as a changed total.
+        long[] t4 = { 1_700_000_000_000L };
+        Bank b4 = bankAt(t4, Map.of());
+        for (int i = 0; i < 4; i++) b4.openCurrent("A" + i, "c1", Money.inr("10000.00"), Money.inr("100000.00"));
+        Money assetsBefore = b4.totalAssets(Money.INR);
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fired = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            final int n = i;
+            fired.add(pool.submit(() -> {
+                go.await();
+                String a = "A" + (n % 4), b = "A" + ((n + 1) % 4);
+                return b4.transfer("X" + n, n % 2 == 0 ? a : b, n % 2 == 0 ? b : a, Money.inr("100.00"), "r" + n);
+            }));
+        }
+        go.countDown();
+        int completed = 0;
+        for (Future<?> f : fired) { f.get(20, TimeUnit.SECONDS); completed++; }   // a deadlock would time out here
+        pool.shutdown();
+        check(completed == 64, "all 64 opposing transfers finished: the lock order made a cycle impossible");
+        check(assetsBefore.equals(b4.totalAssets(Money.INR)),
+              "total assets are unchanged: " + assetsBefore + " -> " + b4.totalAssets(Money.INR));
+        int rows = 0;
+        for (Account a : b4.accounts()) rows += a.rowCount();
+        check(rows == 4 + 128, "every transfer wrote exactly two rows, and none wrote three");
+
+        // 5. an account nobody touches goes DORMANT, and one customer posting wakes it. Interest does not.
+        long[] t5 = { 1_700_000_000_000L };
+        Bank b5 = bankAt(t5, Map.of(AccountKind.SAVINGS, new SimpleInterest(400)));
+        b5.dormantAfterDays(180);
+        SavingsAccount idle = b5.openSavings("SB-5", "c1", Money.inr("5000.00"), Money.inr("0.00"));
+        t5[0] += 100 * day;
+        check(b5.markDormant() == 0 && idle.status() == AccountStatus.ACTIVE, "100 days idle is still ACTIVE");
+        t5[0] += 100 * day;
+        check(b5.markDormant() == 1 && idle.status() == AccountStatus.DORMANT, "200 days idle is DORMANT");
+        b5.accrueInterest(200);
+        check(idle.status() == AccountStatus.DORMANT, "the bank's own interest row did not wake it");
+        idle.deposit(Money.inr("100.00"), "salary");
+        check(idle.status() == AccountStatus.ACTIVE, "one customer posting woke it");
+
+        // 6. closing is refused while money is inside, allowed at exactly zero, and CLOSED refuses everything.
+        SavingsAccount leaving = bank.openSavings("SB-6", "c1", Money.inr("500.00"), Money.inr("0.00"));
+        try {
+            bank.close("SB-6");
+            check(false, "closing an account that still holds money must be refused");
+        } catch (RuleViolation e) { check(true, "close refused: " + e.getMessage()); }
+        leaving.withdraw(leaving.balance(), "empty it");
+        bank.close("SB-6");
+        check(leaving.status() == AccountStatus.CLOSED && leaving.balance().paise() == 0, "closed at exactly zero");
+        try {
+            leaving.deposit(Money.inr("100.00"), "after closing");
+            check(false, "a CLOSED account must refuse a deposit");
+        } catch (AccountNotActive e) { check(true, "a closed account refuses postings: " + e.getMessage()); }
+
+        // 7. the same transfer id twice is ONE movement of money; and a transfer that failed claims no id,
+        //    so the caller may retry that same id once the reason is fixed.
+        long[] t7 = { 1_700_000_000_000L };
+        Bank b7 = bankAt(t7, Map.of());
+        CurrentAccount from = b7.openCurrent("CA-7", "c1", Money.inr("1000.00"), Money.inr("0.00"));
+        CurrentAccount to = b7.openCurrent("CA-8", "c2", Money.inr("0.00"), Money.inr("0.00"));
+        TransferReceipt first = b7.transfer("T-7", "CA-7", "CA-8", Money.inr("400.00"), "rent");
+        TransferReceipt retry = b7.transfer("T-7", "CA-7", "CA-8", Money.inr("400.00"), "rent");
+        check(first.equals(retry), "a retried transfer id returns the same receipt");
+        check(from.balance().equals(Money.inr("600.00")) && to.balance().equals(Money.inr("400.00")),
+              "and the money moved exactly once: " + from.balance() + " / " + to.balance());
+        check(from.rowCount() == 2 && to.rowCount() == 2, "two rows each, not four");
+        try {
+            b7.transfer("T-8", "CA-7", "CA-8", Money.inr("5000.00"), "more than there is");
+            check(false, "a transfer with nothing behind it must be refused");
+        } catch (RuleViolation e) { check(true, "transfer refused: " + e.getMessage()); }
+        check(b7.receipt("T-8") == null && from.balance().equals(Money.inr("600.00")),
+              "the failed transfer claimed no id and debited nothing, so T-8 can be retried");
+        from.deposit(Money.inr("10000.00"), "top up");
+        b7.transfer("T-8", "CA-7", "CA-8", Money.inr("5000.00"), "retried after the top-up");
+        check(to.balance().equals(Money.inr("5400.00")), "and the retry of T-8 went through: " + to.balance());
+
+        // 8. a listener that throws must not break a posting: they run after the lock, each in a try/catch.
+        long[] t8 = { 1_700_000_000_000L };
+        Bank b8 = bankAt(t8, Map.of());
+        AuditLog audit = new AuditLog();
+        b8.addListener((account, txn) -> { throw new RuntimeException("the SMS gateway is down"); });
+        b8.addListener(audit);
+        SavingsAccount s8 = b8.openSavings("SB-8", "c1", Money.inr("1000.00"), Money.inr("0.00"));
+        s8.deposit(Money.inr("500.00"), "cash");
+        check(s8.balance().equals(Money.inr("1500.00")), "the deposit landed despite a listener that throws");
+        check(audit.size() == 1, "and the listener after the broken one still ran");
+
+        // a frozen destination is discovered BEFORE the source is debited
+        long[] t9 = { 1_700_000_000_000L };
+        Bank b9 = bankAt(t9, Map.of());
+        CurrentAccount payer = b9.openCurrent("CA-91", "c1", Money.inr("1000.00"), Money.inr("0.00"));
+        CurrentAccount frozen = b9.openCurrent("CA-92", "c2", Money.inr("0.00"), Money.inr("0.00"));
+        frozen.freeze();
+        try {
+            b9.transfer("T-9", "CA-91", "CA-92", Money.inr("100.00"), "into a frozen account");
+            check(false, "a transfer into a FROZEN account must be refused");
+        } catch (AccountNotActive e) { check(true, "frozen destination refused: " + e.getMessage()); }
+        check(payer.balance().equals(Money.inr("1000.00")) && payer.rowCount() == 1,
+              "the source was never debited, because the destination was asked first");
+
+        // rules compose, and any implementation drops in: a one-line lambda veto beside the built-in floor
+        SavingsAccount picky = b9.openSavings("SB-93", "c1", Money.inr("10000.00"), Money.inr("1000.00"));
+        picky.addRule((account, amount, nowMs) -> {
+            if (Money.inr("2000.00").lessThan(amount)) throw new RuleViolation("this branch caps cash at INR 2000.00");
+        });
+        picky.withdraw(Money.inr("2000.00"), "at the cap");
+        try {
+            picky.withdraw(Money.inr("2500.00"), "over the cap");
+            check(false, "the handed-in rule must be able to refuse");
+        } catch (RuleViolation e) { check(true, "a lambda rule composed with the floor: " + e.getMessage()); }
+
+        // money refuses to add two currencies, so a mixed amount can never reach a balance
+        try {
+            Money.inr("100.00").plus(Money.of(100, "USD"));
+            check(false, "INR plus USD must throw");
+        } catch (CurrencyMismatch e) { check(true, "money refused the mixed arithmetic: " + e.getMessage()); }
+
+        // the statement window is exact: the rows inside it, and the balances either side of it
+        long[] ta = { 1_700_000_000_000L };
+        Bank ba = bankAt(ta, Map.of());
+        SavingsAccount sa = ba.openSavings("SB-A", "c1", Money.inr("1000.00"), Money.inr("0.00"));
+        ta[0] += day;   sa.deposit(Money.inr("500.00"), "day 1");
+        ta[0] += day;   sa.deposit(Money.inr("700.00"), "day 2");
+        ta[0] += day;   sa.withdraw(Money.inr("200.00"), "day 3");
+        Statement st = sa.statement(1_700_000_000_000L + day, 1_700_000_000_000L + 2 * day);
+        check(st.rows().size() == 2 && st.opening().equals(Money.inr("1000.00"))
+              && st.closing().equals(Money.inr("2200.00")),
+              "the statement window holds exactly its own rows: " + st.opening() + " -> " + st.closing());
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

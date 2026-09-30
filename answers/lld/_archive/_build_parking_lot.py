@@ -1,0 +1,370 @@
+import re,pathlib,html
+H=pathlib.Path("/Users/harishchennupati/answers"); R=H/"hld/_ref"
+src=(H/"lld/parking-lot/Main.java").read_text()
+def sect(start,end=None):
+    i=src.index(start); j=src.index(end,i) if end else len(src)
+    return src[i:j].rstrip()+"\n"
+def esc(s): return html.escape(s)
+C={}
+C['vehicle']=sect("enum VehicleType","enum SpotType")
+C['spot']=sect("enum SpotType","// hand out the SMALLEST")
+C['fit']=sect("// hand out the SMALLEST","enum TicketStatus")
+C['ticket']=sect("enum TicketStatus","// \"they'll want to change pricing\"")
+C['pricing']=sect("// \"they'll want to change pricing\"","// \"smallest fit today")
+C['assign']=sect("// \"smallest fit today","// \"a board should update")
+C['floor']=sect("// \"a board should update","interface PaymentProcessor")
+lot_full=sect("interface PaymentProcessor","// new rule live")
+core_end=lot_full.index("    // availability")
+C['lot']=lot_full[:core_end].rstrip()+"\n}\n"
+C['ext_avail']=lot_full[core_end:lot_full.index("    // lost ticket")].rstrip()+"\n"
+C['ext_lost']=lot_full[lot_full.index("    // lost ticket"):].rstrip()+"\n"
+C['ext_lost']=C['ext_lost'][:C['ext_lost'].rindex("}")].rstrip()+"\n"   # drop class-closing brace
+C['weekend']=sect("// new rule live","// entry / exit gates")
+C['gates']=sect("// entry / exit gates","public class Main")
+C['main']=sect("public class Main")
+def code(key,hl=()):
+    raw=C[key].rstrip("\n").split("\n")
+    hlset={i for i,l in enumerate(raw,1) if any(h in l for h in hl)}
+    lines=esc(C[key]).rstrip("\n").split("\n")
+    out=[]
+    for i,l in enumerate(lines,1):
+        out.append(f'<span class="hl">{l}</span>' if i in hlset else l)
+    return '<div class="wide"><pre><code class="java">'+"\n".join(out)+'</code></pre></div>'
+
+body=f'''<!doctype html>
+<html lang="en" data-theme="midnight">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parking Lot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Playfair+Display:ital,wght@0,700;1,400&display=swap">
+<style>
+/*__BASECSS__*/
+details.gate {{ border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--surface); padding: 0.9rem 1.2rem; margin: 1.25rem 0; }}
+details.gate > summary {{ cursor: pointer; font-weight: 600; list-style: none; color: var(--accent); }}
+details.gate > summary::-webkit-details-marker {{ display: none; }}
+details.gate > summary::before {{ content: "+ "; font-family: var(--mono); }}
+details.gate[open] > summary::before {{ content: "- "; }}
+details.gate > summary::after {{ content: " (do not open until the timer ends)"; color: var(--muted); font-weight: 400; font-size: 0.85em; }}
+details.gate.free > summary::after {{ content: ""; }}
+.stage {{ display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }}
+.timer {{ font-family: var(--mono); font-size: 0.85rem; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0.25rem 0.9rem; cursor: pointer; }}
+.timer.running {{ background: var(--accent); color: var(--bg); }}
+.timer.done {{ border-color: var(--err); color: var(--err); background: transparent; }}
+.think {{ margin: 1rem 0 0.5rem; padding: 0.7rem 1rem; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 0.97rem; border-radius: 0 6px 6px 0; }}
+.think b {{ color: var(--accent); }}
+pre {{ overflow-x: auto; }}
+.check {{ list-style: none; padding: 0; margin: 0.5rem 0; display: grid; gap: 0.4rem; }}
+.check li::before {{ content: "[ ] "; font-family: var(--mono); color: var(--muted); }}
+.matrix.wrap td {{ white-space: normal; }}
+</style>
+</head>
+<body>
+<article class="doc">
+
+<header class="doc-header">
+  <h1>Parking Lot</h1>
+  <p class="dek">A machine-coding round, run the way the round runs: clarify, design on paper, code for an hour, then compare against a reference that stays hidden until you have typed.</p>
+</header>
+
+<section id="summary">
+  <div class="summary">
+    <p>This page is not for reading. It is a two-hour session with five timed stages. Every stage shows you only what the interviewer would show you; the answers sit behind a closed fold that you open after the timer, never before. The reference code has been compiled and run, including a two-thread race for the last spot, so what you compare against is proven, not plausible. At the end you score yourself against the tells an interviewer actually listens for and write down the three things the reference did that you did not. Those three lines are the output of the session -- not a feeling of having understood.</p>
+  </div>
+</section>
+
+<section id="context">
+  <h2>How the two hours go</h2>
+  <p class="dropcap">Stage 1, five minutes: clarify. Stage 2, ten minutes: design on paper. Stage 3, sixty minutes: code in Java, from scratch, and run a main. Stage 4, three extensions at ten minutes each. Stage 5, fifteen minutes: diff against the reference and score. Rules: the fold stays closed until the timer ends; the code must compile with <code>javac Main.java</code> and run with <code>java Main</code>; nothing is looked up except Java syntax. Missing things is the point -- the miss log at the end is what you bring back.</p>
+  <div class="stats">
+    <div class="stat"><div class="num" data-to="5">0</div><div class="unit">stages, each with a timer and a closed fold</div></div>
+    <div class="stat"><div class="num" data-to="60" data-suffix=" min">0</div><div class="unit">of typing from a blank file -- the part that is graded</div></div>
+    <div class="stat"><div class="num" data-to="3">0</div><div class="unit">extensions, in code, ten minutes each</div></div>
+    <div class="stat"><div class="num" data-to="1">0</div><div class="unit">race test the reference must pass: two gates, one spot, one winner</div></div>
+  </div>
+</section>
+
+<section id="body">
+
+<h2>Stage 1 -- Clarify</h2>
+<div class="stage"><h3 data-n="01">The interviewer says one paragraph, and the five minutes after it are graded</h3></div>
+<div class="callout insight"><h4>The prompt</h4><p>"Design a parking lot. It has multiple floors and different sizes of vehicle. Cars come in through entry gates and leave through exit gates; they get a ticket on the way in and pay on the way out. I want working code, not a diagram. Go."</p></div>
+<p class="stage"><button class="timer" data-min="5">start 5:00</button> <span>Write your clarifying questions on paper. Five to eight. Then open the fold.</span></p>
+<details class="gate"><summary>Answer key -- the questions that matter, and the answers</summary>
+<table class="matrix wrap">
+  <thead><tr><th>Ask</th><th>Answer, and what it decides</th></tr></thead>
+  <tbody>
+    <tr><th>Floors and spot sizes?</th><td>Yes: small, compact, large. Decides an enum and a per-size structure.</td></tr>
+    <tr><th>Can a big spot hold a small vehicle?</th><td>Yes -- but hand out the smallest that fits, so trucks still find large spots. Decides the fit-order table.</td></tr>
+    <tr><th>Pricing?</th><td>Flat hourly by size, rounded up; expect them to change it mid-round. Decides an interface, not a number.</td></tr>
+    <tr><th>Payment?</th><td>At exit, cash or card. Another swappable thing.</td></tr>
+    <tr><th>Many gates at once?</th><td>Yes. Decides that find-and-occupy is a critical section and where the lock lives.</td></tr>
+    <tr><th>Availability queries?</th><td>Yes: "is it full for a truck", free counts. Decides that counts are kept, not scanned.</td></tr>
+    <tr><th>Persistence, distribution?</th><td>No. In-memory, one lot. Say it out loud so nobody expects a database.</td></tr>
+    <tr><th>Out of scope?</th><td>Lost ticket, passes, EV, reservations, plate recognition -- name them, park them.</td></tr>
+  </tbody>
+</table>
+<p>Questions that waste the five minutes: what language, how many floors exactly, what currency, whether to draw a diagram. Three sentences you should have said before touching a keyboard: in-memory; one vehicle takes one spot; billing rounds up to the hour.</p>
+</details>
+
+<h2>Stage 2 -- Design on paper</h2>
+<div class="stage"><h3 data-n="02">Ten minutes of paper decides whether the next sixty are typing or thrashing</h3></div>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>On paper, in this order. Do not skip a line.</span></p>
+<ol class="steps">
+  <li>Nouns in the prompt: these are your entities. Circle the ones that have state.</li>
+  <li>Verbs: these are your use cases. Each one becomes a method on exactly one service.</li>
+  <li>For each service, what it owns -- written as <code>Map&lt;id, thing&gt;</code>, never as a list you will scan.</li>
+  <li>The one invariant that breaks under concurrency. Name the critical section and where the lock lives.</li>
+  <li>Which of the six patterns have earned a place, and the pain each one answers. If you cannot name the pain, it has not earned it.</li>
+</ol>
+<details class="gate"><summary>The intended shape -- compare against your paper</summary>
+<figure class="wide">
+<svg viewBox="0 0 960 360" role="img" aria-label="The class shape: gates call the lot, the lot owns floors and injected strategies, floors own spots, tickets reference spots and vehicles">
+  <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+  <g class="pop" style="--i:0" transform="translate(40 40)"><rect width="150" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="75" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">EntryGate</text></g>
+  <g class="pop" style="--i:0" transform="translate(40 120)"><rect width="150" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="75" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">ExitGate</text></g>
+  <path class="draw" style="--i:1" d="M190 64H240V96H280" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <path class="draw" style="--i:1" d="M190 144H240V112H280" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <g class="pop" style="--i:2" transform="translate(280 72)"><rect width="170" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingLot</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">lock, active tickets</text></g>
+  <path class="draw" style="--i:3" d="M450 104H520" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="485" y="92" text-anchor="middle" font-size="12" fill="var(--muted)">owns</text>
+  <g class="pop" style="--i:4" transform="translate(520 72)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingFloor</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">size to free spots</text></g>
+  <path class="draw" style="--i:5" d="M690 104H760" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="725" y="92" text-anchor="middle" font-size="12" fill="var(--muted)">owns</text>
+  <g class="pop" style="--i:6" transform="translate(760 72)"><rect width="160" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="80" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">ParkingSpot</text><text x="80" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">size, vehicle or null</text></g>
+  <g class="pop" style="--i:7" transform="translate(280 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">3 strategies</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">pricing, assign, pay</text></g>
+  <path class="draw" style="--i:8" d="M365 220V136" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="400" y="182" text-anchor="start" font-size="12" fill="var(--muted)">injected</text>
+  <g class="pop" style="--i:7" transform="translate(520 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">Ticket</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">spot, floor, vehicle, times</text></g>
+  <path class="draw" style="--i:8" d="M690 252H840V136" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="770" y="240" text-anchor="middle" font-size="12" fill="var(--muted)">references</text>
+  <g class="pop" style="--i:7" transform="translate(760 300)"><rect width="160" height="48" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5"/><text x="80" y="24" text-anchor="middle" dominant-baseline="middle" font-size="15">Vehicle, 3 kinds</text></g>
+  <path class="draw" style="--i:8" d="M605 284V324H760" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+  <text x="660" y="312" text-anchor="middle" font-size="12" fill="var(--muted)">references</text>
+  <g class="pop" style="--i:7" transform="translate(40 220)"><rect width="170" height="64" rx="10" fill="var(--surface)" stroke="var(--line)" stroke-width="1.5" stroke-dasharray="5 5"/><text x="85" y="24" text-anchor="middle" dominant-baseline="middle" font-size="16">DisplayBoard</text><text x="85" y="46" text-anchor="middle" dominant-baseline="middle" font-size="12" fill="var(--muted)">observes floors</text></g>
+</svg>
+<figcaption><strong>Owns, references, injected.</strong> Solid arrows are composition; the lot and floors own their parts. The ticket only points at things that outlive it. Dashed boxes are the swappable edges.</figcaption>
+</figure>
+<table class="matrix wrap">
+  <thead><tr><th>Line on your paper</th><th>What it should say</th></tr></thead>
+  <tbody>
+    <tr><th>Entities</th><td>Vehicle (Car, Motorcycle, Truck), ParkingSpot with a SpotType, ParkingFloor, ParkingLot, Ticket with a TicketStatus.</td></tr>
+    <tr><th>Use cases</th><td>park, unpark, availability, isFullFor -- all on ParkingLot. Gates are thin callers.</td></tr>
+    <tr><th>Owned state</th><td>Floor: <code>Map&lt;SpotType, Deque&lt;ParkingSpot&gt;&gt;</code> of free spots. Lot: <code>Map&lt;plate, Ticket&gt;</code> of active tickets, list of floors.</td></tr>
+    <tr><th>The invariant</th><td>Two gates, one last spot. Find, occupy and assign must be one atomic step. The lock lives in the lot, not the gate.</td></tr>
+    <tr><th>Patterns earned</th><td>Strategy three times (pricing, assignment, payment) because each will be asked to change. Observer once (the display board must not be wired into parking logic). One lot instance -- Singleton or injected. Decorator only when surge pricing wraps the base rule.</td></tr>
+  </tbody>
+</table>
+</details>
+
+<h2>Stage 3 -- Code</h2>
+<div class="stage"><h3 data-n="03">Sixty minutes, a blank file, and a main that runs: this is the whole score</h3></div>
+<p class="stage"><button class="timer" data-min="60">start 60:00</button> <span>One file, <code>Main.java</code>. Compile with <code>javac Main.java</code>, run with <code>java Main</code>. When the timer ends, stop typing even mid-line.</span></p>
+<p>What must exist when the timer ends, in the order you should type it:</p>
+<ul class="check">
+  <li>Two enums: vehicle type, spot type. A ticket status enum if you got there.</li>
+  <li>Vehicle and its three kinds. ParkingSpot that is dumb: free, assign, release.</li>
+  <li>The fit table: which spot sizes each vehicle may use, smallest first.</li>
+  <li>Ticket: spot, floor, vehicle, entry time, exit time, status.</li>
+  <li>An interface for pricing and one implementation. An interface for assignment and one implementation.</li>
+  <li>ParkingFloor with a per-size deque of free spots; occupy and vacate in O(1).</li>
+  <li>ParkingLot with park and unpark inside a lock; strategies injected, not constructed inside.</li>
+  <li>A main that parks a car and a truck, fails a third, unparks, and prints a fee.</li>
+</ul>
+<details class="gate"><summary>I have coded it and the timer has ended -- show the reference</summary>
+<p>The reference below is built in the order you would type it. Each step opens with the sentence you would say to yourself; the pattern gets its name only at the moment it earns it. Every line has been compiled and run; the main at the end includes a two-thread race for the last compact spot and asserts exactly one winner.</p>
+
+<h4>1. The Vehicle -- start with what enters</h4>
+<div class="think"><b>Thinking:</b> a car drives in, so start with the thing being parked. A plate and a type; Car, Motorcycle and Truck extend it so one can be special-cased later.</div>
+{code('vehicle')}
+
+<h4>2. The ParkingSpot -- where it goes</h4>
+<div class="think"><b>Thinking:</b> a spot has a size and is either free or holding one vehicle. Keep it dumb: is it free, assign, release. Logic lives above it.</div>
+{code('spot')}
+
+<h4>3. Fit rules -- which spot fits which vehicle</h4>
+<div class="think"><b>Thinking:</b> a big spot can hold a small car, but hand out the smallest one that fits so trucks still find large spots. Per vehicle, the sizes it may use, smallest first.</div>
+{code('fit')}
+
+<h4>4. The Ticket -- issued at entry</h4>
+<div class="think"><b>Thinking:</b> which spot, which floor, which vehicle, when it came in; the exit time is stamped later. Remembering the floor makes unpark O(1). The id comes from an atomic counter -- the original used a bare static int, safe only because park holds a lock; say which you rely on.</div>
+{code('ticket',hl=('AtomicInteger SEQ',))}
+
+<h4>5. Pricing -- the first "make it swappable"</h4>
+<div class="think"><b>Thinking:</b> flat hourly by size, but they will ask for weekend surge. So the fee is not hard-coded; it sits behind an interface and is injected. <b>A swappable algorithm behind an interface -- that is Strategy, and this is the moment it earned its name.</b></div>
+{code('pricing')}
+
+<h4>6. Spot assignment -- Strategy again</h4>
+<div class="think"><b>Thinking:</b> smallest-fit today, nearest-to-exit tomorrow. Same shape, same answer: hide the choice behind an interface so the lot never changes.</div>
+{code('assign')}
+
+<h4>7. The Floor and the live board -- Observer emerges</h4>
+<div class="think"><b>Thinking:</b> a floor holds spots, and finding a free one must not scan: a map from size to a deque of free spots gives O(1). The display board must update without parking logic knowing screens exist, so the floor just publishes "occupancy changed". <b>A notifier decoupled from its listeners -- that is Observer.</b> Note occupy: the assigned spot is the head that was just peeked, so it is a poll, not a linear remove -- the original used <code>remove(s)</code>, which quietly made the O(1) claim false.</div>
+{code('floor',hl=('void occupy','Deque<ParkingSpot> q =','q.poll()'))}
+
+<h4>8. The Lot ties it together -- the lock, and payment</h4>
+<div class="think"><b>Thinking:</b> one lot owns floors, injected strategies and active tickets. Many gates call park at once, so find-and-occupy-and-assign is one critical section under one lock. Payment at exit is another swappable thing: Strategy a third time. The same plate parking twice is rejected before anything is touched -- the original silently overwrote the ticket.</div>
+{code('lot',hl=('Already parked',))}
+
+<h4>9. Prove it works -- including the race</h4>
+<div class="think"><b>Thinking:</b> a main that parks, fills, rejects and unparks -- and then two gates racing for one compact spot on a thread pool. Exactly one must win; the assertion is what makes the lock a claim rather than a hope.</div>
+{code('main',hl=('the race:','newFixedThreadPool','Future<Ticket> a','Future<Ticket> b','race winners','double-booking'))}
+<div class="aside"><p>Recorded output: <code>parked at F1-C1</code>, <code>expected: Lot full for CAR</code>, <code>fee for car: 20.0</code>, <code>loser: Lot full for CAR</code>, <code>race winners = 1 (must be 1)</code>. The full file is at <code>lld/parking-lot/Main.java</code>; <code>javac Main.java &amp;&amp; java Main</code> reproduces it.</p></div>
+
+<h4>Concurrency -- the part that makes you "safe"</h4>
+<p>They almost always push on the race: two cars, one last spot. Naively both threads see it free and both assign. The critical section is find plus occupy plus assign, which is why the lock lives in the lot and not in the gate. Then the two upgrades you name without being asked: one global lock serialises every gate, so a lock per floor or per size bucket lets floors park in parallel; and the lock-free version makes each spot's occupant an <code>AtomicReference&lt;Vehicle&gt;</code> and does a compare-and-set from null to the vehicle, trying the next spot on failure -- more throughput, more code. In a distributed lot the same atomic assign becomes a conditional database update.</p>
+
+<h4>SOLID, mapped to this design</h4>
+<table class="matrix wrap">
+  <tbody>
+    <tr><th>S</th><td>Spot tracks its own occupancy, Floor its spots, Lot orchestrates, Strategy prices. No class does all of it.</td></tr>
+    <tr><th>O</th><td>A new pricing or assignment rule is a new class and zero edits to the lot -- Stage 4 proves it.</td></tr>
+    <tr><th>L</th><td>Any PricingStrategy drops in for another; the lot never checks the concrete type.</td></tr>
+    <tr><th>I</th><td>Interfaces are one method each; a payment class is never forced to implement pricing.</td></tr>
+    <tr><th>D</th><td>The lot depends on interfaces handed to it through configure, never on FlatHourlyPricing directly.</td></tr>
+  </tbody>
+</table>
+
+<h4>Decisions and complexity</h4>
+<table class="matrix wrap">
+  <thead><tr><th>Decision</th><th>Why, and the trade</th></tr></thead>
+  <tbody>
+    <tr><th>SpotType enum, not spot subclasses</th><td>Enough until a size gains real behaviour -- an EV spot with a charger is when the subclass pays.</td></tr>
+    <tr><th>Map of size to deque, not a scanned list</th><td>O(1) find and free against O(n); a few pointers of memory.</td></tr>
+    <tr><th>Singleton lot</th><td>One source of truth; the cost is testability. In tests, inject the lot instead of calling getInstance.</td></tr>
+    <tr><th>Global lock first</th><td>Simplicity now; name per-floor and CAS as the upgrades.</td></tr>
+    <tr><th>Ticket remembers its floor</th><td>Unpark is O(1) instead of scanning floors for the spot's home.</td></tr>
+  </tbody>
+</table>
+<p>Big-O: park is O(floors) to scan plus O(1) to take a spot; unpark O(1); availability O(floors x sizes); memory O(spots plus active tickets).</p>
+</details>
+
+<h2>Stage 4 -- Extensions</h2>
+<div class="stage"><h3 data-n="04">Three rule changes, ten minutes each, in code -- this is where seniors separate</h3></div>
+
+<h4>Extension 1 -- "Pricing is 1.5x on weekends, starting now."</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>Change as little as possible. Count the files you touched.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> pricing is a Strategy, so this is a new class and one changed line at the call site; lot, floors, spots and tickets do not move. Wrapping the old rule instead of rewriting it is a Decorator. That relief is the whole reason the interface existed.</div>
+{code('weekend')}
+</details>
+
+<h4>Extension 2 -- "A driver lost the ticket. What happens?"</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>They want the flow, the state, and the code.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> duration cannot be computed, so bill a flat daily cap. The ticket is a small state machine -- ISSUED, PAID, LOST, CLOSED -- and lost is one transition that charges the cap and frees the spot, not a special case sprinkled through unpark.</div>
+<figure>
+<div class="cells row"><div class="cell">ISSUED</div><div class="cell">pay fee</div><div class="cell">PAID</div><div class="cell on">CLOSED, spot freed</div><div class="cell bad">LOST: pay cap</div></div>
+<figcaption><strong>One extra edge.</strong> Lost goes ISSUED to LOST to CLOSED; the exit path is the same after the payment.</figcaption>
+</figure>
+{code('ext_lost')}
+</details>
+
+<h4>Extension 3 -- "Ten entry gates, and the app needs 'is it full for a truck' every second."</h4>
+<p class="stage"><button class="timer" data-min="10">start 10:00</button> <span>Gates are actors; availability must not scan spots.</span></p>
+<details class="gate"><summary>Reference</summary>
+<div class="think"><b>Thinking:</b> gates are thin: they call park and unpark; the logic and the lock stay in the lot, which is exactly why ten gates are safe. Availability is O(1) per floor per size off the free counts the floor already keeps -- the map of counts is why nobody scans.</div>
+{code('gates')}
+{code('ext_avail')}
+</details>
+<div class="aside"><p>Further asks, one line each: nearest spot to exit is a new assignment strategy over a min-heap by distance. A truck needing two adjacent spots gives spots an adjacency link, the ticket a list of spots, and occupy reserves all-or-nothing under the lock -- say the word atomic. Creating spots from a type string is when a Factory finally earns a place. Persistence is a repository behind the services with the maps swapped for a database.</p></div>
+
+<h2>Stage 5 -- Score</h2>
+<div class="stage"><h3 data-n="05">Score against the tells, then write the three lines that are the real output</h3></div>
+<p class="stage"><button class="timer" data-min="15">start 15:00</button> <span>Open your file and the reference side by side.</span></p>
+<table class="matrix wrap">
+  <thead><tr><th>Junior tell</th><th>Senior tell</th></tr></thead>
+  <tbody>
+    <tr><th>One ParkingLot class doing everything</th><td>Small classes, each with one job</td></tr>
+    <tr><th>Pricing hard-coded inside unpark</th><td>Pricing, assignment, payment injected</td></tr>
+    <tr><th>Scans every spot to find a free one</th><td>O(1) via the per-size free deque</td></tr>
+    <tr><th>Ignores the two-cars-one-spot race</th><td>Atomic critical section, names the CAS upgrade</td></tr>
+    <tr><th>Magic strings for sizes</th><td>Enums, and is-a / has-a said aloud</td></tr>
+    <tr><th>No full, lost or double-exit handling</th><td>States assumptions; handles full, lost, edge cases</td></tr>
+  </tbody>
+</table>
+<p>Relationships, said precisely because they listen for it: Car <em>is-a</em> Vehicle, a true kind-of. Lot <em>owns</em> Floors and Floor <em>owns</em> Spots -- composition, the parts have no life without the whole. Ticket <em>references</em> Spot and Vehicle -- they outlive it. The lot <em>depends on</em> a PricingStrategy it is handed -- injection, not ownership.</p>
+
+<h4>The miss log</h4>
+<p>On paper, three lines. Not "concurrency" -- the specific thing: "I removed from the deque by object, O(n), and claimed O(1)." "I let the same plate park twice." "I built the pricing strategy but constructed it inside the lot, so it was not injected." These three lines are what this session produced. Bring them back.</p>
+
+<h4>What they will grill, with the two-breath answers</h4>
+<table class="matrix pokes wrap">
+  <thead><tr><th>Question</th><th>Answer</th></tr></thead>
+  <tbody>
+    <tr><th>Why a lock in the lot and not the gate?</th><td>The invariant is one free spot, one vehicle; it lives where the spot state lives. A lock per gate protects nothing shared.</td></tr>
+    <tr><th>One global lock -- ten gates queue?</th><td>Yes. Upgrade one: lock per floor or per size bucket. Upgrade two: CAS on the spot's occupant, try the next spot on failure.</td></tr>
+    <tr><th>Why a deque and not a list of spots?</th><td>Head is the next free spot: peek O(1), poll O(1), push O(1). A list means scanning.</td></tr>
+    <tr><th>Singleton -- how do you test it?</th><td>Do not call getInstance inside anything; pass the lot in. The singleton is a convenience at the edge, not a dependency in the middle.</td></tr>
+    <tr><th>Why does the ticket store the floor?</th><td>So unpark never searches: O(1) to the spot's home.</td></tr>
+    <tr><th>Truck needs two adjacent spots?</th><td>Adjacency link on spots, a contiguous run in assignment, a list of spots on the ticket, and all-or-nothing occupy under the lock.</td></tr>
+    <tr><th>Where would Factory go?</th><td>Nowhere yet. When spots or vehicles are created from config strings and the creation logic grows, SpotFactory.create earns a place.</td></tr>
+    <tr><th>Persistence?</th><td>A repository interface behind the services; the maps become a database table. Services unchanged.</td></tr>
+  </tbody>
+</table>
+
+<p class="end-mark">■</p>
+</section>
+
+<section id="caveats">
+  <h2>Where this stops being true</h2>
+  <ul>
+    <li>A real round may give 90 to 120 minutes and expect tests. The 60 here is deliberately tight: it trains the skeleton to come out fast.</li>
+    <li>The global lock is correct and slow. At ten gates and thousands of spots the per-floor lock or CAS is the real answer; name it unprompted.</li>
+    <li>Ticket ids from a static counter are process-wide; two lots in one process would share the sequence. Fine here, wrong in a multi-tenant service.</li>
+    <li>Prices are doubles for readability. Money in a real system is an integer of minor units.</li>
+    <li>Nothing here persists. A crash forgets every ticket -- the repository extension is where that answer starts.</li>
+  </ul>
+</section>
+
+<section id="sources">
+  <h2>Sources</h2>
+  <ul class="sources">
+    <li cite="parking-lot/Main.java"><a href="parking-lot/Main.java">Main.java</a> — the complete reference, compiled with OpenJDK 26, output recorded above.</li>
+    <li cite="../system-design/lld-parking-lot.html"><a href="../system-design/lld-parking-lot.html">Parking Lot -- LLD (original)</a> — the earlier reference this session was built from; three defects fixed here (O(n) deque removal, duplicate plate, non-atomic ticket id).</li>
+  </ul>
+</section>
+
+</article>
+
+<script>
+/*__RUNTIME__*/
+(function(){{
+  // minimal Java highlighter: comments, strings, keywords, numbers -> base.css token classes
+  var KW=/\\b(abstract|boolean|break|case|catch|class|continue|default|do|double|else|enum|extends|final|finally|for|if|implements|import|int|interface|long|new|null|package|private|protected|public|return|static|super|switch|synchronized|this|throw|throws|try|void|while|var|record|true|false)\\b/g;
+  document.querySelectorAll('pre code.java').forEach(function(el){{
+    var lines=el.innerHTML.split('\\n').map(function(l){{
+      var keep=l.match(/^<span class="hl">(.*)<\\/span>$/); var body=keep?keep[1]:l;
+      var parts=body.split(/(\\/\\/.*$|"(?:[^"\\\\]|\\\\.)*")/);
+      body=parts.map(function(p,i){{
+        if(i%2===1) return p.indexOf('//')===0?'<span class="c">'+p+'</span>':'<span class="s">'+p+'</span>';
+        return p.replace(KW,'<span class="k">$1</span>').replace(/\\b(\\d+(?:\\.\\d+)?)\\b/g,'<span class="n">$1</span>');
+      }}).join('');
+      return keep?'<span class="hl">'+body+'</span>':body;
+    }});
+    el.innerHTML=lines.join('\\n');
+  }});
+  // stage timers
+  document.querySelectorAll('button.timer').forEach(function(b){{
+    var total=parseInt(b.dataset.min,10)*60, left=total, id=null;
+    function show(){{ var m=Math.floor(left/60), s=left%60; b.textContent=(id?'':'start ')+m+':'+(s<10?'0':'')+s; }}
+    b.addEventListener('click',function(){{
+      if(id){{ clearInterval(id); id=null; b.classList.remove('running'); show(); return; }}
+      if(left<=0) left=total; b.classList.remove('done'); b.classList.add('running');
+      id=setInterval(function(){{ left--; show(); if(left<=0){{ clearInterval(id); id=null; b.classList.remove('running'); b.classList.add('done'); b.textContent='time -- open the fold'; }} }},1000);
+      show();
+    }});
+    show();
+  }});
+}})();
+</script>
+</body>
+</html>
+'''
+(H/"lld/parking-lot.body.html").write_text(body)
+out=body.replace("/*__BASECSS__*/",(R/"base.css").read_text()).replace("/*__RUNTIME__*/",(R/"runtime.js").read_text())
+(H/"lld/parking-lot.html").write_text(out)
+b=re.sub(r'<(script|style)\b.*?</\1>','',out,flags=re.S); w=len(html.unescape(re.sub(r'<[^>]+>',' ',b)).split())
+print("parking-lot.html written:",len(out),"bytes,",w,"words (incl. code)")

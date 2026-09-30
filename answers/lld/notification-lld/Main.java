@@ -1,0 +1,914 @@
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/** Which pipe the message goes down. The value is only a key into the registry of senders; the sender is a class. */
+enum Channel { EMAIL, SMS, PUSH, IN_APP }
+
+/** How urgent. Declared CRITICAL first on purpose: the ordinal is what the queue sorts on, so an OTP outranks a promo. */
+enum Priority { CRITICAL, HIGH, NORMAL, LOW }
+
+/**
+ * One notification's life. Every value carries a rank, and a record only ever moves to a HIGHER rank, so a late
+ * message from a provider or a stale timer can never drag it backwards. Non-terminal ranks are scoped to the
+ * attempt number (attempt * 100 + rank), which is what lets attempt 2 outrank everything that happened in
+ * attempt 1. The finished (terminal) states all share ONE rank above every attempt, so none of them can replace
+ * another: a cancelled message never becomes "expired". DELIVERED alone sits one higher, because a receipt saying
+ * the handset got the message is the truth, whatever we wrote before it.
+ */
+enum DeliveryState {
+    CREATED(0, false),            // the record exists; nothing has happened yet
+    DEFERRED(5, false),           // parked: a guard said "not now, try at 08:00"
+    QUEUED(10, false),            // in the priority queue, waiting for a worker
+    SENDING(20, false),           // a worker owns it and the gateway call is in flight
+    UNKNOWN(30, false),           // the gateway timed out: we do not know whether it went out
+    RETRY_SCHEDULED(40, false),   // parked on the timer, will be queued again for the next attempt
+    SENT(50, false),              // the gateway accepted it. NOT the same as the human seeing it
+    // finished: these share one rank above every attempt (see Progress.rankOf), so their own number is unused
+    SUPPRESSED(0, true),          // a guard refused it, or the caller cancelled it: no attempt is made after this
+    EXPIRED(0, true),             // its deadline passed while it sat in the queue; the gateway was never called
+    FAILED_FINAL(0, true),        // permanent failure, or the retry budget ran out: dead letter
+    DELIVERED(0, true);           // a receipt from the provider says the handset got it: ranked above the rest
+
+    private final int rank; private final boolean terminal;
+    DeliveryState(int rank, boolean terminal) { this.rank = rank; this.terminal = terminal; }
+    /** Where this state sits within one attempt. Higher wins. */
+    int rank() { return rank; }
+    /** Finished: outranks every attempt, so a stale message cannot reopen the record. */
+    boolean terminal() { return terminal; }
+}
+
+/** What one call to a provider came back with. Four answers, because they need four different next moves. */
+enum SendOutcome { SENT, TRANSIENT, PERMANENT, UNKNOWN }
+
+/**
+ * A provider's answer. Not a boolean: "the gateway timed out" and "that address has no @ in it" need opposite
+ * handling -- retry the first, never the second -- and a boolean cannot tell them apart.
+ */
+record SendResult(SendOutcome outcome, String detail) {
+    /** The gateway accepted it and gave us a reference to quote in a support ticket. */
+    static SendResult sent(String providerRef) { return new SendResult(SendOutcome.SENT, providerRef); }
+    /** Try again later: throttled, 503, connection refused. The message is still worth sending. */
+    static SendResult transientFailure(String why) { return new SendResult(SendOutcome.TRANSIENT, why); }
+    /** Never try again: malformed address, unsubscribed at the provider, unknown device token. */
+    static SendResult permanentFailure(String why) { return new SendResult(SendOutcome.PERMANENT, why); }
+    /** The call timed out. It may or may not have gone out; the only safe move is to retry with the SAME key. */
+    static SendResult unknown(String why) { return new SendResult(SendOutcome.UNKNOWN, why); }
+}
+
+/** Where time comes from. Injected everywhere, so a test can stand at 03:00 local without sleeping. */
+interface Clock { long nowMs(); }
+
+/** Where "later" comes from. Production hands in a timer thread; a test hands in one that runs the task inline. */
+interface Scheduler {
+    /** Run `task` after `delayMs`. Must not run it on a worker that is waiting for it. */
+    void schedule(Runnable task, long delayMs);
+}
+
+/**
+ * The person, the four addresses they can be reached at, and their time zone. A zone, not an hour offset: India
+ * is UTC+5:30, and a zone that moves its clocks twice a year has no single offset. Quiet hours and the daily cap
+ * both need the recipient's own clock.
+ */
+record Recipient(String userId, String email, String phone, String deviceToken, ZoneId zone) {
+    /** The address for one channel, or null if we do not have one. An exhaustive switch, so a new channel fails to compile. */
+    String addressFor(Channel channel) {
+        return switch (channel) {
+            case EMAIL -> email;
+            case SMS -> phone;
+            case PUSH -> deviceToken;
+            case IN_APP -> userId;
+        };
+    }
+}
+
+/** The finished words: a title and a body, rendered once at submit time and never re-rendered. */
+record RenderedMessage(String title, String body) {}
+
+/**
+ * The request, exactly as the caller made it: who, which channel, how urgent, which template plus parameters,
+ * and optionally a de-dup key and a deadline. Every field is final. A submitted notification never changes,
+ * which is why a worker thread and a status query can both hold it without a lock.
+ */
+final class Notification {
+    private static final AtomicLong SEQ = new AtomicLong();
+    private final long seq;
+    private final String id, userId, templateId, category, dedupeKey;
+    private final Channel channel;
+    private final Priority priority;
+    private final Map<String, String> params;
+    private final long deadlineMs;
+
+    private Notification(Builder b) {
+        this.seq = SEQ.incrementAndGet();
+        this.id = "n-" + seq;
+        this.userId = b.userId; this.channel = b.channel; this.templateId = b.templateId;
+        this.category = b.category; this.dedupeKey = b.dedupeKey; this.priority = b.priority;
+        this.params = Map.copyOf(b.params); this.deadlineMs = b.deadlineMs;
+    }
+    /** Start building one. Three fields are required, so they are here; the rest have defaults. */
+    static Builder to(String userId, Channel channel, String templateId) { return new Builder(userId, channel, templateId); }
+
+    String id() { return id; }
+    long seq() { return seq; }
+    String userId() { return userId; }
+    Channel channel() { return channel; }
+    Priority priority() { return priority; }
+    String templateId() { return templateId; }
+    String category() { return category; }
+    String dedupeKey() { return dedupeKey; }
+    Map<String, String> params() { return params; }
+    long deadlineMs() { return deadlineMs; }
+
+    /**
+     * The key we hand the provider so that a retry after a timeout cannot become a second text message. It is the
+     * caller's de-dup key when there is one, and our own id otherwise: stable across every attempt either way.
+     */
+    String idempotencyKey() { return dedupeKey == null ? id : userId + "|" + channel + "|" + dedupeKey; }
+
+    @Override public String toString() { return id + "(" + channel + "," + priority + "," + templateId + ")"; }
+
+    /** Seven fields, four of them optional: this is a problem where a builder pays for itself. */
+    static final class Builder {
+        private final String userId, templateId; private final Channel channel;
+        private Priority priority = Priority.NORMAL;
+        private String category = "general", dedupeKey = null;
+        private Map<String, String> params = Map.of();
+        private long deadlineMs = Long.MAX_VALUE;
+        Builder(String userId, Channel channel, String templateId) { this.userId = userId; this.channel = channel; this.templateId = templateId; }
+        Builder priority(Priority p) { this.priority = p; return this; }
+        Builder category(String c) { this.category = c; return this; }
+        /** Two submits with the same key inside the de-dup window produce exactly one message. */
+        Builder dedupeKey(String k) { this.dedupeKey = k; return this; }
+        Builder params(Map<String, String> p) { this.params = p; return this; }
+        /** After this instant the message is pointless: it is dropped without calling the gateway. */
+        Builder deadlineMs(long t) { this.deadlineMs = t; return this; }
+        Notification build() { return new Notification(this); }
+    }
+}
+
+// "product will change the copy every week and will not wait for a deploy" -> template id + params, rendered here
+/** Turns a template id plus parameters into words. Swappable: today a map, tomorrow Handlebars or a CMS. */
+interface TemplateEngine {
+    /** Render, or throw if there is no template for this id and channel -- which is a permanent failure, caught at submit. */
+    RenderedMessage render(String templateId, Channel channel, Map<String, String> params);
+}
+
+/** One template: two patterns with {{placeholders}}. Keyed by id AND channel, because an SMS is not a push. */
+record MessageTemplate(String titlePattern, String bodyPattern) {
+    RenderedMessage render(Map<String, String> params) { return new RenderedMessage(fill(titlePattern, params), fill(bodyPattern, params)); }
+    private static String fill(String pattern, Map<String, String> params) {
+        String out = pattern;
+        for (Map.Entry<String, String> e : params.entrySet()) out = out.replace("{{" + e.getKey() + "}}", e.getValue());
+        return out;
+    }
+}
+
+/** The in-memory registry. Templates are registered at start-up and read-only afterwards. */
+final class InMemoryTemplates implements TemplateEngine {
+    private final Map<String, MessageTemplate> byIdAndChannel = new ConcurrentHashMap<>();
+    /** Register one template. Returns this, so the whole registry is one expression in main. */
+    InMemoryTemplates register(String templateId, Channel channel, MessageTemplate t) {
+        byIdAndChannel.put(templateId + "|" + channel, t); return this;
+    }
+    public RenderedMessage render(String templateId, Channel channel, Map<String, String> params) {
+        MessageTemplate t = byIdAndChannel.get(templateId + "|" + channel);
+        if (t == null) throw new NoSuchElementException("no template " + templateId + " for " + channel);
+        return t.render(params);
+    }
+}
+
+/** Where a user id turns into addresses. Behind an interface so it can become a user service or a cache. */
+interface RecipientDirectory { Recipient lookup(String userId); }
+
+/** A map of people, for the demo and the tests. */
+final class InMemoryDirectory implements RecipientDirectory {
+    private final Map<String, Recipient> people = new ConcurrentHashMap<>();
+    InMemoryDirectory add(Recipient r) { people.put(r.userId(), r); return this; }
+    public Recipient lookup(String userId) {
+        Recipient r = people.get(userId);
+        if (r == null) throw new NoSuchElementException("no such user: " + userId);
+        return r;
+    }
+}
+
+/** What a user has muted. Behind an interface so it becomes a Redis hash without the engine noticing. */
+interface PreferenceStore { boolean enabled(String userId, Channel channel, String category); }
+
+/** Opt-outs held as a set of "user|channel|category" keys. */
+final class InMemoryPreferences implements PreferenceStore {
+    private final Set<String> muted = ConcurrentHashMap.newKeySet();
+    private static String key(String u, Channel c, String cat) { return u + "|" + c + "|" + cat; }
+    /** Mute one category on one channel for one user. */
+    InMemoryPreferences mute(String userId, Channel c, String category) { muted.add(key(userId, c, category)); return this; }
+    public boolean enabled(String userId, Channel channel, String category) { return !muted.contains(key(userId, channel, category)); }
+}
+
+// "the client's HTTP call timed out and they retried; the human must not get two OTPs" -> claim the key, atomically
+/**
+ * The claim on an idempotency key. claim() must be ONE operation, not "is it there? no? put it" -- that gap is
+ * exactly where eight threads all decide they are the first one.
+ */
+interface DedupeStore {
+    /** True if this caller is the first to claim `key` (or the previous claim has expired). False = a duplicate. */
+    boolean claim(String key, long nowMs, long ttlMs);
+    /** Give the key back, because a later step refused the message and it never went out. */
+    void release(String key);
+}
+
+/** putIfAbsent is the whole design: one atomic operation, so exactly one of fifty threads sees null and wins. */
+final class InMemoryDedupeStore implements DedupeStore {
+    private final ConcurrentHashMap<String, Long> expiryByKey = new ConcurrentHashMap<>();
+    public boolean claim(String key, long nowMs, long ttlMs) {
+        while (true) {
+            Long previous = expiryByKey.putIfAbsent(key, nowMs + ttlMs);
+            if (previous == null) return true;                        // nobody held it: this thread wins
+            if (previous > nowMs) return false;                       // somebody holds it and it has not expired
+            if (expiryByKey.replace(key, previous, nowMs + ttlMs)) return true;  // expired: exactly one reclaimer
+        }
+    }
+    public void release(String key) { expiryByKey.remove(key); }
+    /** How many keys are held. For tests and for the eviction follow-up. */
+    int size() { return expiryByKey.size(); }
+}
+
+/** What a guard decided: let it through, refuse it with a reason, or park it until a named instant. */
+record Verdict(Verdict.Kind kind, String reason, long untilMs) {
+    enum Kind { ALLOW, SUPPRESS, DEFER }
+    static final Verdict ALLOW = new Verdict(Kind.ALLOW, "", 0);
+    /** Refuse it for good, with a reason a support agent can read. */
+    static Verdict suppress(String reason) { return new Verdict(Kind.SUPPRESS, reason, 0); }
+    /** Not now: hold it until `untilMs` and then send it. */
+    static Verdict defer(long untilMs, String reason) { return new Verdict(Kind.DEFER, reason, untilMs); }
+}
+
+// "muted / too many today / already sent / 3am where they live" arrive from four teams on four different days
+// -> one reason per class, walked in order -> Chain of Responsibility, and each link is a Strategy
+/**
+ * One reason a message might not go out. One method to implement, so a fake is a lambda. A guard that reserves
+ * something (a daily slot, a de-dup key) also implements undo(), which is called if a LATER guard refuses the
+ * message -- otherwise a duplicate submit would quietly eat the user's daily quota.
+ */
+interface DeliveryGuard {
+    /** A short name that ends up in the suppression reason, so support can see which rule stopped it. */
+    String name();
+    /** ALLOW, SUPPRESS or DEFER. Always called with the recipient's gate held, so read-modify-write is safe here. */
+    Verdict check(Notification n, Recipient r, long nowMs);
+    /** Give back whatever check() reserved. Most guards reserve nothing, so most never override this. */
+    default void undo(Notification n, Recipient r) {}
+}
+
+/** The user unsubscribed. CRITICAL walks through: nobody mutes their own fraud alert. */
+final class PreferenceGuard implements DeliveryGuard {
+    private final PreferenceStore store;
+    PreferenceGuard(PreferenceStore store) { this.store = store; }
+    public String name() { return "preference"; }
+    public Verdict check(Notification n, Recipient r, long nowMs) {
+        if (n.priority() == Priority.CRITICAL) return Verdict.ALLOW;
+        return store.enabled(n.userId(), n.channel(), n.category())
+                ? Verdict.ALLOW
+                : Verdict.suppress("opted out of " + n.category() + " on " + n.channel());
+    }
+}
+
+/**
+ * No buzzing phones between 21:00 and 08:00 where the recipient lives. It does not drop the message, it DEFERS
+ * it to 08:00 sharp on their clock, because a receipt the user wanted is still wanted at breakfast. Only noisy
+ * channels are affected (an in-app badge wakes nobody), and CRITICAL walks through.
+ */
+final class QuietHoursGuard implements DeliveryGuard {
+    private final int startHour, endHour;
+    private final Set<Channel> noisy;
+    QuietHoursGuard(int startHour, int endHour, Set<Channel> noisy) { this.startHour = startHour; this.endHour = endHour; this.noisy = noisy; }
+    public String name() { return "quiet-hours"; }
+    public Verdict check(Notification n, Recipient r, long nowMs) {
+        if (n.priority() == Priority.CRITICAL) return Verdict.ALLOW;
+        if (!noisy.contains(n.channel())) return Verdict.ALLOW;
+        ZonedDateTime local = Instant.ofEpochMilli(nowMs).atZone(r.zone());     // their wall clock, not ours
+        if (!quiet(local.getHour())) return Verdict.ALLOW;
+        ZonedDateTime opens = local.toLocalDate().atTime(endHour, 0).atZone(r.zone());
+        if (!opens.isAfter(local)) opens = opens.plusDays(1);                    // 22:30 -> tomorrow's 08:00
+        return Verdict.defer(opens.toInstant().toEpochMilli(), "quiet hours, held until " + endHour + ":00 local");
+    }
+    private boolean quiet(int hour) { return startHour <= endHour ? (hour >= startHour && hour < endHour) : (hour >= startHour || hour < endHour); }
+}
+
+/**
+ * At most N non-critical messages per user per day, counted on the recipient's own calendar day. It RESERVES a
+ * slot inside check(), so two threads cannot both see "one slot left"; undo() gives the slot back when a later
+ * guard refuses the message. The per-user counter is only ever touched by a thread holding that user's gate,
+ * which is why a plain long[] is safe inside a ConcurrentHashMap: the map handles users appearing, the gate
+ * handles one user's arithmetic. So never share one DailyCapGuard between two services: each has its own gates.
+ */
+final class DailyCapGuard implements DeliveryGuard {
+    private final int capPerDay;
+    private final ConcurrentHashMap<String, long[]> used = new ConcurrentHashMap<>();   // userId -> [dayIndex, reserved]
+    DailyCapGuard(int capPerDay) { this.capPerDay = capPerDay; }
+    public String name() { return "daily-cap"; }
+    public Verdict check(Notification n, Recipient r, long nowMs) {
+        if (n.priority() == Priority.CRITICAL) return Verdict.ALLOW;
+        long day = Instant.ofEpochMilli(nowMs).atZone(r.zone()).toLocalDate().toEpochDay();   // their day, not UTC's
+        long[] slot = used.computeIfAbsent(n.userId(), k -> new long[]{day, 0});
+        if (slot[0] != day) { slot[0] = day; slot[1] = 0; }                 // a new day resets the count
+        if (slot[1] >= capPerDay) return Verdict.suppress("already had " + capPerDay + " today");
+        slot[1]++;                                                          // reserve, do not merely count
+        return Verdict.ALLOW;
+    }
+    public void undo(Notification n, Recipient r) {
+        long[] slot = used.get(n.userId());
+        if (slot != null && slot[1] > 0) slot[1]--;
+    }
+    /** How many slots this user has spent today. For tests and for a "why did I get nothing" screen. */
+    int usedToday(String userId) { long[] s = used.get(userId); return s == null ? 0 : (int) s[1]; }
+}
+
+/** The claim on the idempotency key, taken LAST so a message we were going to refuse anyway does not burn it. */
+final class DedupeGuard implements DeliveryGuard {
+    private final DedupeStore store; private final long ttlMs;
+    DedupeGuard(DedupeStore store, long ttlMs) { this.store = store; this.ttlMs = ttlMs; }
+    public String name() { return "dedupe"; }
+    public Verdict check(Notification n, Recipient r, long nowMs) {
+        if (n.dedupeKey() == null) return Verdict.ALLOW;
+        return store.claim(n.idempotencyKey(), nowMs, ttlMs) ? Verdict.ALLOW : Verdict.suppress("duplicate of " + n.dedupeKey());
+    }
+    public void undo(Notification n, Recipient r) { if (n.dedupeKey() != null) store.release(n.idempotencyKey()); }
+}
+
+// "email, SMS and push differ in exactly one line: the call to the provider" -> hide that line -> Strategy
+/** One provider. The only thing that genuinely differs between email, SMS and push lives behind this method. */
+interface Sender {
+    Channel channel();
+    /** Hand the message to the provider. The key is stable across retries, so a provider that honours it cannot double-send. */
+    SendResult send(Recipient to, RenderedMessage message, String idempotencyKey);
+}
+
+/** SMTP. A missing "@" is permanent: retrying a malformed address a hundred times helps nobody. */
+final class EmailSender implements Sender {
+    private final AtomicInteger calls = new AtomicInteger();
+    public Channel channel() { return Channel.EMAIL; }
+    public SendResult send(Recipient to, RenderedMessage m, String key) {
+        calls.incrementAndGet();
+        String address = to.addressFor(Channel.EMAIL);
+        if (address == null || !address.contains("@")) return SendResult.permanentFailure("not an email address: " + address);
+        return SendResult.sent("smtp/" + Integer.toHexString(key.hashCode()));
+    }
+    /** How many times the provider was actually called. The tests assert on this. */
+    int calls() { return calls.get(); }
+}
+
+/**
+ * An SMS gateway that fails the first N calls for a given idempotency key and then succeeds -- which is what a
+ * real one does when it is being restarted. It counts calls PER KEY, so a retry carrying the same key is
+ * recognised as the same message, exactly as a provider that honours idempotency would.
+ */
+final class FlakySmsSender implements Sender {
+    private final int failuresBeforeSuccess;
+    private final boolean timeoutStyle;
+    private final ConcurrentHashMap<String, AtomicInteger> callsByKey = new ConcurrentHashMap<>();
+    private final AtomicInteger calls = new AtomicInteger();
+    FlakySmsSender(int failuresBeforeSuccess, boolean timeoutStyle) { this.failuresBeforeSuccess = failuresBeforeSuccess; this.timeoutStyle = timeoutStyle; }
+    public Channel channel() { return Channel.SMS; }
+    public SendResult send(Recipient to, RenderedMessage m, String key) {
+        calls.incrementAndGet();
+        int n = callsByKey.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet();
+        if (n <= failuresBeforeSuccess)
+            return timeoutStyle ? SendResult.unknown("gateway timed out on call " + n)
+                                : SendResult.transientFailure("gateway 503 on call " + n);
+        return SendResult.sent("sms/" + Integer.toHexString(key.hashCode()));
+    }
+    int calls() { return calls.get(); }
+}
+
+/** APNs / FCM. Always accepts, and counts, so the race test can prove the human was texted exactly once. */
+final class PushSender implements Sender {
+    private final AtomicInteger calls = new AtomicInteger();
+    public Channel channel() { return Channel.PUSH; }
+    public SendResult send(Recipient to, RenderedMessage m, String key) {
+        calls.incrementAndGet();
+        if (to.addressFor(Channel.PUSH) == null) return SendResult.permanentFailure("no device token");
+        return SendResult.sent("push/" + Integer.toHexString(key.hashCode()));
+    }
+    int calls() { return calls.get(); }
+}
+
+// "how long do we wait before trying again" is a knob product will turn -> hide it behind two methods -> Strategy
+/** How many attempts, and how long to wait before each one. Fixed, exponential, jittered: all the same shape. */
+interface RetryPolicy {
+    /** Have we already spent the budget? `attemptsSoFar` is the attempt that just failed. */
+    boolean shouldRetry(int attemptsSoFar);
+    /** Milliseconds to wait before attempt `attemptsSoFar + 1`. */
+    long backoffMs(int attemptsSoFar);
+}
+
+/** Double the wait each time, up to a cap: 100, 200, 400, 800 ... so a dead provider is not hammered. */
+final class ExponentialBackoff implements RetryPolicy {
+    private final int maxAttempts; private final long baseMs, capMs;
+    ExponentialBackoff(int maxAttempts, long baseMs, long capMs) { this.maxAttempts = maxAttempts; this.baseMs = baseMs; this.capMs = capMs; }
+    public boolean shouldRetry(int attemptsSoFar) { return attemptsSoFar < maxAttempts; }
+    public long backoffMs(int attemptsSoFar) {
+        int shift = Math.min(attemptsSoFar - 1, 32);                  // never shift a long by more than 32 here
+        return Math.min(capMs, baseMs << shift);
+    }
+}
+
+/** Anybody who wants to know what happened. Called after every accepted transition, never inside a gate. */
+interface DeliveryListener {
+    void onTransition(DeliveryRecord record, DeliveryState from, DeliveryState to, String detail);
+}
+
+/** Prints the trace for the demo. In production this is the audit log. */
+final class ConsoleAudit implements DeliveryListener {
+    private volatile boolean muted;
+    /** Stop printing. The demo mutes it before the fifty-thread act, which would otherwise fill the screen. */
+    void mute() { muted = true; }
+    public void onTransition(DeliveryRecord r, DeliveryState from, DeliveryState to, String detail) {
+        if (muted) return;
+        System.out.printf("    %-6s %-12s %-15s -> %-15s %s%n", r.notification().id(), r.notification().channel(), from, to, detail);
+    }
+}
+
+/** Counts every state a record ever reached. The one listener you would actually page on. */
+final class Metrics implements DeliveryListener {
+    private final Map<DeliveryState, AtomicInteger> counts = new EnumMap<>(DeliveryState.class);
+    public void onTransition(DeliveryRecord r, DeliveryState from, DeliveryState to, String detail) {
+        counts.computeIfAbsent(to, k -> new AtomicInteger()).incrementAndGet();
+    }
+    /** How many records ever reached this state. */
+    int count(DeliveryState s) { AtomicInteger a = counts.get(s); return a == null ? 0 : a.get(); }
+    @Override public String toString() {
+        StringBuilder sb = new StringBuilder();
+        for (DeliveryState s : DeliveryState.values()) if (count(s) > 0) sb.append(s).append('=').append(count(s)).append(' ');
+        return sb.toString().trim();
+    }
+}
+
+/** Where a record is, as one immutable triple: which attempt, which state, and why. Swapped as a unit. */
+record Progress(int attempt, DeliveryState state, String detail) {
+    static final long FINISHED = 1_000_000L;                   // above any attempt a message will ever reach
+    /** The number a move must beat. Higher always wins. */
+    long rank() { return rankOf(attempt, state); }
+    /**
+     * attempt * 100 + the state's number while the message is alive. Every finished state has the same rank,
+     * FINISHED, so one can never replace another; DELIVERED alone is one higher, so a late receipt still lands.
+     */
+    static long rankOf(int attempt, DeliveryState state) {
+        if (state == DeliveryState.DELIVERED) return FINISHED + 1;
+        return state.terminal() ? FINISHED : attempt * 100L + state.rank();
+    }
+}
+
+/**
+ * Everything the system remembers about one notification: the immutable request, the words rendered at submit,
+ * and where it has got to. The progress lives in ONE AtomicReference, so attempt, state and reason are always
+ * consistent, and every move is a compare-and-set against the rank: a move to an equal or lower rank changes
+ * nothing and returns false. That single rule is what makes a stale retry timer and an out-of-order provider
+ * receipt harmless instead of corrupting.
+ */
+final class DeliveryRecord {
+    private final Notification notification;
+    private final RenderedMessage message;
+    private final List<DeliveryListener> listeners;
+    private final AtomicReference<Progress> progress = new AtomicReference<>(new Progress(0, DeliveryState.CREATED, "submitted"));
+
+    DeliveryRecord(Notification notification, RenderedMessage message, List<DeliveryListener> listeners) {
+        this.notification = notification; this.message = message; this.listeners = listeners;
+    }
+    Notification notification() { return notification; }
+    RenderedMessage message() { return message; }
+    /** Where it is right now. O(1), lock free. */
+    Progress progress() { return progress.get(); }
+    DeliveryState state() { return progress.get().state(); }
+    /** Which attempt it is on. 0 means it has never been queued. */
+    int attempt() { return progress.get().attempt(); }
+    String detail() { return progress.get().detail(); }
+
+    /**
+     * Move to `state` for `attempt`, but only if that outranks where the record already is. Returns false, and
+     * changes nothing at all, when the move is stale or backwards -- which is the normal answer when a timer
+     * fires late or a provider posts a receipt for an attempt we have already moved past. A finished record
+     * moves only to DELIVERED (the ranks see to it), so a cancelled message is never later written down as
+     * EXPIRED or FAILED.
+     */
+    boolean moveTo(int attempt, DeliveryState state, String detail) {
+        long want = Progress.rankOf(attempt, state);
+        while (true) {
+            Progress current = progress.get();
+            if (want <= current.rank()) return false;                  // stale, backwards, or finished already
+            Progress next = new Progress(attempt, state, detail);
+            if (progress.compareAndSet(current, next)) { fire(current.state(), state, detail); return true; }
+        }
+    }
+    /**
+     * Stop it, but only while it is still ours to stop. Once a worker has moved it to SENDING the gateway call
+     * may already be in flight, so a "cancel" that reported success would be a lie.
+     */
+    boolean cancelIfNotStarted() {
+        while (true) {
+            Progress current = progress.get();
+            DeliveryState s = current.state();
+            if (s.terminal() || s == DeliveryState.SENDING || s == DeliveryState.SENT) return false;
+            Progress next = new Progress(current.attempt(), DeliveryState.SUPPRESSED, "cancelled by the caller");
+            if (progress.compareAndSet(current, next)) { fire(s, DeliveryState.SUPPRESSED, next.detail()); return true; }
+        }
+    }
+    /** Listeners are told after the change has been committed, one try/catch each: a broken listener breaks nothing. */
+    private void fire(DeliveryState from, DeliveryState to, String detail) {
+        for (DeliveryListener l : listeners) {
+            try { l.onTransition(this, from, to, detail); }
+            catch (RuntimeException ignored) { /* an audit sink is not allowed to stop a notification */ }
+        }
+    }
+    @Override public String toString() { return notification.id() + " " + state() + " (attempt " + attempt() + ": " + detail() + ")"; }
+}
+
+/** One user's admission gate: the lock that serialises the guards for that user, and nothing else. */
+final class UserGate {
+    final ReentrantLock lock = new ReentrantLock();
+    volatile long lastUsedMs;                         // for the idle-eviction follow-up
+}
+
+/**
+ * The aggregate root. It owns the queue, the ledger of records, the worker pool and one gate per user, and it is
+ * handed everything else: the templates, the directory, the guards, the senders, the retry policy, the clock and
+ * the scheduler. Two flows and one rule:
+ *
+ *   submit()  runs on the CALLER's thread and only decides admission: render, take that user's gate, walk the
+ *             guards in order, release the gate, then queue it, park it for later, or record the refusal. A
+ *             parked message is judged again, by every guard, when it wakes.
+ *   deliver() runs on a worker: check the deadline, take ownership by moving to SENDING, call the gateway with NO
+ *             lock held at all, then record the outcome. A transient failure or a timeout parks the record on the
+ *             scheduler for the next attempt instead of sleeping the worker.
+ *
+ * The rule: nothing is ever written that claims the message went out until the gateway has said so. A crash
+ * between SENDING and SENT leaves the record saying SENDING, which is the truth -- we do not know -- and the
+ * retry carries the same idempotency key so the provider can collapse the duplicate.
+ */
+final class NotificationService {
+    private final int workerCount, queueCapacity;
+    private final Comparator<DeliveryRecord> byUrgency =
+            Comparator.comparingInt((DeliveryRecord r) -> r.notification().priority().ordinal())
+                      .thenComparingLong(r -> r.notification().seq());
+    private final PriorityBlockingQueue<DeliveryRecord> queue;
+    private final AtomicInteger depth = new AtomicInteger();        // PriorityBlockingQueue is unbounded; this bounds it
+    private final AtomicInteger outstanding = new AtomicInteger();  // work the engine still owes, for awaitIdle
+    private final ConcurrentHashMap<String, DeliveryRecord> ledger = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Queue<DeliveryRecord>> byUser = new ConcurrentHashMap<>();   // the per-user log
+    private final ConcurrentHashMap<String, UserGate> gates = new ConcurrentHashMap<>();
+    private final List<DeliveryListener> listeners = new CopyOnWriteArrayList<>();
+    private final List<Thread> workers = new ArrayList<>();
+    private volatile boolean running;
+
+    private volatile TemplateEngine templates = (id, c, p) -> { throw new IllegalStateException("configure() first"); };
+    private volatile RecipientDirectory directory = id -> { throw new IllegalStateException("configure() first"); };
+    private volatile RetryPolicy retryPolicy = new ExponentialBackoff(3, 100, 10_000);
+    private volatile List<DeliveryGuard> guards = List.of();
+    private volatile Map<Channel, Sender> senders = new EnumMap<>(Channel.class);
+    private volatile Clock clock = System::currentTimeMillis;
+    private volatile Scheduler scheduler = new TimerScheduler();
+
+    NotificationService(int workerCount, int queueCapacity) {
+        this.workerCount = workerCount; this.queueCapacity = queueCapacity;
+        this.queue = new PriorityBlockingQueue<>(Math.max(16, Math.min(queueCapacity, 1024)), byUrgency);
+    }
+
+    /**
+     * Hand in every rule. The service builds none of them, which is why a test can hand in a clock that says
+     * 03:00, a scheduler that runs retries inline and a gateway that times out twice. Call before start().
+     */
+    void configure(TemplateEngine templates, RecipientDirectory directory, RetryPolicy retryPolicy,
+                   List<DeliveryGuard> guards, Map<Channel, Sender> senders, Clock clock, Scheduler scheduler) {
+        this.templates = templates; this.directory = directory; this.retryPolicy = retryPolicy;
+        this.guards = List.copyOf(guards);
+        this.senders = new EnumMap<>(senders);                        // O(1) lookup by channel, copied so nobody mutates it later
+        this.clock = clock; this.scheduler = scheduler;
+    }
+    /** Subscribe. Listeners hear about every accepted transition, after it has happened, and cannot veto one. */
+    void addListener(DeliveryListener l) { listeners.add(l); }
+
+    /** Start the worker threads. Nothing is delivered before this; submits before it simply queue up. */
+    void start() {
+        running = true;
+        for (int i = 0; i < workerCount; i++) {
+            Thread t = new Thread(this::workerLoop, "notify-worker-" + i);
+            t.setDaemon(true); t.start(); workers.add(t);
+        }
+    }
+    /** Stop the workers and the timer. Records already queued are simply left where they are. */
+    void shutdown() {
+        running = false;
+        for (Thread t : workers) t.interrupt();
+        if (scheduler instanceof TimerScheduler ts) ts.close();
+    }
+
+    /**
+     * Admission, on the caller's thread. The order is the design: resolve and render first, with no gate held
+     * and nothing written, so a missing user or a missing template throws before anything is reserved; then
+     * admit() walks the guards under this user's gate. Returns the record either way -- a suppressed message gets
+     * a record with the reason on it, because "why did my user get nothing" is the most common support question.
+     */
+    DeliveryRecord submit(Notification n) {
+        Recipient to = directory.lookup(n.userId());                          // may throw: nothing written yet
+        RenderedMessage words = templates.render(n.templateId(), n.channel(), n.params());  // may throw: nothing written yet
+        DeliveryRecord record = new DeliveryRecord(n, words, listeners);
+        ledger.put(n.id(), record);
+        byUser.computeIfAbsent(n.userId(), k -> new ConcurrentLinkedQueue<>()).add(record);
+        admit(record, to);
+        return record;
+    }
+
+    /**
+     * Take this user's gate, walk the guards in the order they were handed in, stop at the first that does not
+     * say ALLOW, leave the gate, then queue the message, park it, or record the refusal. A refusal or a park gives
+     * back everything the earlier guards reserved. This runs at submit, and AGAIN when a parked message wakes up,
+     * because the answer can change by morning: the user may have muted it, the daily cap belongs to the day it is
+     * sent, and a client's retry of the same key must still meet the claim.
+     */
+    private void admit(DeliveryRecord record, Recipient to) {
+        if (record.state().terminal()) return;                                // cancelled while it was parked
+        boolean wakingUp = record.state() == DeliveryState.DEFERRED;         // accepted earlier, so never drop it quietly
+        Notification n = record.notification();
+        long now = clock.nowMs();
+        UserGate gate = gates.computeIfAbsent(n.userId(), k -> new UserGate());
+        List<DeliveryGuard> reserved = new ArrayList<>(guards.size());
+        Verdict verdict = Verdict.ALLOW;
+        String deniedBy = "";
+        gate.lock.lock();
+        try {
+            gate.lastUsedMs = now;
+            for (DeliveryGuard g : guards) {
+                Verdict v = g.check(n, to, now);
+                if (v.kind() != Verdict.Kind.ALLOW) { verdict = v; deniedBy = g.name(); break; }
+                reserved.add(g);
+            }
+            if (verdict.kind() != Verdict.Kind.ALLOW) undoAll(reserved, n, to);   // refused or parked: keep nothing
+        } finally { gate.lock.unlock(); }
+
+        if (verdict.kind() == Verdict.Kind.SUPPRESS) {
+            record.moveTo(0, DeliveryState.SUPPRESSED, deniedBy + ": " + verdict.reason());
+        } else if (verdict.kind() == Verdict.Kind.DEFER) {
+            record.moveTo(1, DeliveryState.DEFERRED, deniedBy + ": " + verdict.reason());
+            later(() -> admit(record, directory.lookup(n.userId())), Math.max(0, verdict.untilMs() - now));
+        } else if (!offerNow(record, 1)) {                                    // the queue is full: back-pressure
+            gate.lock.lock();
+            try { undoAll(reserved, n, to); } finally { gate.lock.unlock(); }
+            if (wakingUp) record.moveTo(1, DeliveryState.FAILED_FINAL, "queue full when it woke up");   // a dead letter
+            else record.moveTo(0, DeliveryState.SUPPRESSED, "back-pressure: queue full at " + queueCapacity);
+        }
+    }
+
+    /** Where a notification got to. O(1): one hash lookup, no lock, no scan of anything. */
+    DeliveryState statusOf(String notificationId) {
+        DeliveryRecord r = ledger.get(notificationId);
+        return r == null ? null : r.state();
+    }
+    /** The whole record, for a support screen: state, attempt and the reason in plain words. */
+    DeliveryRecord recordOf(String notificationId) { return ledger.get(notificationId); }
+    /** Everything one user was sent or refused, oldest first, with the reason on each: the per-user log. */
+    List<DeliveryRecord> historyOf(String userId) {
+        Queue<DeliveryRecord> log = byUser.get(userId);
+        return log == null ? List.of() : List.copyOf(log);
+    }
+
+    /**
+     * A receipt from the provider, arriving on a webhook thread long after the send. It is applied by rank, so a
+     * receipt for attempt 1 that turns up while attempt 2 is in flight is dropped, and a DELIVERED outranks every
+     * other terminal state -- if the handset got it, it got it, whatever we had already written down.
+     */
+    boolean onReceipt(String notificationId, int attempt, DeliveryState state, String detail) {
+        DeliveryRecord r = ledger.get(notificationId);
+        return r != null && r.moveTo(attempt, state, detail);
+    }
+    /** Stop a queued message. False means it was already sending, sent or finished -- and we do not lie about that. */
+    boolean cancel(String notificationId) {
+        DeliveryRecord r = ledger.get(notificationId);
+        return r != null && r.cancelIfNotStarted();
+    }
+    /** Everything that ran out of retries or was refused outright by the provider. A human drains this. */
+    List<DeliveryRecord> deadLetters() {
+        List<DeliveryRecord> out = new ArrayList<>();
+        for (DeliveryRecord r : ledger.values()) if (r.state() == DeliveryState.FAILED_FINAL) out.add(r);
+        return out;
+    }
+    /** Every record, newest last. For the demo's summary and for tests. */
+    List<DeliveryRecord> all() {
+        List<DeliveryRecord> out = new ArrayList<>(ledger.values());
+        out.sort(Comparator.comparingLong(r -> r.notification().seq()));
+        return out;
+    }
+    /** Wait until the queue is empty and nothing is parked on the timer. Tests only; production never asks this. */
+    boolean awaitIdle(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (outstanding.get() == 0 && queue.isEmpty()) return true;
+            Thread.sleep(1);
+        }
+        return outstanding.get() == 0 && queue.isEmpty();
+    }
+    int queueDepth() { return depth.get(); }
+
+    // ---- the delivery half -------------------------------------------------------------------------------
+    private void workerLoop() {
+        while (running) {
+            DeliveryRecord record;
+            try { record = queue.poll(20, TimeUnit.MILLISECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            if (record == null) continue;
+            depth.decrementAndGet();
+            try { deliver(record); }
+            catch (RuntimeException e) { record.moveTo(record.attempt(), DeliveryState.FAILED_FINAL, "engine error: " + e); }
+            finally { outstanding.decrementAndGet(); }
+        }
+    }
+
+    /**
+     * One attempt. The deadline is checked BEFORE the gateway is called, so an expired message costs nothing;
+     * moving to SENDING is how a worker takes ownership, and it fails if a cancel or a receipt got there first;
+     * the gateway call itself happens with no lock and no gate held, because it is the only slow thing here.
+     */
+    private void deliver(DeliveryRecord record) {
+        Notification n = record.notification();
+        int attempt = record.attempt();
+        if (clock.nowMs() > n.deadlineMs()) { record.moveTo(attempt, DeliveryState.EXPIRED, "deadline passed before the send"); return; }
+        if (!record.moveTo(attempt, DeliveryState.SENDING, "attempt " + attempt)) return;   // cancelled, or already finished
+        Sender sender = senders.get(n.channel());
+        if (sender == null) { record.moveTo(attempt, DeliveryState.FAILED_FINAL, "no sender registered for " + n.channel()); return; }
+
+        SendResult result;
+        try { result = sender.send(directory.lookup(n.userId()), record.message(), n.idempotencyKey()); }
+        catch (RuntimeException e) { result = SendResult.unknown("the adapter threw: " + e); }   // a broken adapter cannot kill a worker
+
+        switch (result.outcome()) {
+            case SENT -> record.moveTo(attempt, DeliveryState.SENT, result.detail());
+            case PERMANENT -> record.moveTo(attempt, DeliveryState.FAILED_FINAL, result.detail());
+            case UNKNOWN -> {
+                record.moveTo(attempt, DeliveryState.UNKNOWN, result.detail());
+                retryOrGiveUp(record, attempt, result.detail());
+            }
+            case TRANSIENT -> retryOrGiveUp(record, attempt, result.detail());
+        }
+    }
+
+    private void retryOrGiveUp(DeliveryRecord record, int attempt, String why) {
+        if (!retryPolicy.shouldRetry(attempt)) {
+            record.moveTo(attempt, DeliveryState.FAILED_FINAL, "gave up after " + attempt + " attempts: " + why);
+            return;
+        }
+        long delay = retryPolicy.backoffMs(attempt);
+        int next = attempt + 1;
+        record.moveTo(attempt, DeliveryState.RETRY_SCHEDULED, "attempt " + next + " in " + delay + " ms: " + why);
+        later(() -> { if (!offerNow(record, next)) record.moveTo(next, DeliveryState.FAILED_FINAL, "queue full when the retry came due"); }, delay);
+    }
+
+    /** Run `task` on the scheduler after `delayMs`, never on a sleeping worker; it counts as work owed until it has run. */
+    private void later(Runnable task, long delayMs) {
+        outstanding.incrementAndGet();
+        scheduler.schedule(() -> { try { task.run(); } finally { outstanding.decrementAndGet(); } }, delayMs);
+    }
+    /** Put the record in the queue for `attempt`. False only when the queue is full; a cancelled record is not queued. */
+    private boolean offerNow(DeliveryRecord record, int attempt) {
+        if (depth.incrementAndGet() > queueCapacity) { depth.decrementAndGet(); return false; }
+        if (!record.moveTo(attempt, DeliveryState.QUEUED, "queued for attempt " + attempt)) { depth.decrementAndGet(); return true; }
+        outstanding.incrementAndGet();
+        queue.offer(record);
+        return true;
+    }
+    private void undoAll(List<DeliveryGuard> reserved, Notification n, Recipient to) {
+        for (int i = reserved.size() - 1; i >= 0; i--) reserved.get(i).undo(n, to);
+    }
+}
+
+/** The production scheduler: one shared timer thread, so ten thousand pending retries cost ten thousand objects. */
+final class TimerScheduler implements Scheduler {
+    private final ScheduledExecutorService timer =
+            Executors.newSingleThreadScheduledExecutor(r -> { Thread t = new Thread(r, "notify-timer"); t.setDaemon(true); return t; });
+    public void schedule(Runnable task, long delayMs) { timer.schedule(task, delayMs, TimeUnit.MILLISECONDS); }
+    void close() { timer.shutdownNow(); }
+}
+
+/**
+ * Proof it works: a priority ordering, an opt-out, quiet hours at 03:00 in India, a gateway that times out twice,
+ * a malformed address, and fifty threads submitting the same idempotency key at the same instant with exactly one
+ * message reaching the human.
+ */
+public class Main {
+    static final ZoneId IST = ZoneId.of("Asia/Kolkata");                // UTC+5:30
+
+    public static void main(String[] args) throws Exception {
+        AtomicLong now = new AtomicLong(atLocalHour(11));                // 11:00 in India
+        Clock clock = now::get;                                          // injected: the demo moves time by hand
+
+        InMemoryTemplates templates = new InMemoryTemplates()
+                .register("otp", Channel.SMS, new MessageTemplate("OTP", "{{code}} is your code, valid {{mins}} min"))
+                .register("promo", Channel.PUSH, new MessageTemplate("{{pct}}% off today", "Offer ends midnight"))
+                .register("receipt", Channel.EMAIL, new MessageTemplate("Receipt #{{txn}}", "You paid Rs {{amt}}"))
+                .register("fraud", Channel.SMS, new MessageTemplate("ALERT", "A card was used in {{city}}"));
+        InMemoryDirectory people = new InMemoryDirectory()
+                .add(new Recipient("u1", "ravi@example.com", "+91900000001", "tok-1", IST))
+                .add(new Recipient("u2", "meera@example.com", "+91900000002", "tok-2", IST))
+                .add(new Recipient("u3", "no-at-sign", "+91900000003", "tok-3", IST));   // a broken email address
+        InMemoryPreferences prefs = new InMemoryPreferences().mute("u2", Channel.PUSH, "marketing");
+        InMemoryDedupeStore dedupe = new InMemoryDedupeStore();
+        DailyCapGuard cap = new DailyCapGuard(20);
+
+        EmailSender email = new EmailSender();
+        FlakySmsSender sms = new FlakySmsSender(2, true);             // times out twice, then accepts
+        PushSender push = new PushSender();
+        Metrics metrics = new Metrics();
+
+        NotificationService service = new NotificationService(1, 10_000);   // one worker, so the trace is in order
+        service.configure(templates, people, new ExponentialBackoff(4, 20, 1_000),
+                List.of(new PreferenceGuard(prefs), new QuietHoursGuard(21, 8, Set.of(Channel.SMS, Channel.PUSH)),
+                        cap, new DedupeGuard(dedupe, 60_000)),
+                Map.of(Channel.EMAIL, email, Channel.SMS, sms, Channel.PUSH, push),
+                clock, new TimerScheduler());
+        ConsoleAudit audit = new ConsoleAudit();
+        service.addListener(audit);
+        service.addListener(metrics);
+
+        System.out.println("act 1: three submitted before the workers start -- LOW first, CRITICAL last");
+        DeliveryRecord promo = service.submit(Notification.to("u1", Channel.PUSH, "promo")
+                .priority(Priority.LOW).category("marketing").params(Map.of("pct", "40")).build());
+        DeliveryRecord receipt = service.submit(Notification.to("u1", Channel.EMAIL, "receipt")
+                .priority(Priority.NORMAL).category("transactional").params(Map.of("txn", "8812", "amt", "499")).build());
+        DeliveryRecord otp = service.submit(Notification.to("u1", Channel.SMS, "otp")
+                .priority(Priority.CRITICAL).category("otp").dedupeKey("login-77").params(Map.of("code", "4821", "mins", "5")).build());
+        System.out.println("    queue depth " + service.queueDepth() + "; starting one worker");
+        service.start();
+        service.awaitIdle(4_000);
+        System.out.println("    otp " + otp.state() + " after " + otp.attempt() + " attempts (the gateway timed out twice)");
+        System.out.println("    promo " + promo.state() + ", receipt " + receipt.state());
+
+        System.out.println("act 2: u2 muted marketing push");
+        DeliveryRecord muted = service.submit(Notification.to("u2", Channel.PUSH, "promo")
+                .priority(Priority.LOW).category("marketing").params(Map.of("pct", "40")).build());
+        System.out.println("    " + muted);
+
+        System.out.println("act 3: 03:00 in India -- a promo waits, a fraud alert does not");
+        now.set(atLocalHour(3));
+        DeliveryRecord night = service.submit(Notification.to("u1", Channel.PUSH, "promo")
+                .priority(Priority.NORMAL).category("marketing").params(Map.of("pct", "10")).build());
+        DeliveryRecord fraud = service.submit(Notification.to("u1", Channel.SMS, "fraud")
+                .priority(Priority.CRITICAL).category("security").params(Map.of("city", "Dubai")).build());
+        waitFor(fraud, DeliveryState.SENT);          // not awaitIdle: the promo stays parked until 08:00
+        System.out.println("    promo at 3am: " + night.state() + " -- " + night.detail());
+        System.out.println("    fraud alert:  " + fraud.state());
+
+        System.out.println("act 4: a malformed email address is permanent, not retried");
+        now.set(atLocalHour(11));                                        // back to daylight
+        DeliveryRecord broken = service.submit(Notification.to("u3", Channel.EMAIL, "receipt")
+                .params(Map.of("txn", "9", "amt", "10")).build());
+        waitFor(broken, DeliveryState.FAILED_FINAL);
+        System.out.println("    " + broken + "; dead letters: " + service.deadLetters().size()
+                + "; the SMTP call was made " + email.calls() + " times in all");
+
+        System.out.println("act 5: a delivery receipt arrives, then a stale one for attempt 1");
+        service.onReceipt(otp.notification().id(), otp.attempt(), DeliveryState.DELIVERED, "handset ack");
+        boolean stale = service.onReceipt(otp.notification().id(), 1, DeliveryState.SENT, "late receipt for attempt 1");
+        System.out.println("    otp is " + otp.state() + "; the stale receipt was applied: " + stale);
+
+        System.out.println("act 6: fifty threads submit the SAME idempotency key at the same instant (trace muted)");
+        audit.mute();
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<DeliveryRecord>> submitted = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            submitted.add(pool.submit(() -> {
+                go.await();
+                return service.submit(Notification.to("u1", Channel.PUSH, "promo")
+                        .priority(Priority.HIGH).category("transactional").dedupeKey("order-9001")
+                        .params(Map.of("pct", "0")).build());
+            }));
+        }
+        int pushesBefore = push.calls();
+        go.countDown();
+        int admitted = 0, duplicates = 0;
+        DeliveryRecord winner = null;
+        for (Future<DeliveryRecord> f : submitted) {
+            DeliveryRecord r = f.get();
+            if (r.state() == DeliveryState.SUPPRESSED && r.detail().contains("duplicate")) duplicates++;
+            else { admitted++; winner = r; }
+        }
+        pool.shutdown();
+        if (winner != null) waitFor(winner, DeliveryState.SENT);
+        int pushed = push.calls() - pushesBefore;
+        System.out.println("    admitted=" + admitted + " duplicates=" + duplicates + " gateway calls=" + pushed + " (must be 1)");
+        if (admitted != 1 || duplicates != 49 || pushed != 1) throw new AssertionError("the de-dup claim leaked");
+
+        System.out.println("u1's log: " + service.historyOf("u1").size() + " records; metrics: " + metrics);
+        service.shutdown();
+    }
+    /** An instant that is exactly `hour`:00 in India on a fixed day. Keeps the demo readable. */
+    private static long atLocalHour(int hour) {
+        return LocalDate.of(2026, 9, 26).atTime(hour, 0).atZone(IST).toInstant().toEpochMilli();
+    }
+    /** Wait up to four seconds for one record to reach `state`. The demo waits for one message, not for the engine. */
+    private static void waitFor(DeliveryRecord r, DeliveryState state) throws InterruptedException {
+        long end = System.currentTimeMillis() + 4_000;
+        while (r.state() != state && System.currentTimeMillis() < end) Thread.sleep(1);
+    }
+}

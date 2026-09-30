@@ -1,0 +1,63 @@
+import java.util.*;
+import java.time.*;
+
+// targeted failure tests: each one reproduces a bug a reviewer found, and must now pass
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    public static void main(String[] args) throws Exception {
+        ParkingLot lot = ParkingLot.getInstance();
+        lot.configure(new FlatHourlyPricing(), new SmallestFitStrategy());
+        long[] now = { Instant.parse("2026-09-05T10:00:00Z").toEpochMilli() };   // a Saturday, 10:00 UTC
+        lot.setClock(() -> now[0]);
+        ParkingFloor f1 = new ParkingFloor("F1");
+        f1.addSpot(new ParkingSpot("F1-C1", SpotType.COMPACT));
+        lot.addFloor(f1);
+
+        // 1. payment fails at exit: nothing changes, the driver retries and succeeds
+        lot.park(new Car("AAA"));
+        check(lot.isFullFor(VehicleType.CAR), "spot taken after park");
+        try { lot.unpark("AAA", a -> false); check(false, "failed payment must throw"); } catch (IllegalStateException e) { check(true, "failed payment throws: " + e.getMessage()); }
+        check(lot.isFullFor(VehicleType.CAR), "after failed payment the spot is still held");
+        double fee = lot.unpark("AAA", new CashPayment());
+        check(fee == 20.0, "driver retries with cash and pays " + fee);
+        check(!lot.isFullFor(VehicleType.CAR), "spot recovered after successful retry");
+
+        // 2. an observer that throws must not corrupt parking
+        f1.addObserver((id, free) -> { throw new RuntimeException("board is down"); });
+        Ticket t = lot.park(new Car("BBB"));
+        check(t != null && lot.isFullFor(VehicleType.CAR), "park succeeds although the board threw");
+        lot.unpark("BBB", new CashPayment());
+        check(!lot.isFullFor(VehicleType.CAR), "unpark succeeds although the board threw; spot is back");
+
+        // 3. lost ticket, payment fails: still parked, can retry
+        lot.park(new Car("CCC"));
+        try { lot.reportLost("CCC", a -> false, 200); check(false, "failed cap payment must throw"); } catch (IllegalStateException e) { check(true, "lost-ticket payment failure throws"); }
+        check(lot.isFullFor(VehicleType.CAR), "after failed cap payment the spot is still held");
+        check(lot.reportLost("CCC", new CashPayment(), 200) == 200.0, "lost-ticket retry pays the cap");
+        check(!lot.isFullFor(VehicleType.CAR), "spot freed exactly once");
+
+        // 4. double checkout: the second call must be rejected, not free the spot twice
+        lot.park(new Car("DDD"));
+        lot.unpark("DDD", new CashPayment());
+        try { lot.unpark("DDD", new CashPayment()); check(false, "second checkout must throw"); } catch (NoSuchElementException e) { check(true, "second checkout rejected"); }
+        check(lot.availability().get(SpotType.COMPACT) == 1, "one physical spot, one free entry (not two)");
+
+        // 5. billing: any started hour is billed; 60 min + 1 ms = 2 hours
+        lot.park(new Car("EEE"));
+        now[0] += 3600_000L + 1;
+        check(lot.unpark("EEE", new CashPayment()) == 40.0, "60 min + 1 ms on compact bills 2 hours = 40");
+
+        // 6. weekend surge uses the injected clock's time, not the wall clock
+        lot.configure(new WeekendSurgePricing(new FlatHourlyPricing(), ZoneId.of("UTC")), new SmallestFitStrategy());
+        lot.park(new Car("FFF"));
+        check(lot.unpark("FFF", new CashPayment()) == 30.0, "Saturday by the injected clock: 20 x 1.5 = 30");
+
+        // 7. occupy() with a non-head spot is a programming error, not a slow path
+        try { f1.occupy(new ParkingSpot("ghost", SpotType.COMPACT)); check(false, "must throw"); } catch (IllegalStateException e) { check(true, "occupy() refuses a non-head spot"); }
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

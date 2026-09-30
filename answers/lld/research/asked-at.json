@@ -1,0 +1,553 @@
+{
+ "amazon-locker": {
+  "reports": 7,
+  "companies": [
+   "Amazon",
+   "Zeta",
+   "Google"
+  ]
+ },
+ "atm": {
+  "reports": 1,
+  "companies": [
+   "Uber"
+  ]
+ },
+ "autocomplete": {
+  "reports": 5,
+  "companies": [
+   "Microsoft",
+   "TikTok",
+   "Salesforce",
+   "Adobe",
+   "Pinterest"
+  ]
+ },
+ "banking": {
+  "reports": 2,
+  "companies": [
+   "Agoda",
+   "Dropbox",
+   "Airbnb",
+   "Ramp",
+   "Coinbase",
+   "Stripe"
+  ]
+ },
+ "bookmyshow": {
+  "reports": 10,
+  "companies": [
+   "Flipkart",
+   "Blinkit",
+   "Tekion",
+   "Urban Company",
+   "GoTo",
+   "Amazon",
+   "Oracle",
+   "Adobe"
+  ]
+ },
+ "cache-eviction": {
+  "reports": 2,
+  "companies": [
+   "Uber",
+   "Coinbase"
+  ]
+ },
+ "car-rental": {
+  "reports": 7,
+  "companies": [
+   "Uber",
+   "Adobe",
+   "super.money",
+   "PhonePe",
+   "Salesforce"
+  ]
+ },
+ "card-game": {
+  "reports": 4,
+  "companies": [
+   "Amazon",
+   "Bloomberg",
+   "Pinterest",
+   "Rippling"
+  ]
+ },
+ "chess": {
+  "reports": 6,
+  "companies": [
+   "Microsoft",
+   "Amazon",
+   "Walmart"
+  ]
+ },
+ "circuit-breaker": {
+  "reports": 6,
+  "companies": [
+   "Wise",
+   "Blinkit",
+   "Uber",
+   "Databricks"
+  ]
+ },
+ "digital-wallet": {
+  "reports": 3,
+  "companies": [
+   "PhonePe",
+   "Walmart"
+  ]
+ },
+ "elevator": {
+  "reports": 9,
+  "companies": [
+   "Microsoft",
+   "Tekion",
+   "Agoda",
+   "Adobe",
+   "Oracle",
+   "Salesforce",
+   "Pinterest"
+  ]
+ },
+ "file-system": {
+  "reports": 8,
+  "companies": [
+   "Uber",
+   "Coinbase",
+   "Freshworks",
+   "Walmart",
+   "Snowflake",
+   "Airbnb"
+  ]
+ },
+ "file-tools": {
+  "reports": 14,
+  "companies": [
+   "Atlassian",
+   "Amazon",
+   "Rubrik",
+   "Microsoft",
+   "Confluent",
+   "Datadog"
+  ]
+ },
+ "food-delivery": {
+  "reports": 8,
+  "companies": [
+   "Walmart",
+   "Flipkart",
+   "Amazon",
+   "Uber"
+  ]
+ },
+ "inmem-db": {
+  "reports": 20,
+  "companies": [
+   "Rippling",
+   "Coinbase",
+   "Razorpay",
+   "Gojek",
+   "Postman",
+   "Media.net",
+   "Meta",
+   "Airbnb"
+  ]
+ },
+ "inventory-orders": {
+  "reports": 15,
+  "companies": [
+   "PhonePe",
+   "Meesho",
+   "Harness",
+   "Licious",
+   "Walmart",
+   "Swiggy",
+   "Cars24",
+   "Amazon"
+  ]
+ },
+ "job-scheduler": {
+  "reports": 18,
+  "companies": [
+   "Uber",
+   "Oracle",
+   "Swiggy",
+   "MPL",
+   "Media.net",
+   "Harness",
+   "Arcesium",
+   "LinkedIn"
+  ]
+ },
+ "leaderboard": {
+  "reports": 33,
+  "companies": [
+   "Atlassian",
+   "Rippling",
+   "Microsoft",
+   "PhonePe",
+   "Games24x7",
+   "Goldman Sachs",
+   "Groww",
+   "Gojek"
+  ]
+ },
+ "library": {
+  "reports": 10,
+  "companies": [
+   "Walmart",
+   "Flipkart",
+   "Zepto",
+   "Slice",
+   "Licious",
+   "Microsoft",
+   "Bloomberg"
+  ]
+ },
+ "logger": {
+  "reports": 9,
+  "companies": [
+   "Amazon",
+   "Razorpay",
+   "ThoughtSpot",
+   "Salesforce",
+   "Microsoft",
+   "Adobe",
+   "Google"
+  ]
+ },
+ "lru": {
+  "reports": 16,
+  "companies": [
+   "ThoughtSpot",
+   "LinkedIn",
+   "Confluent",
+   "MakeMyTrip",
+   "Freshworks",
+   "Cleartrip",
+   "Amazon",
+   "Google"
+  ]
+ },
+ "meeting-rooms": {
+  "reports": 22,
+  "companies": [
+   "Flipkart",
+   "Uber",
+   "PhonePe",
+   "Amazon",
+   "Cleartrip",
+   "ThoughtSpot",
+   "Salesforce",
+   "Microsoft"
+  ]
+ },
+ "mt-blocking-queue": {
+  "reports": 3,
+  "companies": [
+   "LinkedIn",
+   "Rubrik"
+  ]
+ },
+ "mt-dining": {
+  "reports": 0,
+  "companies": []
+ },
+ "mt-print-series": {
+  "reports": 4,
+  "companies": [
+   "Walmart",
+   "Adobe",
+   "Microsoft",
+   "Apple"
+  ]
+ },
+ "mt-producer-consumer": {
+  "reports": 5,
+  "companies": [
+   "Intuit",
+   "Adobe",
+   "Rubrik",
+   "Apple"
+  ]
+ },
+ "mt-rwlock": {
+  "reports": 2,
+  "companies": [
+   "Rubrik",
+   "MongoDB"
+  ]
+ },
+ "mt-striped-map": {
+  "reports": 4,
+  "companies": [
+   "Walmart",
+   "Adobe",
+   "Google",
+   "Apple"
+  ]
+ },
+ "mt-thread-pool": {
+  "reports": 5,
+  "companies": [
+   "Walmart",
+   "Uber",
+   "Rubrik",
+   "Databricks"
+  ]
+ },
+ "mt-ttl-cache": {
+  "reports": 5,
+  "companies": [
+   "Uber",
+   "Confluent",
+   "Netflix",
+   "Oracle",
+   "Microsoft",
+   "Walmart"
+  ]
+ },
+ "mt-web-crawler": {
+  "reports": 2,
+  "companies": [
+   "Dropbox",
+   "MongoDB",
+   "Snowflake",
+   "Databricks"
+  ]
+ },
+ "notification-lld": {
+  "reports": 10,
+  "companies": [
+   "Amazon",
+   "Swiggy",
+   "Blinkit",
+   "Ola",
+   "Cleartrip",
+   "PhonePe",
+   "Meesho",
+   "Microsoft"
+  ]
+ },
+ "order-book": {
+  "reports": 5,
+  "companies": [
+   "Groww",
+   "Hotstar",
+   "Meesho",
+   "PhonePe",
+   "Uber"
+  ]
+ },
+ "parking-lot": {
+  "reports": 26,
+  "companies": [
+   "Uber",
+   "Microsoft",
+   "Swiggy",
+   "Amazon",
+   "Walmart",
+   "Salesforce",
+   "Flipkart",
+   "Nykaa"
+  ]
+ },
+ "payment-gateway": {
+  "reports": 2,
+  "companies": [
+   "PhonePe"
+  ]
+ },
+ "pubsub": {
+  "reports": 13,
+  "companies": [
+   "Uber",
+   "Razorpay",
+   "Salesforce",
+   "Dream11",
+   "ThoughtSpot",
+   "Amazon",
+   "Microsoft"
+  ]
+ },
+ "rate-limiter": {
+  "reports": 23,
+  "companies": [
+   "Atlassian",
+   "Swiggy",
+   "Postman",
+   "Freshworks",
+   "Microsoft",
+   "Games24x7",
+   "Chargebee",
+   "Uber"
+  ]
+ },
+ "ride-sharing": {
+  "reports": 11,
+  "companies": [
+   "Salesforce",
+   "Uber",
+   "Razorpay",
+   "Nykaa",
+   "Zepto",
+   "Arcesium",
+   "Swiggy",
+   "Paytm"
+  ]
+ },
+ "rule-engine": {
+  "reports": 4,
+  "companies": [
+   "Rippling",
+   "Groww",
+   "Stripe",
+   "Ramp"
+  ]
+ },
+ "search-engine": {
+  "reports": 4,
+  "companies": [
+   "Razorpay",
+   "Microsoft"
+  ]
+ },
+ "snake-game": {
+  "reports": 10,
+  "companies": [
+   "Atlassian",
+   "Microsoft",
+   "Zomato"
+  ]
+ },
+ "snake-ladder": {
+  "reports": 8,
+  "companies": [
+   "Microsoft",
+   "PhonePe",
+   "Swiggy",
+   "Tekion",
+   "Salesforce",
+   "Walmart"
+  ]
+ },
+ "social-feed": {
+  "reports": 6,
+  "companies": [
+   "Flipkart",
+   "Gojek",
+   "PhonePe",
+   "Salesforce",
+   "Postman"
+  ]
+ },
+ "splitwise": {
+  "reports": 18,
+  "companies": [
+   "Amazon",
+   "Groww",
+   "Swiggy",
+   "Razorpay",
+   "MakeMyTrip",
+   "ThoughtSpot",
+   "ShareChat",
+   "Licious"
+  ]
+ },
+ "spreadsheet": {
+  "reports": 7,
+  "companies": [
+   "Rippling"
+  ]
+ },
+ "stackoverflow": {
+  "reports": 7,
+  "companies": [
+   "Flipkart",
+   "Rippling",
+   "DE Shaw",
+   "Amazon"
+  ]
+ },
+ "stock-broker": {
+  "reports": 5,
+  "companies": [
+   "Flipkart",
+   "MakeMyTrip",
+   "Amazon",
+   "Uber",
+   "Tekion"
+  ]
+ },
+ "task-tracker": {
+  "reports": 4,
+  "companies": [
+   "Flipkart",
+   "Meesho",
+   "PhonePe",
+   "Amazon"
+  ]
+ },
+ "text-editor": {
+  "reports": 5,
+  "companies": [
+   "Uber",
+   "Microsoft",
+   "Amazon",
+   "Coinbase",
+   "Netflix"
+  ]
+ },
+ "tic-tac-toe": {
+  "reports": 4,
+  "companies": [
+   "Microsoft",
+   "Walmart",
+   "Databricks",
+   "Salesforce"
+  ]
+ },
+ "train-booking": {
+  "reports": 8,
+  "companies": [
+   "Zepto",
+   "Swiggy",
+   "Walmart",
+   "InMobi",
+   "Navi",
+   "MakeMyTrip",
+   "Cleartrip",
+   "Flipkart"
+  ]
+ },
+ "url-shortener-lld": {
+  "reports": 5,
+  "companies": [
+   "Postman",
+   "Flipkart",
+   "Amazon",
+   "MakeMyTrip"
+  ]
+ },
+ "vending": {
+  "reports": 6,
+  "companies": [
+   "Amazon",
+   "Swiggy",
+   "Apple"
+  ]
+ },
+ "versioned-kv": {
+  "reports": 4,
+  "companies": [
+   "Snowflake",
+   "Microsoft",
+   "Confluent",
+   "Google",
+   "Oracle",
+   "Lyft",
+   "Ramp",
+   "Meta"
+  ]
+ }
+}

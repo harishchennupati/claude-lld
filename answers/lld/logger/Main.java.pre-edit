@@ -1,0 +1,877 @@
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+
+/**
+ * Severity, as an ordered ladder. The number is the whole gate: a switched-off call is one volatile read and
+ * one integer compare, with no event allocated and no string built. OFF is the sentinel nothing can reach.
+ */
+enum LogLevel {
+    TRACE(10), DEBUG(20), INFO(30), WARN(40), ERROR(50), FATAL(60), OFF(Integer.MAX_VALUE);
+
+    /** How loud this level is. Compared, never switched on. */
+    final int severity;
+
+    LogLevel(int severity) { this.severity = severity; }
+
+    /** True when this level is at least as loud as the bar it is being measured against. */
+    boolean atLeast(LogLevel bar) { return severity >= bar.severity; }
+}
+
+/** Where time comes from. Injected, so a test can stamp an event with any instant it likes. */
+interface Clock { long nowMs(); }
+
+/**
+ * The per-thread diagnostic context: request id, user id, tenant. Held in a ThreadLocal and copied into every
+ * event at creation, because with an async sink the thread that writes the line is not the thread that made it.
+ */
+final class Mdc {
+    private static final ThreadLocal<Map<String, String>> CTX = ThreadLocal.withInitial(LinkedHashMap::new);
+
+    private Mdc() {}
+
+    /** Put one key on this thread's context. It rides on every event this thread logs from now on. */
+    static void put(String key, String value) { CTX.get().put(key, value); }
+
+    /** Take one key off this thread's context. */
+    static void remove(String key) { CTX.get().remove(key); }
+
+    /** Empty this thread's context. A pooled thread that forgets this leaks its ids to the next request. */
+    static void clear() { CTX.get().clear(); }
+
+    /** An unmodifiable copy taken at call time. The live map is never handed to another thread. */
+    static Map<String, String> snapshot() {
+        Map<String, String> m = CTX.get();
+        return m.isEmpty() ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(m));
+    }
+}
+
+/**
+ * One thing that happened, frozen. Immutable on purpose: an async sink writes it on a different thread, and
+ * anything mutable handed to a worker tears under load. The context map is already a snapshot.
+ */
+record LogEvent(long tsMs, LogLevel level, String loggerName, String threadName,
+                String message, Throwable error, Map<String, String> context) {}
+
+/** Turns one event into the characters a sink will write. Pure CPU, so it always runs outside the sink's lock. */
+interface LogFormatter {
+    /** The whole line, with no trailing newline: the sink decides how lines end. */
+    String format(LogEvent e);
+}
+
+/** A human-readable line for a terminal or a file: time, level, thread, logger, message, context, throwable. */
+final class TextFormatter implements LogFormatter {
+    /** Immutable and thread-safe, unlike SimpleDateFormat, which corrupts timestamps under exactly the load you need them. */
+    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
+
+    /** Builds the line. Never touches shared state, so any number of threads may be inside it at once. */
+    public String format(LogEvent e) {
+        StringBuilder sb = new StringBuilder(96);
+        sb.append(TS.format(Instant.ofEpochMilli(e.tsMs()))).append(' ')
+          .append(pad(e.level().name())).append(" [").append(e.threadName()).append("] ")
+          .append(e.loggerName()).append(" - ").append(e.message());
+        if (!e.context().isEmpty()) sb.append(' ').append(e.context());
+        if (e.error() != null) sb.append(" | ").append(e.error().getClass().getName()).append(": ").append(e.error().getMessage());
+        return sb.toString();
+    }
+
+    /** Level names padded to five characters so the columns line up in a terminal. */
+    private static String pad(String s) { return s.length() >= 5 ? s : s + "     ".substring(s.length()); }
+}
+
+/** The same event as one JSON object, for a shipper that wants fields rather than a sentence. */
+final class JsonFormatter implements LogFormatter {
+    /** One flat object per line. Newline-delimited JSON is what every collector on earth already parses. */
+    public String format(LogEvent e) {
+        StringBuilder sb = new StringBuilder(128);
+        sb.append("{\"ts\":").append(e.tsMs())
+          .append(",\"level\":\"").append(e.level().name())
+          .append("\",\"logger\":\"").append(esc(e.loggerName()))
+          .append("\",\"thread\":\"").append(esc(e.threadName()))
+          .append("\",\"msg\":\"").append(esc(e.message())).append('"');
+        if (e.error() != null) sb.append(",\"error\":\"").append(esc(e.error().toString())).append('"');
+        for (Map.Entry<String, String> kv : e.context().entrySet())
+            sb.append(",\"").append(esc(kv.getKey())).append("\":\"").append(esc(kv.getValue())).append('"');
+        return sb.append('}').toString();
+    }
+
+    /** The four escapes JSON needs for the strings a log line actually contains. */
+    static String esc(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+    }
+}
+
+/** How one filter voted. Three values, because ACCEPT lets an allow-list short-circuit a later deny-list. */
+enum FilterDecision { ACCEPT, DENY, NEUTRAL }
+
+/** A policy that inspects an event and votes on it. Orthogonal to level: a health-check line is valid INFO. */
+interface LogFilter {
+    /** Force-keep, force-drop, or abstain. The first opinionated vote on the path wins. */
+    FilterDecision decide(LogEvent e);
+}
+
+/** Drops any event whose message contains a phrase. The "stop logging health checks" filter. */
+final class DenyMessageFilter implements LogFilter {
+    private final String phrase;
+
+    /** @param phrase the substring that makes a line uninteresting */
+    DenyMessageFilter(String phrase) { this.phrase = phrase; }
+
+    /** DENY on a match, NEUTRAL otherwise, so it never forces anything to be kept. */
+    public FilterDecision decide(LogEvent e) {
+        return e.message() != null && e.message().contains(phrase) ? FilterDecision.DENY : FilterDecision.NEUTRAL;
+    }
+}
+
+/** Somewhere an event can go. Four methods, so a console sink is not forced to know about queues or rotation. */
+interface LogAppender {
+    /** What this sink is called, for metrics and for the framework's own error channel. */
+    String name();
+
+    /** Take one event. Must never throw into the caller: a log line may not fail a payment. */
+    void append(LogEvent e);
+
+    /** Open the handle or spawn the worker. Idempotent: a double-wired config must not create two of anything. */
+    void start();
+
+    /** Flush and release the handle. Everything already accepted must be written first. */
+    void close();
+}
+
+/**
+ * The skeleton every real sink repeats: check my own threshold, format outside the lock, take the lock, write
+ * one line, never throw. append() is final so no subclass can forget the lock or the never-throw rule; the
+ * only hole to fill is write(), which runs with the lock already held.
+ */
+abstract class AbstractAppender implements LogAppender {
+    private final String name;
+    private volatile LogFormatter formatter;
+    private volatile LogLevel threshold;
+    /** One lock per sink, guarding the handle. Not static: two files never wait for each other. */
+    protected final ReentrantLock lock = new ReentrantLock();
+    private final AtomicBoolean started = new AtomicBoolean(false);
+
+    /** @param name the sink's id; @param formatter handed in, never built here; @param threshold what this destination can afford */
+    AbstractAppender(String name, LogFormatter formatter, LogLevel threshold) {
+        this.name = name; this.formatter = formatter; this.threshold = threshold;
+    }
+
+    public final String name() { return name; }
+
+    /** The sink's own bar, separate from the logger's level: the file keeps DEBUG, the pager only takes ERROR. */
+    final void setThreshold(LogLevel t) { threshold = t; }
+
+    /** Swap the layout at runtime; text today, JSON tomorrow, and nothing else moves. */
+    final void setFormatter(LogFormatter f) { formatter = f; }
+
+    /** True once start() has run and close() has not. */
+    final boolean isStarted() { return started.get(); }
+
+    /**
+     * The hot path of a sink, in the order that matters: the sink's threshold first (free), then formatting
+     * (pure CPU, outside the lock, so any number of threads run it at once), then the lock around one write.
+     */
+    public final void append(LogEvent e) {
+        if (!started.get()) { Status.error(name + ": event before start()", null); return; }
+        if (!e.level().atLeast(threshold)) return;
+        String line;
+        try { line = formatter.format(e); }
+        catch (RuntimeException ex) { Status.error(name + ": formatter failed", ex); return; }
+        lock.lock();
+        try { write(e, line); }
+        catch (Exception ex) { Status.error(name + ": write failed", ex); }
+        finally { lock.unlock(); }
+    }
+
+    /** Move the characters. Called with the lock held, so it may touch the handle freely. */
+    protected abstract void write(LogEvent e, String line) throws Exception;
+
+    /** Open the handle. Called once, under compare-and-set. */
+    protected void onStart() throws Exception {}
+
+    /** Release the handle. Called once, with the lock held. */
+    protected void onClose() throws Exception {}
+
+    public final void start() {
+        if (!started.compareAndSet(false, true)) return;
+        try { onStart(); } catch (Exception ex) { Status.error(name + ": start failed", ex); }
+    }
+
+    public final void close() {
+        if (!started.compareAndSet(true, false)) return;
+        lock.lock();
+        try { onClose(); } catch (Exception ex) { Status.error(name + ": close failed", ex); }
+        finally { lock.unlock(); }
+    }
+}
+
+/** A sink that writes to a stream, normally the terminal. The lock is ours, so lines can never interleave. */
+final class ConsoleAppender extends AbstractAppender {
+    private final PrintStream out;
+
+    /** @param out where the characters go; injected so a test can capture them */
+    ConsoleAppender(String name, LogFormatter formatter, LogLevel threshold, PrintStream out) {
+        super(name, formatter, threshold); this.out = out;
+    }
+
+    /** One println under the lock. System.out takes a lock of its own too, which is why a busy console is slow. */
+    protected void write(LogEvent e, String line) { out.println(line); }
+}
+
+/**
+ * A sink that writes to a file through a buffer. bytesWritten is incremented only after a write returns
+ * without throwing, so the number rotation trusts is never ahead of the disk.
+ */
+class FileAppender extends AbstractAppender {
+    /** The file being written. Subclasses that rotate need it. */
+    protected final Path path;
+    /** The handle. Guarded by the sink's lock; null once closed. */
+    protected BufferedWriter writer;
+    /** Characters written since the file was opened. Guarded by the lock. */
+    protected long bytesWritten;
+    private final LogLevel flushAt;
+
+    /** @param flushAt at and above this level the line is pushed out of the buffer before the call returns */
+    FileAppender(String name, LogFormatter formatter, LogLevel threshold, Path path, LogLevel flushAt) {
+        super(name, formatter, threshold); this.path = path; this.flushAt = flushAt;
+    }
+
+    /** Text formatter, INFO, flush on ERROR: the wiring an application actually uses. */
+    FileAppender(String name, Path path) { this(name, new TextFormatter(), LogLevel.TRACE, path, LogLevel.ERROR); }
+
+    protected void onStart() throws IOException { openWriter(true); }
+
+    protected void onClose() throws IOException { closeWriter(); }
+
+    /** Open the handle and reset the byte count. Called with the lock held (or before the sink is visible). */
+    protected void openWriter(boolean append) throws IOException {
+        writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8,
+            StandardOpenOption.CREATE, append ? StandardOpenOption.APPEND : StandardOpenOption.TRUNCATE_EXISTING);
+        bytesWritten = append && Files.exists(path) ? Files.size(path) : 0;
+    }
+
+    /** Flush and drop the handle. Nulled first, so a racing write finds null and returns instead of throwing. */
+    protected void closeWriter() throws IOException {
+        BufferedWriter w = writer;
+        writer = null;
+        if (w != null) w.close();
+    }
+
+    /** One line, then the byte count, in that order: a failed write must not move the counter. */
+    protected void write(LogEvent e, String line) throws IOException {
+        BufferedWriter w = writer;
+        if (w == null) return;
+        w.write(line);
+        w.newLine();
+        if (e.level().atLeast(flushAt)) w.flush();
+        bytesWritten += line.length() + 1;
+    }
+
+    /** How many characters are in the current file. Read under the lock so it is never half-updated. */
+    long bytesWritten() { lock.lock(); try { return bytesWritten; } finally { lock.unlock(); } }
+}
+
+/**
+ * A file sink that starts a new file once the current one passes a size. The check and the swap happen inside
+ * write(), which already runs under the sink's lock, so a line is never split across two files.
+ */
+final class RollingFileAppender extends FileAppender {
+    private final long maxBytes;
+    private int rolls;
+
+    /** @param maxBytes the size at which the next line starts a new file */
+    RollingFileAppender(String name, LogFormatter formatter, LogLevel threshold, Path path, long maxBytes) {
+        super(name, formatter, threshold, path, LogLevel.ERROR); this.maxBytes = maxBytes;
+    }
+
+    /** Roll first if this line would push the file over the limit, then write it normally. */
+    protected void write(LogEvent e, String line) throws IOException {
+        if (bytesWritten > 0 && bytesWritten + line.length() + 1 > maxBytes) roll();
+        super.write(e, line);
+    }
+
+    /** Close the handle, move the file aside under a numbered name, open a fresh one. */
+    private void roll() throws IOException {
+        closeWriter();
+        rolls++;
+        Files.move(path, path.resolveSibling(path.getFileName() + "." + rolls), StandardCopyOption.REPLACE_EXISTING);
+        openWriter(false);
+    }
+
+    /** How many times this sink has started a new file. A metric, and what the failure test checks. */
+    int rolls() { lock.lock(); try { return rolls; } finally { lock.unlock(); } }
+}
+
+/** A sink that keeps the lines in memory. The demo and the tests read it instead of a file. */
+final class MemoryAppender extends AbstractAppender {
+    private final List<String> lines = new ArrayList<>();
+
+    MemoryAppender(String name, LogFormatter formatter, LogLevel threshold) { super(name, formatter, threshold); }
+
+    /** Text formatter, everything through: the shape a test wants. */
+    MemoryAppender(String name) { this(name, new TextFormatter(), LogLevel.TRACE); }
+
+    /** Called with the lock held, so a plain ArrayList is safe here and nowhere else. */
+    protected void write(LogEvent e, String line) { lines.add(line); }
+
+    /** A snapshot of what has been written, taken under the lock. */
+    List<String> lines() { lock.lock(); try { return List.copyOf(lines); } finally { lock.unlock(); } }
+}
+
+/** A sink that counts events WITHOUT a lock, to show what the lock buys. Never use this for anything real. */
+final class UnsafeCountingAppender implements LogAppender {
+    private int count;
+
+    public String name() { return "unsafe-counter"; }
+
+    /** A plain read-add-write from many threads. Two threads that read the same value lose one increment. */
+    public void append(LogEvent e) { int c = count; Thread.onSpinWait(); count = c + 1; }
+
+    public void start() {}
+
+    public void close() {}
+
+    /** Whatever survived. */
+    int count() { return count; }
+}
+
+/** The same counter done through the base class, so the increment happens under the sink's lock. */
+final class SafeCountingAppender extends AbstractAppender {
+    private long count;
+
+    SafeCountingAppender(String name) { super(name, e -> "", LogLevel.TRACE); }
+
+    /** The lock is already held here, so read-add-write is one step. */
+    protected void write(LogEvent e, String line) { count++; }
+
+    /** The exact number of events this sink accepted. */
+    long count() { lock.lock(); try { return count; } finally { lock.unlock(); } }
+}
+
+/** A sink that takes its time, so a queue in front of it visibly fills instead of staying empty. */
+final class SlowAppender extends AbstractAppender {
+    private final long millisPerEvent;
+    private final AtomicLong written = new AtomicLong();
+
+    SlowAppender(String name, long millisPerEvent) { super(name, e -> "", LogLevel.TRACE); this.millisPerEvent = millisPerEvent; }
+
+    /** Sleeps with the lock held, which is exactly what a slow disk does. */
+    protected void write(LogEvent e, String line) throws InterruptedException {
+        Thread.sleep(millisPerEvent);
+        written.incrementAndGet();
+    }
+
+    /** How many events actually reached the far side. */
+    long written() { return written.get(); }
+}
+
+/** What an async sink does when its queue is full. Named, chosen per sink, and never a framework-wide law. */
+enum OverflowPolicy {
+    /** Give up on the event that arrived and count it. Bounded memory, bounded latency, visible loss. */
+    DROP_NEWEST,
+    /** Throw away the oldest queued event to make room. Keeps the freshest picture of a storm. */
+    DISCARD_OLDEST,
+    /** Make the caller wait. The right answer for an audit sink and the wrong one for checkout. */
+    BLOCK
+}
+
+/**
+ * The decorator that takes the write off the caller's thread: it holds any other sink, puts events on a
+ * bounded queue and lets one daemon worker drain them. Bounded is the whole point -- unbounded turns a
+ * storm into an OutOfMemoryError, and blocking turns a slow disk into slow checkouts.
+ */
+final class AsyncAppender implements LogAppender {
+    /** The sentinel that ends the worker. It queues BEHIND the backlog, so close() drains in order. */
+    private static final LogEvent PILL = new LogEvent(0, LogLevel.OFF, "", "", "", null, Map.of());
+
+    private final String name;
+    private final LogAppender delegate;
+    private final BlockingQueue<LogEvent> queue;
+    private final OverflowPolicy policy;
+    private final LogLevel neverDrop;
+    private final AtomicLong dropped = new AtomicLong();
+    private final AtomicBoolean started = new AtomicBoolean(false);
+    private volatile boolean accepting;
+    private Thread worker;
+
+    /**
+     * @param delegate the sink that really writes; @param capacity the ceiling on queued events;
+     * @param policy what happens when the queue is full; @param neverDrop at and above this level the caller waits instead
+     */
+    AsyncAppender(String name, LogAppender delegate, int capacity, OverflowPolicy policy, LogLevel neverDrop) {
+        this.name = name; this.delegate = delegate; this.queue = new ArrayBlockingQueue<>(capacity);
+        this.policy = policy; this.neverDrop = neverDrop;
+    }
+
+    /** A 4096-deep queue that drops the newest and never gives up on ERROR: the sane default. */
+    AsyncAppender(String name, LogAppender delegate) { this(name, delegate, 4096, OverflowPolicy.DROP_NEWEST, LogLevel.ERROR); }
+
+    public String name() { return name; }
+
+    /**
+     * The caller's whole cost: one enqueue. If the queue is full the named policy decides, and the loss is
+     * counted rather than hidden. Nothing here can throw into the application.
+     */
+    public void append(LogEvent e) {
+        if (!accepting) { dropped.incrementAndGet(); return; }
+        if (queue.offer(e)) return;
+        try {
+            if (e.level().atLeast(neverDrop) || policy == OverflowPolicy.BLOCK) {
+                if (!queue.offer(e, 2, TimeUnit.SECONDS)) dropped.incrementAndGet();
+            } else if (policy == OverflowPolicy.DISCARD_OLDEST) {
+                if (queue.poll() != null) dropped.incrementAndGet();
+                if (!queue.offer(e)) dropped.incrementAndGet();
+            } else {
+                dropped.incrementAndGet();
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            dropped.incrementAndGet();
+        }
+    }
+
+    /** Spawn exactly one worker. compareAndSet is why a double-wired config cannot start two of them. */
+    public void start() {
+        if (!started.compareAndSet(false, true)) return;
+        delegate.start();
+        accepting = true;
+        worker = new Thread(this::drain, "log-" + name);
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /**
+     * Stop accepting, queue the pill behind whatever is already waiting, and give the worker two seconds to
+     * finish. The honest gap: a thread already past the accepting check can still lose its event; closing that
+     * needs a lock on every append, which is right for an audit sink and wrong for this one.
+     */
+    public void close() {
+        if (!started.compareAndSet(true, false)) return;
+        accepting = false;
+        try { queue.offer(PILL, 2, TimeUnit.SECONDS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        try { worker.join(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        delegate.close();
+    }
+
+    /** Events given up on: queue full, or offered after close. Exported, because invisible loss is a lie. */
+    long droppedCount() { return dropped.get(); }
+
+    /** How full the queue is right now. A metric worth a dashboard. */
+    int queueDepth() { return queue.size(); }
+
+    /**
+     * The worker: take one, sweep up whatever else is waiting, hand the batch to the delegate. Batching turns
+     * sixty-four lock acquisitions into one without changing a line of the sink underneath.
+     */
+    private void drain() {
+        List<LogEvent> batch = new ArrayList<>(64);
+        while (true) {
+            try {
+                LogEvent first = queue.take();
+                if (first == PILL) return;
+                batch.add(first);
+                queue.drainTo(batch, 63);
+                boolean pill = false;
+                for (LogEvent e : batch) {
+                    if (e == PILL) { pill = true; break; }
+                    try { delegate.append(e); } catch (RuntimeException re) { Status.error(name + ": delegate threw", re); }
+                }
+                batch.clear();
+                if (pill) return;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+}
+
+/**
+ * The framework's own error channel. A logger that reports its failures through itself is a loop, so these
+ * go straight to stderr and are counted.
+ */
+final class Status {
+    private static final AtomicLong errors = new AtomicLong();
+    private static volatile PrintStream sink = System.err;
+
+    private Status() {}
+
+    /** Report a framework failure. Called from inside catch blocks that must not rethrow. */
+    static void error(String what, Throwable t) {
+        errors.incrementAndGet();
+        sink.println("[logger] " + what + (t == null ? "" : ": " + t));
+    }
+
+    /** How many framework failures have been reported. A metric, and what a test asserts on. */
+    static long errorCount() { return errors.get(); }
+
+    /** Point the channel somewhere else, so a test can stay quiet. */
+    static void sink(PrintStream s) { sink = s; }
+
+    /** Zero the counter between tests. */
+    static void reset() { errors.set(0); }
+}
+
+/**
+ * One node in the tree, named after a package or a class. It holds its own level (null means "ask my parent"),
+ * whether it also uses its ancestors' sinks, its own sinks and its own filters. Everything hot here is a
+ * volatile field or a copy-on-write list, so a log call never takes a lock of the framework's own.
+ */
+final class Logger {
+    private final String name;
+    private final Logger parent;
+    private final LoggerContext ctx;
+    /** null means inherit. Volatile because one thread writes it at 2am and millions read it. */
+    private volatile LogLevel level;
+    /** When false, events stop here instead of also going to the ancestors' sinks. */
+    private volatile boolean additive = true;
+    private final CopyOnWriteArrayList<LogAppender> appenders = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<LogFilter> filters = new CopyOnWriteArrayList<>();
+
+    /** Built only by the context, so the parent is resolved before anybody can see this node. */
+    Logger(String name, Logger parent, LoggerContext ctx) { this.name = name; this.parent = parent; this.ctx = ctx; }
+
+    /** The dotted name this logger was asked for. */
+    String name() { return name; }
+
+    /** The node above this one, or null for ROOT. */
+    Logger parent() { return parent; }
+
+    /** This node's own level, or null when it inherits. */
+    LogLevel level() { return level; }
+
+    /** Set or clear this node's own level. Takes effect on the very next call: no restart, no lock. */
+    void setLevel(LogLevel l) { level = l; }
+
+    /** Turn the walk to the ancestors' sinks on or off for this subtree. */
+    void setAdditive(boolean a) { additive = a; }
+
+    /** Whether events from here also reach the ancestors' sinks. */
+    boolean additive() { return additive; }
+
+    /** Hand this node a sink and start it. The logger never builds one. */
+    void addAppender(LogAppender a) { a.start(); appenders.addIfAbsent(a); }
+
+    /** Take a sink off this node. It is not closed: somebody else may still be using it. */
+    void removeAppender(LogAppender a) { appenders.remove(a); }
+
+    /** This node's own sinks, as a snapshot. */
+    List<LogAppender> appenders() { return List.copyOf(appenders); }
+
+    /** Hand this node a policy that votes on events. */
+    void addFilter(LogFilter f) { filters.add(f); }
+
+    /** The first level anybody on the path up to ROOT has an opinion about. ROOT always has one, so this ends. */
+    LogLevel effectiveLevel() {
+        for (Logger l = this; l != null; l = l.parent) {
+            LogLevel own = l.level;
+            if (own != null) return own;
+        }
+        return LogLevel.INFO;
+    }
+
+    /** The gate. Three to five volatile reads and a compare, with nothing allocated. */
+    boolean isEnabled(LogLevel lv) { return lv.atLeast(effectiveLevel()); }
+
+    /** TRACE with a plain message. */
+    void trace(String m) { log(LogLevel.TRACE, m, null); }
+
+    /** DEBUG with a plain message. */
+    void debug(String m) { log(LogLevel.DEBUG, m, null); }
+
+    /** INFO with a plain message. */
+    void info(String m) { log(LogLevel.INFO, m, null); }
+
+    /** WARN with a plain message. */
+    void warn(String m) { log(LogLevel.WARN, m, null); }
+
+    /** ERROR with a plain message. */
+    void error(String m) { log(LogLevel.ERROR, m, null); }
+
+    /** ERROR with the exception that caused it. */
+    void error(String m, Throwable t) { log(LogLevel.ERROR, m, t); }
+
+    /** FATAL with a plain message. */
+    void fatal(String m) { log(LogLevel.FATAL, m, null); }
+
+    /** DEBUG whose message is only built if DEBUG is on. The cure for "cart=" + cart in a hot loop. */
+    void debug(Supplier<String> m) { log(LogLevel.DEBUG, m, null); }
+
+    /** INFO whose message is only built if INFO is on. */
+    void info(Supplier<String> m) { log(LogLevel.INFO, m, null); }
+
+    /** The gate first, then the work. A switched-off call ends on the first line. */
+    void log(LogLevel lv, String msg, Throwable err) {
+        if (!isEnabled(lv)) return;
+        emit(lv, msg, err);
+    }
+
+    /** The lazy form: the supplier is not touched unless the level is on. */
+    void log(LogLevel lv, Supplier<String> msg, Throwable err) {
+        if (!isEnabled(lv)) return;
+        String text;
+        try { text = msg.get(); }
+        catch (RuntimeException ex) { Status.error(name + ": message supplier threw", ex); return; }
+        emit(lv, text, err);
+    }
+
+    /**
+     * Two passes on purpose. First the whole path votes, so a child's sink cannot write a line ROOT was about
+     * to veto. Only then does the event go to every sink on the path, each inside its own try/catch.
+     */
+    private void emit(LogLevel lv, String msg, Throwable err) {
+        LogEvent e = new LogEvent(ctx.clock().nowMs(), lv, name, Thread.currentThread().getName(),
+                                  msg, err, Mdc.snapshot());
+        for (Logger l = this; l != null; l = l.parent) {
+            FilterDecision d = vote(l.filters, e);
+            if (d == FilterDecision.DENY) return;
+            if (d == FilterDecision.ACCEPT) break;
+            if (!l.additive) break;
+        }
+        for (Logger l = this; l != null; l = l.parent) {
+            for (LogAppender a : l.appenders) {
+                try { a.append(e); }
+                catch (RuntimeException ex) { Status.error(a.name() + " threw", ex); }
+            }
+            if (!l.additive) break;
+        }
+    }
+
+    /** The first opinionated vote wins; an empty chain accepts; a filter that throws is treated as abstaining. */
+    private static FilterDecision vote(List<LogFilter> chain, LogEvent e) {
+        for (LogFilter f : chain) {
+            FilterDecision d;
+            try { d = f.decide(e); }
+            catch (RuntimeException ex) { Status.error("filter threw", ex); continue; }
+            if (d != null && d != FilterDecision.NEUTRAL) return d;
+        }
+        return FilterDecision.NEUTRAL;
+    }
+}
+
+/**
+ * The registry, and the only thing that builds a Logger. One name means one object forever, so a level change
+ * reaches every static field that asked for that name. It also owns the clock and the shutdown.
+ */
+final class LoggerContext {
+    /** The name of the node at the top of the tree; it always has a level, which is what ends every walk. */
+    static final String ROOT_NAME = "ROOT";
+
+    private final ConcurrentHashMap<String, Logger> registry = new ConcurrentHashMap<>();
+    private final Logger root;
+    private volatile Clock clock = System::currentTimeMillis;
+
+    /** A fresh tree with ROOT at INFO and no sinks. A test builds one per case; an application builds one. */
+    LoggerContext() {
+        root = new Logger(ROOT_NAME, null, this);
+        root.setLevel(LogLevel.INFO);
+        registry.put(ROOT_NAME, root);
+    }
+
+    /** The node at the top. Everything inherits from it. */
+    Logger root() { return root; }
+
+    /** Where every timestamp comes from. */
+    Clock clock() { return clock; }
+
+    /** Hand the tree a clock. A test sets an instant and moves it. */
+    void setClock(Clock c) { clock = c; }
+
+    /**
+     * One object per name, forever. The parent is resolved BEFORE the put, which is both why a logger is never
+     * half-built and why this does not deadlock: no recursive computeIfAbsent on the same map.
+     */
+    Logger getLogger(String name) {
+        if (name == null || name.isEmpty() || ROOT_NAME.equals(name)) return root;
+        Logger existing = registry.get(name);
+        if (existing != null) return existing;
+        int dot = name.lastIndexOf('.');
+        Logger parent = dot < 0 ? root : getLogger(name.substring(0, dot));
+        return registry.computeIfAbsent(name, n -> new Logger(n, parent, this));
+    }
+
+    /** The usual call site: getLogger(Checkout.class) in a static field. */
+    Logger getLogger(Class<?> c) { return getLogger(c.getName()); }
+
+    /** Every name asked for so far, sorted. Answers "why is this class silent". */
+    List<String> names() { return registry.keySet().stream().sorted().toList(); }
+
+    /**
+     * Wire the root from outside. The context never news up a formatter, a sink or a filter: main() is the
+     * only place in the program where the concrete graph is named.
+     */
+    void configure(LogLevel rootLevel, List<LogAppender> appenders, List<LogFilter> filters) {
+        root.setLevel(rootLevel);
+        for (LogAppender a : appenders) root.addAppender(a);
+        for (LogFilter f : filters) root.addFilter(f);
+    }
+
+    /** Close every sink exactly once, deduped by identity because one async sink is often on several nodes. */
+    void shutdown() {
+        Set<LogAppender> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Logger l : registry.values()) seen.addAll(l.appenders());
+        for (LogAppender a : seen) {
+            try { a.close(); }
+            catch (RuntimeException ex) { Status.error(a.name() + ": close threw", ex); }
+        }
+    }
+}
+
+/** The demo: the tree, the filters, the lock that earns its keep, and fifty threads through one async sink. */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Path dir = Files.createTempDirectory("logger-demo");
+        LoggerContext ctx = new LoggerContext();
+
+        // main() is the only place the concrete graph is named: one console sink, text layout, ROOT at INFO
+        ConsoleAppender console = new ConsoleAppender("console", new TextFormatter(), LogLevel.TRACE, System.out);
+        ctx.configure(LogLevel.INFO, List.of(console), List.of(new DenyMessageFilter("/healthz")));
+        ctx.setClock(() -> 1_789_205_400_000L);                       // a fixed instant, so the demo is readable
+
+        Logger shop = ctx.getLogger("com.shop");
+        Logger checkout = ctx.getLogger("com.shop.checkout");
+        Logger db = ctx.getLogger("com.shop.db");
+
+        // 1. the tree: nobody set a level on the children, so they inherit ROOT's INFO
+        System.out.println("-- the tree: effective levels");
+        System.out.println("  ROOT=" + ctx.root().effectiveLevel() + "  com.shop=" + shop.effectiveLevel()
+            + "  com.shop.checkout=" + checkout.effectiveLevel() + " (own level: " + checkout.level() + ")");
+        Mdc.put("rid", "r-1001");
+        checkout.info("order placed id=42");
+        int[] built = { 0 };
+        checkout.debug(() -> { built[0]++; return "cart=" + new ArrayList<>(List.of("a", "b", "c")); });
+        System.out.println("  DEBUG is off, so the message supplier ran " + built[0] + " times");
+
+        // 2. DEBUG for payments only, at 2am, without a restart
+        shop.setLevel(LogLevel.DEBUG);
+        checkout.debug(() -> { built[0]++; return "cart=[a, b, c]"; });
+        System.out.println("  after com.shop -> DEBUG, the supplier has run " + built[0] + " time(s)");
+        db.setLevel(LogLevel.WARN);
+        db.debug("this never appears: com.shop.db overrides its parent");
+
+        // 3. additivity: a JSON sink on the child, then the child stops using the shared console
+        MemoryAppender json = new MemoryAppender("json", new JsonFormatter(), LogLevel.TRACE);
+        checkout.addAppender(json);
+        checkout.info("shipped id=42");
+        System.out.println("  the JSON sink has " + json.lines().size() + " line(s): " + json.lines().get(0));
+        checkout.setAdditive(false);
+        checkout.info("this one only reaches the child's own sink");
+        System.out.println("  after additivity off, the JSON sink has " + json.lines().size() + " lines"
+            + " and the console printed one fewer");
+        checkout.setAdditive(true);
+
+        // 4. a ROOT filter: a health check is valid INFO, and still noise
+        checkout.info("GET /healthz 200");
+        System.out.println("  the /healthz line was vetoed by a ROOT filter, not by a level");
+        Mdc.clear();
+
+        // 5. what the sink's lock buys: the same events into an unlocked counter and a locked one
+        UnsafeCountingAppender unsafe = new UnsafeCountingAppender();
+        SafeCountingAppender safe = new SafeCountingAppender("safe-counter");
+        Logger race = ctx.getLogger("com.shop.race");
+        race.addAppender(unsafe);
+        race.addAppender(safe);
+        race.setAdditive(false);
+        int threads = 8, each = 2000, expected = threads * each;
+        runConcurrently(threads, i -> { for (int k = 0; k < each; k++) race.info("tick"); });
+        System.out.println("-- one lock per sink");
+        System.out.println("  published " + expected + " events: unlocked counter says " + unsafe.count()
+            + ", locked counter says " + safe.count());
+        race.removeAppender(unsafe);
+        race.removeAppender(safe);
+
+        // 6. fifty threads through one async sink onto one file: every line whole, per-thread order kept
+        Path file = dir.resolve("app.log");
+        FileAppender fileSink = new FileAppender("file", new TextFormatter(), LogLevel.TRACE, file, LogLevel.ERROR);
+        AsyncAppender async = new AsyncAppender("async", fileSink, 8192, OverflowPolicy.BLOCK, LogLevel.ERROR);
+        Logger web = ctx.getLogger("com.shop.web");
+        web.addAppender(async);
+        web.setAdditive(false);
+        int writers = 50, lines = 20;
+        long t0 = System.nanoTime();
+        runConcurrently(writers, i -> { for (int k = 0; k < lines; k++) web.info("t" + i + "-" + k); });
+        long callerNs = System.nanoTime() - t0;
+        async.close();
+        List<String> written = Files.readAllLines(file);
+        System.out.println("-- fifty threads, one file, through a bounded queue");
+        System.out.println("  " + written.size() + " lines on disk (expected " + writers * lines + "), dropped "
+            + async.droppedCount() + ", callers took " + callerNs / 1_000_000 + " ms in total");
+        System.out.println("  every line whole: " + written.stream().allMatch(l -> l.matches(".* INFO  \\[.*\\] com\\.shop\\.web - t\\d+-\\d+"))
+            + ", per-thread order kept: " + perThreadOrderKept(written));
+
+        // 7. a storm into a small queue in front of a slow sink: bounded memory, and the loss is counted
+        SlowAppender slow = new SlowAppender("slow", 2);
+        AsyncAppender small = new AsyncAppender("small", slow, 16, OverflowPolicy.DROP_NEWEST, LogLevel.FATAL);
+        Logger storm = ctx.getLogger("com.shop.storm");
+        storm.addAppender(small);
+        storm.setAdditive(false);
+        for (int i = 0; i < 500; i++) storm.info("storm " + i);
+        small.close();
+        System.out.println("-- a storm into a 16-deep queue in front of a 2 ms sink");
+        System.out.println("  offered 500, written " + slow.written() + ", dropped " + small.droppedCount()
+            + ", sum " + (slow.written() + small.droppedCount()) + " -- bounded memory, visible loss");
+
+        // 8. a sink that throws must not break the caller or the other sinks
+        MemoryAppender survivor = new MemoryAppender("survivor");
+        Logger risky = ctx.getLogger("com.shop.risky");
+        risky.addAppender(new ThrowingAppender());
+        risky.addAppender(survivor);
+        risky.setAdditive(false);
+        risky.error("payment declined", new IllegalStateException("gateway timeout"));
+        System.out.println("-- a broken sink");
+        System.out.println("  the caller returned normally and the other sink still has " + survivor.lines().size() + " line");
+
+        ctx.shutdown();
+        System.out.println("-- registry: " + ctx.names());
+        if (written.size() != writers * lines) throw new AssertionError("the async sink lost a line");
+        if (safe.count() != expected) throw new AssertionError("the locked counter lost an update");
+        System.out.println("demo done; files under " + dir);
+    }
+
+    /** A sink that always fails, to prove the caller never finds out. */
+    static final class ThrowingAppender implements LogAppender {
+        public String name() { return "broken"; }
+        public void append(LogEvent e) { throw new RuntimeException("the collector is down"); }
+        public void start() {}
+        public void close() {}
+    }
+
+    /** Start n threads on one latch so they really are at the same instant, and wait for all of them. */
+    static void runConcurrently(int n, java.util.function.IntConsumer body) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(n, 16));
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final int id = i;
+            fs.add(pool.submit(() -> { go.await(); body.accept(id); return null; }));
+        }
+        go.countDown();
+        for (Future<?> f : fs) f.get();
+        pool.shutdown();
+    }
+
+    /** True when, for every thread, its own lines appear in the order it wrote them. */
+    static boolean perThreadOrderKept(List<String> lines) {
+        Map<String, Integer> last = new HashMap<>();
+        for (String l : lines) {
+            int dash = l.lastIndexOf(" - t");
+            if (dash < 0) continue;
+            String tag = l.substring(dash + 4);
+            String[] parts = tag.split("-");
+            int prev = last.getOrDefault(parts[0], -1);
+            int seq = Integer.parseInt(parts[1]);
+            if (seq != prev + 1) return false;
+            last.put(parts[0], seq);
+        }
+        return true;
+    }
+}

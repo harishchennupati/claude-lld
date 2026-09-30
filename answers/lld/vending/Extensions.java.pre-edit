@@ -1,0 +1,422 @@
+import java.util.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist; nothing here edits Main.java.
+
+// ---- ext: card payment -------------------------------------------------------------------------------
+/**
+ * A card or UPI terminal. Two halves of one role: take the money, and give it back when the sale could not
+ * be completed after the money moved.
+ */
+interface CardTerminal {
+    /** Charge the customer. False means nothing was taken. */
+    boolean charge(int paise);
+    /** Give it back. Called only when the machine took money and then could not deliver. */
+    boolean refund(int paise);
+}
+
+/**
+ * Buying with a card instead of coins. Exactly the same ORDER as VendingMachine.select, with the card
+ * charge as the irreversible step instead of the motor: check stock, charge, drop, and only then take the
+ * stock down. The extra case a card brings is the one below the coin machine cannot have -- money moved
+ * and then the motor jammed -- which is why refund() exists.
+ */
+final class CardCheckout {
+    private final Inventory inventory;
+    private final Dispenser motor;
+    private final CardTerminal card;
+    private final ReentrantLock lock = new ReentrantLock();
+
+    CardCheckout(Inventory inventory, Dispenser motor, CardTerminal card) {
+        this.inventory = inventory; this.motor = motor; this.card = card;
+    }
+    /** One tap-and-press. Nothing is committed until the item has fallen; a jam refunds the card. */
+    Outcome buy(String code, int pricePaise) {
+        lock.lock();
+        try {
+            Slot s = inventory.slot(code);
+            if (s == null)    return new Outcome(Status.UNKNOWN_SLOT, null, List.of(), 0);
+            if (s.qty() == 0) return new Outcome(Status.SOLD_OUT, null, List.of(), 0);
+            if (!card.charge(pricePaise)) return new Outcome(Status.NEED_MORE, null, List.of(), pricePaise);
+            boolean dropped;
+            try { dropped = motor.drop(code); } catch (RuntimeException jam) { dropped = false; }
+            if (!dropped) {
+                card.refund(pricePaise);                 // the compensating action: the money goes back
+                return new Outcome(Status.JAMMED, null, List.of(), pricePaise);
+            }
+            s.takeOne();
+            return new Outcome(Status.SOLD, s.product, List.of(), pricePaise);
+        } finally { lock.unlock(); }
+    }
+}
+
+// ---- ext: exact change lamp --------------------------------------------------------------------------
+/**
+ * The "exact change only" lamp. Asks the change rule, against a copy of the float, whether a sale could be
+ * completed BEFORE the customer commits. Pure: it cannot corrupt the float even if it is wrong.
+ */
+final class ChangeAdvisor {
+    private final ChangeStrategy rule;
+
+    ChangeAdvisor(ChangeStrategy rule) { this.rule = rule; }
+    /** Would this column sell, if the customer paid with these coins? */
+    boolean canComplete(VendingMachine vm, String code, List<Coin> wouldPay) {
+        int price = vm.priceOf(code);
+        if (price < 0 || vm.qty(code) <= 0) return false;
+        int paid = Coin.total(wouldPay);
+        if (paid < price) return false;
+        Map<Coin, Integer> pool = vm.floatSnapshot();
+        for (Coin c : wouldPay) pool.merge(c, 1, Integer::sum);
+        return rule.plan(pool, paid - price) != null;
+    }
+}
+
+// ---- ext: bounded change DP --------------------------------------------------------------------------
+/**
+ * Exact change for any set of denominations, not just the canonical ones: a bounded subset-sum over the
+ * coins actually in the float. Drops straight into configure() because the interface did not change.
+ */
+final class DpChange implements ChangeStrategy {
+    /** A combination that adds up exactly, or null. O(coins x amount), which at a float this size is nothing. */
+    public List<Coin> plan(Map<Coin, Integer> available, int amountPaise) {
+        List<Coin> pool = new ArrayList<>();
+        for (Coin c : Coin.descending())
+            for (int i = 0; i < available.getOrDefault(c, 0); i++) pool.add(c);
+        int n = pool.size();
+        boolean[][] reach = new boolean[n + 1][amountPaise + 1];
+        reach[0][0] = true;
+        for (int i = 0; i < n; i++)
+            for (int a = 0; a <= amountPaise; a++)
+                if (reach[i][a]) {
+                    reach[i + 1][a] = true;
+                    int with = a + pool.get(i).paise;
+                    if (with <= amountPaise) reach[i + 1][with] = true;
+                }
+        if (!reach[n][amountPaise]) return null;
+        List<Coin> out = new ArrayList<>();
+        int a = amountPaise;
+        for (int i = n; i > 0; i--) {
+            if (reach[i - 1][a]) continue;               // this coin was not needed
+            out.add(pool.get(i - 1));
+            a -= pool.get(i - 1).paise;
+        }
+        return List.copyOf(out);
+    }
+}
+
+// ---- ext: hold and pay -------------------------------------------------------------------------------
+/** A unit held for one customer until a moment in time. */
+record Hold(String code, String holder, long expiresAtMs) {}
+
+/**
+ * "Hold my Coke, I will pay in thirty seconds." A hold takes the unit out of stock immediately, so nobody
+ * else can buy it, and a sweep puts it back the moment the hold expires. Time comes from the same injected
+ * clock as everything else, so the test does not sleep.
+ */
+final class HoldDesk {
+    private final Inventory inventory;
+    private final Clock clock;
+    private final long ttlMs;
+    private final Map<String, Hold> holds = new HashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
+
+    HoldDesk(Inventory inventory, Clock clock, long ttlMs) {
+        this.inventory = inventory; this.clock = clock; this.ttlMs = ttlMs;
+    }
+    /** Reserve one unit for a named holder, or null when the column is empty. */
+    Hold hold(String code, String holder) {
+        lock.lock();
+        try {
+            sweep();
+            Slot s = inventory.slot(code);
+            if (s == null || s.qty() == 0) return null;
+            s.takeOne();                                  // out of stock from this instant: no double sell
+            Hold h = new Hold(code, holder, clock.nowMs() + ttlMs);
+            holds.put(holder, h);
+            return h;
+        } finally { lock.unlock(); }
+    }
+    /** Pay for a live hold. False when it had already expired and the unit went back. */
+    boolean pay(String holder) {
+        lock.lock();
+        try { sweep(); return holds.remove(holder) != null; } finally { lock.unlock(); }
+    }
+    /** Put back every unit whose hold has run out. Called on every entry point; no timer thread needed. */
+    void sweep() {
+        long now = clock.nowMs();
+        Iterator<Map.Entry<String, Hold>> it = holds.entrySet().iterator();
+        while (it.hasNext()) {
+            Hold h = it.next().getValue();
+            if (h.expiresAtMs() <= now) { inventory.slot(h.code()).refill(1); it.remove(); }
+        }
+    }
+}
+
+// ---- ext: operator console ---------------------------------------------------------------------------
+/** What an operator is allowed to do, separate from the customer's four buttons. */
+interface OperatorConsole {
+    /** Every column's count. */
+    Map<String, Integer> stock();
+    /** What the coin float is worth, in paise. */
+    int cashPaise();
+    /** Refill a column; returns how many went in. */
+    int restock(String code, int n);
+}
+
+/** The operator role, implemented by delegating to the machine's existing reads and refills. */
+final class MachineConsole implements OperatorConsole {
+    private final VendingMachine vm;
+
+    MachineConsole(VendingMachine vm) { this.vm = vm; }
+    /** Every column's count. */
+    public Map<String, Integer> stock() { return vm.stockCounts(); }
+    /** What the coin float is worth. */
+    public int cashPaise() { return vm.floatPaise(); }
+    /** Refill a column. */
+    public int restock(String code, int n) { return vm.restock(code, n); }
+}
+
+/** Telemetry: counts sales per column from the same events the screen listens to. Read-side only. */
+final class Telemetry implements MachineObserver {
+    final Map<String, Integer> salesPerSlot = new TreeMap<>();
+    /** Count a sale. */
+    public void onEvent(MachineEvent e) {
+        if (e.kind().equals("SOLD")) salesPerSlot.merge(e.slotCode(), 1, Integer::sum);
+    }
+}
+
+/** Pages the operator when the float drops below the floor where change starts failing. */
+final class LowCashAlert implements MachineObserver {
+    private final int floorPaise;
+    final List<String> alerts = new ArrayList<>();
+
+    LowCashAlert(int floorPaise) { this.floorPaise = floorPaise; }
+    /** Raise one alert per event that crosses the floor. */
+    public void onEvent(MachineEvent e) {
+        if (e.floatPaise() < floorPaise) alerts.add("float below " + Main.rs(floorPaise) + ": " + Main.rs(e.floatPaise()));
+    }
+}
+
+// ---- ext: persistence --------------------------------------------------------------------------------
+/** Everything about a machine worth surviving a power cut. */
+record MachineSnapshot(Map<Coin, Integer> coins, Map<String, Integer> stock) {}
+
+/**
+ * The seam that makes the machine outlive its process. The machine's flow does not change: the maps it
+ * writes under the lock are simply loaded at boot and saved after each commit.
+ */
+interface MachineRepository {
+    /** Write the whole snapshot for one machine. */
+    void save(String machineId, MachineSnapshot snap);
+    /** Read it back, or null when this machine has never been saved. */
+    MachineSnapshot load(String machineId);
+}
+
+/**
+ * The in-memory implementation, which is all a test needs. The database version replaces the slot
+ * decrement with a conditional update, which is the same idea as the lock:
+ *   UPDATE slot SET qty = qty - 1 WHERE machine = ? AND code = ? AND qty > 0;
+ *   -- 1 row updated = you got the unit, 0 rows = another machine's terminal got it
+ */
+final class InMemoryMachineRepository implements MachineRepository {
+    private final Map<String, MachineSnapshot> rows = new HashMap<>();
+
+    /** Store a copy so a later mutation cannot change what was saved. */
+    public void save(String machineId, MachineSnapshot snap) {
+        rows.put(machineId, new MachineSnapshot(new EnumMap<>(snap.coins()), new TreeMap<>(snap.stock())));
+    }
+    /** Read it back. */
+    public MachineSnapshot load(String machineId) { return rows.get(machineId); }
+}
+
+// ---- ext: motor outside the lock ---------------------------------------------------------------------
+/**
+ * Rung one of the ladder: get the two-second motor out of the critical section. The unit is RESERVED under
+ * a very short lock, the coil turns with the lock released, and a second short section either commits the
+ * reservation or puts it back. Nobody can oversell, and two columns no longer wait for each other.
+ */
+final class ReservingColumn {
+    private final String code;
+    private final Dispenser motor;
+    private final ReentrantLock lock = new ReentrantLock();
+    private int qty;
+    private int reserved;
+
+    ReservingColumn(String code, int qty, Dispenser motor) { this.code = code; this.qty = qty; this.motor = motor; }
+    /** Reserve, drop outside the lock, then commit or give the reservation back. */
+    boolean sell() {
+        lock.lock();
+        try {
+            if (qty - reserved <= 0) return false;
+            reserved++;                                   // ~0.2 us of lock, not two seconds
+        } finally { lock.unlock(); }
+        boolean dropped;
+        try { dropped = motor.drop(code); } catch (RuntimeException jam) { dropped = false; }
+        lock.lock();
+        try {
+            reserved--;
+            if (dropped) qty--;
+            return dropped;
+        } finally { lock.unlock(); }
+    }
+    /** What is left, reservations included. */
+    int available() { lock.lock(); try { return qty - reserved; } finally { lock.unlock(); } }
+}
+
+// ---- ext: a claim without a lock ---------------------------------------------------------------------
+/**
+ * Rung three: the count itself decides the winner, with no lock at all. compareAndSet is the hardware's
+ * version of "read and write as one step", and it is exactly what the SQL conditional update does.
+ */
+final class CasColumn {
+    private final AtomicInteger qty;
+
+    CasColumn(int qty) { this.qty = new AtomicInteger(qty); }
+    /** Take one unit, or false when there is none. Losers of a race simply try again. */
+    boolean claim() {
+        while (true) {
+            int n = qty.get();
+            if (n == 0) return false;
+            if (qty.compareAndSet(n, n - 1)) return true;
+        }
+    }
+    /** Put a unit back after a jam. */
+    void giveBack() { qty.incrementAndGet(); }
+    /** What is left. */
+    int left() { return qty.get(); }
+}
+
+// ---- ext: a mode with behaviour of its own -----------------------------------------------------------
+/**
+ * When a mode stops being "which actions are legal" and grows behaviour of its own, promote the row in the
+ * table to a class. This is the shape: each mode answers for itself and names the mode it returns to.
+ */
+interface Mode {
+    /** The name shown on the screen. */
+    String label();
+    /** Is this action legal here? */
+    boolean allows(Action a);
+    /** The mode after this action. */
+    Mode after(Action a);
+}
+
+/** Out of service, with a memory: it knows which mode to hand back to, and it still lets a customer cancel. */
+final class MaintenanceMode implements Mode {
+    private final Mode resumeTo;
+
+    MaintenanceMode(Mode resumeTo) { this.resumeTo = resumeTo; }
+    /** The name shown on the screen. */
+    public String label() { return "OUT OF SERVICE"; }
+    /** Only the coin return works: never strand a customer who already paid. */
+    public boolean allows(Action a) { return a == Action.CANCEL || a == Action.COLLECT || a == Action.SERVICE; }
+    /** SERVICE hands back to the mode this one interrupted; everything else stays here. */
+    public Mode after(Action a) { return a == Action.SERVICE ? resumeTo : this; }
+}
+
+/** The ordinary idle mode, so MaintenanceMode has something to resume to. */
+final class IdleMode implements Mode {
+    /** The name shown on the screen. */
+    public String label() { return "INSERT COIN"; }
+    /** Everything except selecting, which needs money first. */
+    public boolean allows(Action a) { return a != Action.SELECT; }
+    /** Idle stays idle unless an operator takes the machine away. */
+    public Mode after(Action a) { return this; }
+}
+
+// ---- ext: columns from config ------------------------------------------------------------------------
+/**
+ * Where a Factory finally pays: columns that arrive as strings from a planogram file, so adding a product
+ * is a line of configuration and not a line of code.
+ */
+final class SlotFactory {
+    /** "A1|LAY|Lays|2000|8|3" -> a Slot with that code, product, capacity and starting count. */
+    static Slot fromConfig(String line) {
+        String[] p = line.split("\\|");
+        return new Slot(p[0], new Product(p[1], p[2], Integer.parseInt(p[3])),
+                        Integer.parseInt(p[4]), Integer.parseInt(p[5]));
+    }
+}
+
+/** Runs every extension once, so the page's follow-up code is code that has actually executed. */
+class ExtDemo {
+    /** A tiny inventory for the extensions that do not need a whole machine. */
+    static Inventory shelf() {
+        Inventory inv = new Inventory();
+        inv.addSlot(SlotFactory.fromConfig("A1|LAY|Lays|2000|8|2"));
+        inv.addSlot(SlotFactory.fromConfig("A2|COK|Coke|3500|8|1"));
+        return inv;
+    }
+
+    public static void main(String[] args) {
+        System.out.println("-- card payment: charge, then drop, then take the stock down");
+        Inventory inv = shelf();
+        CardTerminal good = new CardTerminal() {
+            public boolean charge(int paise) { return true; }
+            public boolean refund(int paise) { System.out.println("   refunded " + Main.rs(paise) + " to the card"); return true; }
+        };
+        CardCheckout ok = new CardCheckout(inv, new Motor(), good);
+        System.out.println("   " + ok.buy("A1", 2000).status() + "; A1 left " + inv.slot("A1").qty());
+
+        System.out.println("-- the motor jams AFTER the card was charged: the money goes back, stock untouched");
+        CardCheckout jam = new CardCheckout(inv, code -> false, good);
+        System.out.println("   " + jam.buy("A1", 2000).status() + "; A1 left " + inv.slot("A1").qty());
+
+        System.out.println("-- the exact-change lamp: ask before the customer commits");
+        VendingMachine vm = Main.stocked();
+        ChangeAdvisor advisor = new ChangeAdvisor(new BackoffChange());
+        System.out.println("   B1 with Rs 30 (Rs 5 change needed): " + advisor.canComplete(vm, "B1", List.of(Coin.R20, Coin.R10)));
+        VendingMachine bare = new VendingMachine();
+        bare.addSlot(new Slot("B1", new Product("DMK", "Dairy Milk", 2500), 8, 3));
+        System.out.println("   B1 with Rs 40 on an empty float: " + advisor.canComplete(bare, "B1", List.of(Coin.R20, Coin.R20)));
+
+        System.out.println("-- non-canonical change: the DP finds what greedy misses");
+        Map<Coin, Integer> lopsided = new EnumMap<>(Map.of(Coin.R5, 1, Coin.R2, 3));
+        System.out.println("   greedy: " + new GreedyChange().plan(lopsided, 600)
+                           + "   backoff: " + new BackoffChange().plan(lopsided, 600)
+                           + "   dp: " + new DpChange().plan(lopsided, 600));
+
+        System.out.println("-- hold and pay, with an expiry driven by the injected clock");
+        long[] now = { 1_000_000L };
+        Inventory held = shelf();
+        HoldDesk desk = new HoldDesk(held, () -> now[0], 30_000);
+        System.out.println("   hold A2: " + (desk.hold("A2", "ravi") != null) + "; A2 left " + held.slot("A2").qty());
+        System.out.println("   a second customer can hold A2: " + (desk.hold("A2", "meera") != null));
+        now[0] += 31_000;                                  // thirty-one seconds later, no sleeping
+        System.out.println("   ravi pays after the expiry: " + desk.pay("ravi") + "; A2 back to " + held.slot("A2").qty());
+
+        System.out.println("-- the operator console and telemetry, off the same events");
+        Telemetry tele = new Telemetry();
+        LowCashAlert cash = new LowCashAlert(15_000);
+        vm.addObserver(tele);
+        vm.addObserver(cash);
+        vm.purchase("A1", List.of(Coin.R20));
+        vm.purchase("B1", List.of(Coin.R20, Coin.R10));
+        OperatorConsole console = new MachineConsole(vm);
+        System.out.println("   sales " + tele.salesPerSlot + "; stock " + console.stock()
+                           + "; cash " + Main.rs(console.cashPaise()) + "; alert: " + cash.alerts.get(cash.alerts.size() - 1));
+        System.out.println("   restock A1 by 5: " + console.restock("A1", 5) + " went in -> " + console.stock());
+
+        System.out.println("-- persistence: save the float and the counts, load them back");
+        MachineRepository repo = new InMemoryMachineRepository();
+        repo.save("VM-01", new MachineSnapshot(vm.floatSnapshot(), vm.stockCounts()));
+        MachineSnapshot back = repo.load("VM-01");
+        System.out.println("   loaded stock " + back.stock() + ", coins " + back.coins());
+
+        System.out.println("-- rung one: the motor outside the lock");
+        ReservingColumn col = new ReservingColumn("A1", 1, new Motor());
+        System.out.println("   first sell " + col.sell() + ", second sell " + col.sell() + ", left " + col.available());
+        ReservingColumn jammed = new ReservingColumn("A1", 1, code -> false);
+        System.out.println("   a jam gives the reservation back: sold " + jammed.sell() + ", left " + jammed.available());
+
+        System.out.println("-- rung three: the count decides the winner, no lock");
+        CasColumn cas = new CasColumn(1);
+        System.out.println("   claim " + cas.claim() + ", claim again " + cas.claim() + ", left " + cas.left());
+
+        System.out.println("-- a mode that grew behaviour becomes a class");
+        Mode mode = new MaintenanceMode(new IdleMode());
+        System.out.println("   " + mode.label() + ": insert allowed " + mode.allows(Action.INSERT)
+                           + ", cancel allowed " + mode.allows(Action.CANCEL)
+                           + ", after service -> " + mode.after(Action.SERVICE).label());
+    }
+}

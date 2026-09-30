@@ -1,0 +1,400 @@
+import re,pathlib,html,json
+H=pathlib.Path("/Users/harishchennupati/answers/lld")
+src=(H/"parking-lot/Main.java").read_text()
+ext=(H/"parking-lot/Extensions.java").read_text()
+def X(a,b):
+    marks=[m.start() for m in re.finditer(r"(?m)^// ---- ext:",ext)]+[ext.index("class ExtDemo")]
+    i=next(m for m in marks if a in ext[m:m+200])
+    j=next(m for m in marks if m>i and (b in ext[m:m+200]))
+    return ext[i:j].rstrip()+"\n"
+def sect(a,b=None):
+    i=src.index(a); j=src.index(b,i) if b else len(src); return src[i:j].rstrip()+"\n"
+lot_full=sect("interface PaymentProcessor","// new rule live")
+ce=lot_full.index("    // availability"); lot=lot_full+sect("// entry / exit gates","public class Main")
+ext_avail=lot_full[ce:lot_full.index("    // lost ticket")].rstrip()+"\n"
+ext_lost=lot_full[lot_full.index("    // lost ticket"):]; ext_lost=ext_lost[:ext_lost.rindex("}")].rstrip()+"\n"
+S=[
+ dict(id=0,stage="Brief",title="The problem, in plain words",think="""<b>What it is.</b> A car park with a few floors. Each floor has spots of three sizes: small, compact, large. Three kinds of vehicle come in -- motorcycle, car, truck. At an <b>entry gate</b> the system finds a free spot that fits, hands out a <b>ticket</b>, and the vehicle parks. At an <b>exit gate</b> the system works out the fee from how long it stayed, takes payment, and frees the spot. A board on each floor shows free counts.<br><br>
+<b>The three flows.</b> Park: vehicle at gate &rarr; smallest free spot that fits &rarr; mark taken &rarr; ticket. Unpark: ticket at exit &rarr; fee &rarr; payment &rarr; free the spot. Query: "is it full for a truck?" / "how many compact free?"<br><br>
+<b>What you must get right (this is what they grade).</b> A bigger spot may hold a smaller vehicle, but hand out the <b>smallest that fits</b>. Pricing is hourly by size, rounded up -- and <b>it will change mid-round</b>. Many gates at once, so <b>two vehicles must never get the same spot</b>. Finding a spot must not scan every spot. Reject when full.<br><br>
+<b>Functional requirements</b> -- what it must do:<ul><li>Park a vehicle: find the smallest free spot that fits, mark it taken, issue a ticket.</li><li>Unpark: take the ticket, compute the fee from time parked, take payment, free the spot.</li><li>Three vehicle kinds (motorcycle, car, truck), three spot sizes (small, compact, large); a bigger spot may hold a smaller vehicle.</li><li>Pricing: hourly by spot size, rounded up -- and changeable without touching the rest.</li><li>Payment at exit by cash or card.</li><li>Answer "is it full for a truck?" and "how many compact spots are free?"</li><li>Reject when full.</li></ul>
+<b>Non-functional requirements</b> -- what it must survive:<ul><li>Many entry and exit gates at the same time: two vehicles must never get the same spot (thread safety).</li><li>Finding a spot must not scan every spot: one step per size (O(1)).</li><li>Pricing and assignment rules swappable without changing the core.</li><li>One source of truth for which spots are taken: the floor's per-size free deque; a spot's occupant field is for the ticket and the display, never consulted to decide.</li><li>In-memory, single process; no persistence (say it).</li></ul>
+<b>Say these before typing.</b> In-memory, one process. One lot. One vehicle takes one spot. Billing rounds up to the hour. Out of scope for now: lost tickets, passes, EV, reservations -- I'll name them and come back if you want one.<br><br>
+<b>A worked example you can replay in your head.</b> 10:00 car arrives, floor 1 has one small, one compact, one large free: car gets the compact, ticket #1. 10:01 truck: gets the large. 10:02 another car: compact and large gone, a car cannot use small &rarr; rejected. 12:30 car #1 leaves: 2.5 h rounds to 3, compact is 20/h, fee 60, spot free, board updates.<br><br>
+<b>What is really being tested.</b> Three things only: can you turn this paragraph into models and services in ten minutes; can you find the one thing that breaks under two threads and protect it in the right place; and when the rule changes, do you add a class or rewrite. Every step below serves one of those three.""",code="",nodes=[],say="\"Floors, three spot sizes, smallest-fit, hourly pricing that will change, many gates at once, in-memory. Out of scope: lost tickets, passes, EV. Starting with the models.\""),
+ dict(id=0,stage="Brief",title="From the requirements to the classes -- how I get to the diagram",wide=True,think="""<b>Move 1 -- I underline the nouns. Every noun that has its own state becomes a class.</b><br>
+%%MOVE1%%
+Reading the paragraph again: a <b>vehicle</b> enters a <b>gate</b>; a <b>floor</b> has <b>spots</b> of three sizes; I issue a <b>ticket</b>; I charge by duration; I take <b>payment</b>; I answer <b>availability</b>. Vehicle has a plate and a type: a class. Spot has a size and whoever is in it: a class. Floor owns spots: a class. Ticket has a spot, a vehicle, two times and a status: a class. The lot holds all of it: a class. Gate has nothing of its own to remember, so it is a thin caller, not a model. Availability is a question I answer, so it is a method, not a class.<br><br>
+<b>Move 2 -- for every verb I ask: which class holds the state this touches? That class gets the method.</b><br>
+%%MOVE2%%
+"assign a vehicle to a spot" changes the spot's occupant, so <code>spot.assign(v)</code>. "find a free spot of a size" reads the floor's free lists, so <code>floor.peekFree(size)</code>. "park" touches floors, tickets and the lock at once; only the lot sees all three, so <code>lot.park(v)</code>. When a verb's state is spread over two classes, it goes to the class that owns both. That is how I end up with small models and one orchestrator without planning it.<br><br>
+<b>Move 3 -- for every rule the interviewer can change mid-round, I put the rule behind an interface and have it handed in.</b><br>
+%%MOVE3%%
+Pricing will change (flat today, surge on weekends). Which spot to pick will change (smallest fit today, nearest exit tomorrow). How to pay will change (card, cash, UPI). Each becomes a one-method interface the lot is <i>given</i> in <code>configure()</code>, never builds itself. A rule nobody will change stays a plain method; I do not make interfaces for sport. This is Strategy and dependency injection; I do it, I do not announce it.<br><br>
+<b>Move 4 -- I look for state that many callers change at the same time. That state gets one owner and one lock.</b><br>
+%%MOVE4%%
+Ten gates all change spot occupancy and the ticket map. Between "I saw C1 free" and "I took C1" another gate can take it; that gap is where two cars get one spot. So find, occupy and issue must be one step under one lock, in the class that owns both maps: the lot. And anything that only listens (the display board) is called after the lock is released, never inside it.<br><br>
+<b>Move 5 -- for each collection I ask what question is asked of it, and pick the shape that answers in O(1).</b><br>
+%%MOVE5%%
+"next free spot of this size": a deque per size, the head is the answer. "this ticket, by plate": a map. "which floor is this ticket on": I store the floor on the ticket at entry so exit never searches. "does a car fit a compact spot": a small table, vehicle type to sizes, smallest first. Every scan I avoid here is a question I will not fumble in the concurrency round, because the scan would have been inside the lock.<br><br>
+<table><tr><th>Move</th><th>The question I ask</th><th>What it gives me</th></tr>
+<tr><td>1 nouns</td><td>which nouns have their own state?</td><td>the models</td></tr>
+<tr><td>2 verbs</td><td>which class holds the state this verb touches?</td><td>the methods, and the one orchestrator</td></tr>
+<tr><td>3 rules</td><td>which rules will they change mid-round?</td><td>the interfaces to inject</td></tr>
+<tr><td>4 shared state</td><td>what do many callers change together?</td><td>the lock and its owner</td></tr>
+<tr><td>5 lookups</td><td>what question is asked of each collection?</td><td>deque, map, table; no scans</td></tr></table>
+The next step is the diagram these five moves produce. The same five moves give me the elevator, BookMyShow or Splitwise diagram in ten minutes.""",code="",nodes=[],say="Nouns with state are my models; each verb goes to the class that owns its state; rules they will change get an interface handed in; shared state gets one lock; every lookup gets an O(1) shape."),
+ dict(id=0,stage="Brief",title="The whole design, up front -- the mental model before you type",wide=True,think="""%%FULLBOARD%%
+<b>Three layers.</b><br>
+<b>1 · Models</b> -- plain data with tiny behaviour: <code>Vehicle</code> (+ Car, Motorcycle, Truck), <code>ParkingSpot</code> with a <code>SpotType</code>, <code>ParkingFloor</code>, <code>Ticket</code> with a <code>TicketStatus</code>. They know their own state and nothing about pricing or gates.<br>
+<b>2 · The orchestrator</b> -- <code>ParkingLot</code>: owns the floors and the active tickets, holds the lock, and runs the two use cases <code>park()</code> and <code>unpark()</code> plus availability. <code>EntryGate</code> / <code>ExitGate</code> are thin callers into it.<br>
+<b>3 · Swappable rules and listeners</b> -- interfaces the lot is handed: <code>PricingStrategy</code> (Flat, later Surge), <code>SpotAssignmentStrategy</code> (SmallestFit), <code>PaymentProcessor</code> (Card, Cash); and <code>ParkingObserver</code> (DisplayBoard), which the floor notifies.<br><br>
+<b>How to read a box.</b> Top = the class name (<i>italic</i> = abstract, you never <code>new</code> it; dashed border = interface, only method signatures; &laquo;enum&raquo; = a fixed list of values). Middle = its fields, the state it holds. Bottom = its methods, what you can ask it to do.<br><br>
+<b>How to read the arrows.</b> Hollow triangle = <i>is-a</i>: Car extends Vehicle, FlatHourlyPricing implements PricingStrategy. Filled diamond = <i>owns</i>: the lot owns its floors, a floor owns its spots, the lot owns the active tickets -- the parts have no life without the whole. Plain arrow = <i>references</i>: a Ticket points at its spot, floor and vehicle but does not own them. Dashed lavender = <i>injected</i>: the lot is handed a pricing, an assignment and a payment object through <code>configure()</code>; it never builds them itself, so they can be swapped. Dotted blue = <i>notifies</i>: the floor calls <code>onChange</code> on whoever registered; it does not know a screen exists.<br><br>
+<b>Where state lives.</b><table><tr><th>Class</th><th>State it holds</th></tr><tr><td>ParkingFloor</td><td>per size: a deque of free spots; all spots by id; its observers</td></tr><tr><td>ParkingLot</td><td>the floors; active tickets by plate; the injected pricing and assignment; one lock</td></tr><tr><td>ParkingSpot</td><td>id, size, the vehicle in it or null</td></tr><tr><td>Ticket</td><td>spot, floor, vehicle, entry time, exit time, status</td></tr></table>
+<b>One call through the boxes: <code>gate.admit(car)</code>.</b><br>
+gate &rarr; <code>lot.park(car)</code> &rarr; take the lock &rarr; for each floor: <code>assignment.find(floor, CAR)</code> looks at that floor's free deques, smallest fitting size first, and returns the head spot &rarr; <code>floor.occupy(spot)</code> pops it and notifies the board &rarr; <code>spot.assign(car)</code> &rarr; <code>new Ticket(spot, floor, car)</code> &rarr; <code>active.put(plate, ticket)</code> &rarr; release the lock &rarr; return the ticket. Exit is the mirror: <code>lot.unpark(plate, payment)</code> &rarr; lock &rarr; remove the ticket &rarr; <code>pricing.price(ticket)</code> &rarr; <code>payment.pay(fee)</code> &rarr; <code>spot.release()</code>, <code>floor.vacate(spot)</code> &rarr; unlock.<br><br>
+<b>Why this shape, one line each:</b> models apart from the orchestrator so each class has one reason to change; the lock in the lot because that is where the shared state is; rules as interfaces because the interviewer will change them mid-round; the board as an observer so the floor never knows screens exist.<br><br>
+Hold this picture. The next steps build it in the order you would type it, and the diagram on the right grows box by box.""",code="",nodes=["Gates","Main","Observer","Board","Ticket","Status","Lot","Floor","Spot","Fit","Pricing","Flat","Surge","Assign","Smallest","Payment","Card","SpotType","Vehicle","Kinds"],say="Three layers: models, one orchestrator holding the lock, and swappable rules and listeners handed to it."),
+ dict(id=1,stage="Build",title="Vehicle -- the thing that enters",think="I start with the noun that arrives. A vehicle is a plate and a type, nothing more. Car, Motorcycle and Truck extend it because each really <i>is</i> a vehicle, and I may want to special-case one later (a truck needing two spots). This is the one place inheritance is honest; everywhere else I will prefer handing objects in.",code=sect("enum VehicleType","enum SpotType"),nodes=["Vehicle","Kinds"],say="I'll start with the noun that enters: Vehicle, three kinds."),
+ dict(id=2,stage="Build",title="Spot and the fit table -- where it goes, and what fits",think="Now the vehicle needs somewhere to go. A spot has a size and holds at most one vehicle, so I keep it dumb: isFree, assign, release. I make size an enum, not three subclasses, because a size changes nothing about how a spot behaves. Which sizes a vehicle may use I write as a table, smallest first, so a car takes a compact spot before a large one and trucks still find large spots later. An if-chain here would be the first thing an interviewer asks me to extend.",code=sect("enum SpotType","enum TicketStatus"),nodes=["Spot","SpotType","Fit"],say="A spot is dumb; fit is a lookup table, smallest first."),
+ dict(id=3,stage="Build",title="Ticket -- issued at entry",think="When a car parks I hand it a ticket: which spot, which floor, which vehicle, when it came in; I stamp the exit time later to charge it. I store the floor on the ticket on purpose, so at exit I go straight to the spot instead of searching every floor. I give it a status enum now because I already know lost tickets and double exits are coming, and I want those to be transitions, not scattered ifs.",code=sect("enum TicketStatus","// \"they'll want to change pricing\""),nodes=["Ticket","Status"],say="The ticket remembers its floor so unpark is O(1)."),
+ dict(id=4,stage="Build",title="Pricing -- the first swappable thing (Strategy)",think="Fee is flat hourly by size, but I know they will ask for weekend surge the moment I hardcode it. So the fee does not live inside the lot as a number; I put pricing behind a one-method interface and have the lot handed one in. Now surge is a new class and one changed line. This is the moment Strategy earns its name, because I felt the pain first; I would not have started with it.",code=sect("// \"they'll want to change pricing\"","// \"smallest fit today"),nodes=["Pricing","Flat"],say="Pricing will change, so it's an interface I inject -- Strategy."),
+ dict(id=5,stage="Build",title="Assignment -- Strategy again",think="Which spot to give out is the same kind of rule: smallest fit today, nearest to the exit tomorrow. Same shape, same answer: an interface, handed in, so the lot never changes when the rule does. I notice the pattern repeating and I stop treating it as special.",code=sect("// \"smallest fit today","// \"a board should update"),nodes=["Assign","Smallest"],say="Same move for spot assignment."),
+ dict(id=6,stage="Build",title="Floor and the board -- O(1) free spots, and Observer",think="A floor holds spots, and finding a free one must not scan, so I keep size to a deque of free spots: peek, poll, push are all O(1). The display board must update when occupancy changes, but parking logic should not know screens exist, so the floor just publishes 'occupancy changed' and whoever cares subscribes. That is Observer. One trap I watch for: occupy must poll the head it just peeked; if I wrote a remove-by-value it would scan the deque and quietly make my O(1) claim false.",code=sect("// \"a board should update","interface PaymentProcessor"),nodes=["Floor","Observer","Board"],say="Free spots per size in a deque; the floor publishes changes and the board subscribes."),
+ dict(id=7,stage="Build",title="ParkingLot -- the lock, and payment",think="Now I tie it together. One lot owns the floors, the handed-in strategies and the active tickets. Many gates call park at once, and between finding a free spot and taking it another gate can take it, so find, occupy and issue become one section under one lock. I put the lock in the lot because that is where the shared state lives; a lock in the gate would protect nothing. Two orders I get right on purpose: at exit I take the payment BEFORE I touch the ticket or the spot, so a declined card leaves the driver parked and able to retry; and the board is told AFTER the lock is released, from a snapshot of the counts, so a slow or broken screen can neither stall a gate nor corrupt the deque. Time comes from an injected clock, so the fee is testable on any day. Payment at exit is one more swappable rule.",code=lot,nodes=["Lot","Payment","Card"],say="The lot owns the invariant, so the lock lives in the lot."),
+ dict(id=8,stage="Build",title="Main -- prove it, including the race",think="I prove it runs: park, fill the lot, get a rejection, unpark, print a fee. Then I prove the lock: fifty gates released by one latch race for the last compact spot and the code asserts exactly one winner. Recorded output: parked at F1-C1 / Lot full for CAR / fee 20.0 / race winners = 1. If I cannot show the race, the lock is a claim, not a fact.",code=sect("public class Main"),nodes=["Main"],say="And I prove the lock with a two-thread race in main."),
+ dict(id=9,stage="Defend",title="Concurrency -- the race, the lock, and the two upgrades you name",think="""<b>The race in one line.</b> Gate 1 reads 'C1 is free'. Gate 2 reads 'C1 is free'. Both assign it. The bug is the gap between <i>read</i> and <i>write</i>; the lock closes the gap by making find-occupy-assign one step.<br><br>
+<b>Then say this, unprompted:</b> "One lock is honestly enough -- the section is a map lookup and two pointer writes, well under a microsecond, so ten gates never notice. If it ever mattered, the upgrade is a <b>lock per floor</b> so different floors park in parallel; and the lock-free version is a <b>compare-and-set on each spot</b> -- claim from null to vehicle, a loser tries the next spot." That sentence is the SDE-3 answer; the code below is the CAS version so you can show it if asked.<br><br>
+<b>Two rules that always hold, and the code keeps them:</b> the board is told after the lock is released, from a snapshot taken inside it (a slow or throwing observer stalls no gate and corrupts nothing); if you ever hold two locks, take them in one fixed order. One honest caveat: payment runs inside the lock here, so a slow card gateway blocks other gates for its duration; the upgrade is a PAYING state on the ticket and the payment call outside the lock, then a second short section to commit.""",code=X("lock-free spot","a truck needs two adjacent"),nodes=[],say="The race lives between find and occupy; one lock closes it. Upgrade: a lock per floor, or CAS per spot."),
+ dict(id=10,stage="Defend",title="Twists -- everything they add, and the four moves that answer all of them",think="""<b>The four moves.</b> Whatever they ask, it is one of these -- decide which, say it, then do it:<table><tr><th>They add...</th><th>The move</th><th>What changes</th></tr><tr><td>a new <b>rule</b> (pricing, assignment, payment)</td><td>new class behind the existing interface</td><td>one line at the call site</td></tr><tr><td>a new <b>listener</b> (board, metrics, SMS)</td><td>subscribe an Observer</td><td>nothing in the core</td></tr><tr><td>a new <b>state</b> (lost, reserved, blocked)</td><td>a transition on the ticket or spot</td><td>one enum value, one method</td></tr><tr><td>a new <b>invariant</b> under concurrency</td><td>same lock, wider critical section</td><td>the lock scope</td></tr></table>
+<b>The twists you will actually get, mapped:</b><table><tr><th>Twist</th><th>Move</th><th>One-line answer</th></tr>
+<tr><td>Weekend / surge pricing</td><td>rule</td><td>New class wrapping the flat rule (Decorator); swap what I inject. Code below.</td></tr>
+<tr><td>Nearest spot to the exit</td><td>rule</td><td>New assignment strategy keyed by a distance table; lot untouched.</td></tr>
+<tr><td>Lost ticket</td><td>state</td><td>ISSUED &rarr; LOST: bill the daily cap, free the spot. One transition, not ifs everywhere. Code below.</td></tr>
+<tr><td>Payment fails at exit</td><td>state</td><td>Nothing changes: ticket stays ISSUED, spot stays held; release only after money moved.</td></tr>
+<tr><td>Ten entry gates</td><td>invariant</td><td>Gates are thin; they all go through the lot's lock. Per-floor lock if asked for throughput.</td></tr>
+<tr><td>"Is it full for a truck?" every second</td><td>--</td><td>Off the per-size free counts the floor already keeps: O(floors x sizes), no scan.</td></tr>
+<tr><td>EV / handicapped spots</td><td>rule</td><td>A new size plus a fit-table row; a subclass only if the spot gains behaviour (a charger).</td></tr>
+<tr><td>Spot under maintenance</td><td>state</td><td>A spot status separate from occupancy; OUT_OF_SERVICE leaves the free deque without a vehicle.</td></tr>
+<tr><td>Truck needs two adjacent spots</td><td>invariant</td><td>Adjacency on spots, a run in assignment, a list on the ticket, reserved all-or-nothing under the lock. Say 'atomic'.</td></tr>
+<tr><td>Persist it / multiple branches</td><td>--</td><td>The maps become repositories behind an interface; the spot claim becomes a conditional update. Services unchanged.</td></tr>
+<tr><td>Reservations</td><td>state</td><td>RESERVED holds a spot with an expiry; a sweeper releases expired ones; park treats RESERVED as taken.</td></tr></table>""",code=X("pricing decorators","a second assignment")+"\n"+ext_lost,nodes=["Surge"],say="Every twist is a rule, a listener, a state, or an invariant. I name which, then add a class, a subscriber, a transition, or widen the lock."),
+ dict(id=11,stage="Defend",title="SOLID in one breath each, and the ten pokes",think="<table><tr><th>Letter</th><th>Where it is in this code</th></tr><tr><td><b>S</b></td><td>Spot: occupancy. Floor: its spots. Lot: orchestration and the lock. Pricing: money. Nobody does two of these.</td></tr><tr><td><b>O</b></td><td>Weekend pricing was a new class and one line -- the lot did not change.</td></tr><tr><td><b>L</b></td><td>Any PricingStrategy drops in; the lot never checks which one it got.</td></tr><tr><td><b>I</b></td><td>One-method interfaces; a payment class is never asked to price.</td></tr><tr><td><b>D</b></td><td>configure(pricing, assignment) hands in interfaces; tests hand in fakes.</td></tr></table>\n<b>Relationships, said precisely:</b> Car <i>is-a</i> Vehicle. Lot <i>owns</i> Floors, Floor <i>owns</i> Spots. Ticket <i>references</i> Spot and Vehicle. The lot <i>depends on</i> a strategy it is handed.<br><br>\n<table><tr><th>Poke</th><th>Two-breath answer</th></tr>\n<tr><td>Why is the lock in the lot, not the gate?</td><td>The invariant lives with the spot state; a lock per gate protects nothing shared.</td></tr>\n<tr><td>Ten gates on one lock?</td><td>The park section is a lookup and two pointer writes, well under a microsecond; the exit section also holds the payment call, which is the one thing that can make gates wait. Upgrades: payment outside the lock with a PAYING state, a lock per floor, then CAS per spot.</td></tr>\n<tr><td>Why a deque, not a list?</td><td>Head is the next free spot: peek, poll, push all O(1). occupy() refuses anything but the head it just peeked, so the O(1) claim cannot quietly become a scan. A list means scanning under a lock.</td></tr>\n<tr><td>Singleton -- how do you test it?</td><td>Business code never calls getInstance; the lot is passed in, so tests pass a fresh one with fakes.</td></tr>\n<tr><td>Two exit gates, same ticket?</td><td>Both call unpark under the lock; the first removes it, the second finds nothing and is rejected.</td></tr>\n<tr><td>Why does the ticket store the floor?</td><td>So unpark is O(1) instead of searching floors.</td></tr>\n<tr><td>Enum sizes or spot subclasses?</td><td>Enum until a size gains behaviour; an EV spot with a charger is when a subclass pays.</td></tr>\n<tr><td>Where would you use Factory?</td><td>Not yet. When vehicles are built from config strings, a registry factory makes a new type a registration.</td></tr>\n<tr><td>Where does time come from?</td><td>An injected Clock on the lot stamps entry and exit; pricing reads the ticket's times and never the wall clock, so the weekend rule and durations are testable on any day.</td></tr>\n<tr><td>How do you test the race?</td><td>Fifty tasks released by one latch on one spot; assert exactly one ticket. It is in Main, on the real lot; ExtDemo repeats it on the lock-free spot.</td></tr></table>\n<b>Big-O:</b> park O(floors) + O(1); unpark O(1); availability O(floors x sizes); memory O(spots + tickets).",code="",nodes=[],say="Each SOLID letter is a class name here. Every poke gets a class, a number or a transition -- never an adjective."),
+
+]
+
+PRACTICE=[
+ dict(kind="functional",q="\"Add weekend surge pricing, 1.5x, without touching ParkingLot. Go.\"",mins=10,
+  a="""<b>Move: rule &rarr; new class.</b> Pricing is already an interface, so surge is a class that <i>wraps</i> the flat rule (Decorator) and one changed line where it is injected. It reads the ticket's exit time, which the lot's injected clock stamped, so the weekend check is testable on a Tuesday. (The Pricing2 family in Extensions shows the same idea with a stackable daily cap; it is a separate interface, so it is not what you hand to configure().)""",
+  code=sect("// new rule live","// entry / exit gates"),
+  say="New class wrapping the old rule, one line swapped at the call site. Nothing in the lot moved."),
+ dict(kind="non-functional",q="\"Two cars, two gates, one compact spot left. Convince me it cannot double-book -- with a test, not a sentence.\"",mins=10,
+  a="""<b>Move: invariant &rarr; the lock.</b> The race lives in the gap between reading 'C1 is free' and writing 'C1 is taken'. <code>park()</code> does find + occupy + assign under one lock, so the gap is closed. The proof is a test: two gates submitted to a pool, both target the last spot, exactly one Future returns a ticket.""",
+  code=sect("        // the race: fifty gates","        System.out.println(\"lost ticket fee"),
+  say="Find, occupy and assign are one critical section in the lot. Here is a two-thread test that asserts one winner."),
+ dict(kind="functional",q="\"A driver lost the ticket. Implement it.\"",mins=10,
+  a="""<b>Move: state &rarr; transition.</b> Duration is unknown, so bill a flat daily cap. It is one transition on the ticket -- ISSUED &rarr; LOST &rarr; CLOSED -- that charges the cap and frees the spot, in the same order as unpark: take the payment first, then commit. The TicketState table in Extensions is the explicit version of the same rule: every illegal move throws, so a double exit or a close-before-pay is rejected rather than silently done.""",
+  code=X("ticket lifecycle","lock per floor")+"\n"+ext_lost,
+  say="Lost is a legal transition that bills the cap and frees the spot; the table refuses every illegal move."),
+ dict(kind="non-functional",q="\"The app asks 'how many compact spots are free on F2?' a thousand times a second. Make it O(1).\"",mins=5,
+  a="""<b>No new structure needed</b> -- the floor already keeps free spots per size in a deque, so the F2 answer is <code>f2.freeCount(COMPACT)</code>: one <code>deque.size()</code>, O(1). Lot-wide availability sums per floor: O(floors x sizes), never a scan of spots. Reads take the lot's lock so a count is never torn by a concurrent park (nanoseconds); if they push to 'a million spots', keep a lot-level count map updated under the same lock.""",
+  code="// on the floor, one deque per size: the count is its size\nint freeCount(SpotType st) { return free.get(st).size(); }   // O(1)\n\n// F2, compact, a thousand times a second:\nint n = f2.freeCount(SpotType.COMPACT);\n"+ext_avail,
+  say="The count comes off the per-size free deque the floor already keeps; nothing scans."),
+ dict(kind="functional",q="\"Payment fails at the exit gate. What is the state of the system, and show me unpark handling it.\"",mins=10,
+  a="""<b>Move: state, and the order of operations.</b> Nothing may be half-done. Peek the ticket (do not remove it), compute the fee, attempt payment; if it fails, return without touching the ticket or the spot -- ticket stays ISSUED, spot stays held, the driver retries or pays cash. Only after payment succeeds: PAID, remove from active, release, vacate, CLOSED. A second checkout finds no active ticket and is refused. Billing rounds any started hour up, so 60 minutes and 1 millisecond is two hours. The unpark below is the real one; ExitFlow in Extensions is the same order written against the transition table.""",
+  code=sect("    double unpark(String plate","    // availability")+"\n"+X("exit-time failure","class ExtDemo"),
+  say="Payment first; if it fails nothing has changed. Release happens only after money moved."),
+ dict(kind="twist",q="\"Now a truck needs two adjacent large spots.\"",mins=10,
+  a="""<b>Move: invariant &rarr; same lock, wider section.</b> Spots gain an adjacency link, assignment looks for a contiguous run of free large spots (a spot with no neighbour simply has no run), the ticket holds a list of spots, and the reservation is <b>all-or-nothing under one lock</b>: TruckParking finds the run and assigns both spots inside the same locked section, so a second truck can never take half of the pair. Say the word atomic. Mention that the CAS design makes this hard, which is a reason to prefer the lock here.""",
+  code=X("a truck needs two adjacent","persistence seam"),
+  say="Adjacency on spots, a run in assignment, a list on the ticket, reserved atomically under the floor lock."),
+ dict(kind="design",q="\"Which patterns did you use, why each, and where would each one break?\"",mins=5,
+  a="""<table><tr><th>Pattern</th><th>Where</th><th>Why it earned its place</th><th>Where it breaks</th></tr>
+<tr><td>Strategy</td><td>pricing, assignment, payment</td><td>each will be asked to change</td><td>a strategy needing six lot fields is not one algorithm</td></tr>
+<tr><td>Observer</td><td>floor &rarr; board</td><td>the core must not know screens exist</td><td>notifying inside the lock; a listener that throws</td></tr>
+<tr><td>Decorator</td><td>surge wraps flat</td><td>keep the old rule, add to it</td><td>one subclass per combination instead</td></tr>
+<tr><td>One lot instance</td><td>ParkingLot</td><td>one source of truth</td><td>getInstance inside services -- untestable; inject it</td></tr>
+<tr><td>State (table)</td><td>ticket status</td><td>lost / double-exit become rejected moves</td><td>a switch on status in every method</td></tr>
+<tr><td>Factory</td><td>not yet</td><td>only when vehicles come from config strings</td><td>a factory for one implementation</td></tr></table>""",
+  code="",say="Strategy three times because each rule will change; Observer for the board; Decorator for surge; a state table for the ticket. Factory not yet."),
+]
+NODES={ # id: (x,y,w,label,sub,kind)  portrait, three columns
+ "Gates":(16,16,140,"Entry | ExitGate","thin callers","cls"),"Main":(16,72,140,"Main","race test","cls"),
+ "Observer":(16,184,140,"ParkingObserver","interface","iface"),"Board":(16,240,140,"DisplayBoard","","cls"),
+ "Ticket":(16,352,140,"Ticket","spot, floor, vehicle","cls"),"Status":(16,408,140,"TicketStatus","ISSUED PAID LOST CLOSED","enum"),
+ "Lot":(180,16,140,"ParkingLot","lock, active tickets","cls"),"Floor":(180,184,140,"ParkingFloor","size to free deque","cls"),
+ "Spot":(180,352,140,"ParkingSpot","size, vehicle?","cls"),"Fit":(180,464,140,"Fit","type to sizes","cls"),
+ "Pricing":(344,16,140,"PricingStrategy","interface","iface"),"Flat":(344,72,140,"FlatHourlyPricing","","cls"),"Surge":(344,128,140,"WeekendSurge","decorates","cls"),
+ "Assign":(344,184,140,"SpotAssignment","interface","iface"),"Smallest":(344,240,140,"SmallestFit","","cls"),
+ "Payment":(344,296,140,"PaymentProcessor","interface","iface"),"Card":(344,352,140,"Card | Cash","","cls"),
+ "SpotType":(344,408,140,"SpotType","enum","enum"),"Vehicle":(344,464,140,"Vehicle","abstract","cls"),"Kinds":(344,520,140,"Car | Moto | Truck","is-a Vehicle","cls"),
+}
+EDGES=[ # (from,to,kind,step)
+ ("Kinds","Vehicle","isa",1),("Spot","Vehicle","ref",2),("Spot","SpotType","ref",2),("Fit","SpotType","ref",3),("Fit","Vehicle","ref",3),
+ ("Ticket","Spot","ref",4),("Ticket","Status","ref",4),("Flat","Pricing","isa",5),("Smallest","Assign","isa",6),
+ ("Floor","Spot","own",7),("Floor","Observer","use",7),("Board","Observer","isa",7),
+ ("Lot","Floor","own",8),("Lot","Ticket","own",8),("Lot","Pricing","use",8),("Lot","Assign","use",8),("Lot","Payment","use",8),("Card","Payment","isa",8),
+ ("Main","Lot","use",9),("Surge","Pricing","isa",10),("Gates","Lot","use",11),
+]
+PRIM={1: ['interface', 'composition'], 2: ['enum'], 3: ['collections'], 4: ['atomic', 'record', 'equals'], 5: ['strategy', 'interface'], 6: ['strategy'], 7: ['collections', 'observer', 'immutability'], 8: ['reentrantlock', 'chm', 'singleton', 'dip'], 9: ['threads', 'testing'], 10: ['decorator', 'ocp'], 11: ['repository', 'kiss'], 12: ['state', 'idempotency'], 13: ['deadlock', 'atomic', 'rwlock', 'volatile', 'condition'], 14: ['srp', 'ocp', 'lsp', 'isp', 'dip', 'encapsulate'], 15: ['factory', 'repository', 'adapter', 'builder']}
+for st in S: st['prim']=PRIM.get(st['id'],[])
+for i,st in enumerate(S): st['id']=i+1
+EDGES=[(f,t,k,st+3) for f,t,k,st in EDGES]
+PRIM={k+3:v for k,v in PRIM.items()}
+first={}
+for s in S:
+    if s["stage"]=="Brief": continue
+    for n in s["nodes"]: first.setdefault(n,s["id"])
+first["Status"]=next(st["id"] for st in S if st["title"].startswith("Ticket"))
+def esc(t): return html.escape(t)
+# SVG
+svg=['<svg id="cd" viewBox="0 0 500 580" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker><marker id="tri" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--bg2)" stroke="currentColor"/></marker></defs>']
+def center(n):
+    x,y,w,*_=NODES[n]; return x+w/2,y+20
+def anchor(a,b):
+    ax,ay=center(a); bx,by=center(b); wa=NODES[a][2]; wb=NODES[b][2]
+    # choose horizontal or vertical exit
+    if abs(bx-ax)>abs(by-ay):
+        sx=ax+(wa/2 if bx>ax else -wa/2); ex=bx-(wb/2 if bx>ax else -wb/2); return sx,ay,ex,by
+    sy=ay+(20 if by>ay else -20); ey=by-(20 if by>ay else -20); return ax,sy,bx,ey
+for f,t,k,st in EDGES:
+    sx,sy,ex,ey=anchor(f,t)
+    if abs(ex-sx)>abs(ey-sy): d=f"M{sx} {sy}H{(sx+ex)/2}V{ey}H{ex}"
+    else: d=f"M{sx} {sy}V{(sy+ey)/2}H{ex}V{ey}"
+    m="url(#tri)" if k=="isa" else "url(#ar)"
+    svg.append(f'<path class="e {k}" data-step="{st}" d="{d}" marker-end="{m}"/>')
+for n,(x,y,w,label,sub,kind) in NODES.items():
+    svg.append(f'<g class="nd {kind}" data-step="{first.get(n,99)}" transform="translate({x} {y})"><rect width="{w}" height="40" rx="6"/><text x="{w/2}" y="{16 if sub else 20}" text-anchor="middle" dominant-baseline="middle" class="lb">{esc(label)}</text>'+(f'<text x="{w/2}" y="30" text-anchor="middle" dominant-baseline="middle" class="sb">{esc(sub)}</text>' if sub else '')+'</g>')
+svg.append('</svg>')
+SVG="".join(svg)
+def prac_html():
+    out=['<div class="card"><div class="ch"><h3>How practice runs</h3></div><div class="cb">First implement the whole system from a blank <code>Main.java</code> -- 60 minutes, must compile and run a main. Then take the questions below one at a time: read the ask, start its timer, answer <i>in code</i> in your file, and only then open the fold. Each fold says which of the four moves it is, shows the reference code, and the sentence to say. The miss log at the bottom is the output of the session.</div></div>',
+         '<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3><button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">"Design a parking lot. Multiple floors, different vehicle sizes. Cars enter through entry gates and leave through exit gates; a ticket on the way in, payment on the way out. I want working code, not a diagram. Go."</div>Before typing, read steps 01 to 03 (requirements, the five moves, the whole design), then write your 5-8 clarifying questions. Then, in typing order:<ul class="chk"><li>Two enums: vehicle type, spot type; ticket status</li><li>Vehicle and three kinds; a dumb ParkingSpot; the fit table smallest-first</li><li>Ticket: spot, floor, vehicle, entry, exit, status</li><li>Pricing interface + one impl; assignment interface + one impl</li><li>ParkingFloor with per-size deque; occupy/vacate O(1); observers</li><li>ParkingLot: park/unpark under a lock; strategies injected</li><li>A main: park car + truck, fail a third, unpark, print fee</li></ul><details><summary>Compare with the reference <small>-- after the timer</small></summary><p><button class="timer" style="margin:0" id="goStudy">open Study at step 03 and walk to 10</button></p></details></div></div>']
+    for i,q in enumerate(PRACTICE,1):
+        code=('<div class="ed"><pre><code class="java">'+esc(q["code"])+'</code></pre></div>') if q["code"] else ''
+        out.append(f'<div class="card"><div class="ch"><span class="kind">{q["kind"]}</span><h3>{i} &middot; {esc(q["q"])}</h3><button class="timer" data-min="{q["mins"]}">start {q["mins"]}:00</button></div><div class="cb">Answer in code first. Then:<details><summary>Answer <small>-- after the timer</small></summary><div class="ans">{q["a"]}{code}<p class="say2"><b>Say:</b> {esc(q["say"])}</p></div></details></div></div>')
+    out.append('<div class="card"><div class="ch"><h3>Miss log</h3></div><div class="cb"><div class="miss"><p>Three specific lines: what the reference did that you did not. Saved in this browser.</p><textarea id="miss" placeholder="1.&#10;2.&#10;3."></textarea></div></div></div>')
+    return "".join(out)
+PRAC_HTML=prac_html()
+
+# ---- proper UML class diagram for the whole design
+def uml(x,y,w,name,fields,methods,stereo="",abstract=False):
+    LH=16; lines=[]; h=26+ (LH*len(fields)+8 if fields else 4) + (LH*len(methods)+8 if methods else 0)
+    stroke="var(--acc)" if stereo=="interface" else "var(--line)"; dash=' stroke-dasharray="5 3"' if stereo=="interface" else ""
+    g='<g transform="translate(%s %s)"><rect width="%s" height="%s" rx="4" fill="var(--bg3)" stroke="%s" stroke-width="1.2"%s/>'%(x,y,w,h,stroke,dash)
+    ty=12
+    if stereo: g+=f'<text x="{w/2}" y="{ty}" text-anchor="middle" font-size="10.5" fill="var(--muted)">&laquo;{stereo}&raquo;</text>'; ty+=11
+    ital=' font-style="italic"' if abstract else ""
+    g+='<text x="%s" y="%s" text-anchor="middle" font-size="13.5" font-weight="600" fill="var(--text)"%s>%s</text>'%(w/2,ty+2,ital,name)
+    cy=26 if not stereo else 34
+    if fields:
+        g+=f'<line x1="0" y1="{cy}" x2="{w}" y2="{cy}" stroke="var(--line)"/>'
+        for f in fields: cy+=LH; g+=f'<text x="8" y="{cy-3}" font-size="11.5" fill="var(--muted)">{f}</text>'
+        cy+=6
+    if methods:
+        g+=f'<line x1="0" y1="{cy}" x2="{w}" y2="{cy}" stroke="var(--line)"/>'
+        for m in methods: cy+=LH; g+=f'<text x="8" y="{cy-3}" font-size="11.5" fill="var(--text)">{m}</text>'
+    return g+'</g>', h
+def E(x,y,w,h): return dict(l=(x,y+h/2),r=(x+w,y+h/2),t=(x+w/2,y),b=(x+w/2,y+h),c=(x+w/2,y+h/2))
+B={}; parts=[]
+def put(k,x,y,w,name,fields,methods,stereo="",abstract=False):
+    g,h=uml(x,y,w,name,fields,methods,stereo,abstract); parts.append(g); B[k]=E(x,y,w,h)
+put("gates",10,20,220,"EntryGate / ExitGate",["lot: ParkingLot"],["admit(v): Ticket","checkout(plate, pay): double"])
+put("lot",300,20,290,"ParkingLot",["floors: List&lt;ParkingFloor&gt;","active: Map&lt;plate, Ticket&gt;","lock: ReentrantLock","pricing: PricingStrategy","assignment: SpotAssignmentStrategy"],["getInstance()","configure(pricing, assignment)","park(v): Ticket","unpark(plate, pay): double","availability(): Map&lt;SpotType,int&gt;","isFullFor(type): boolean"])
+put("floor",300,300,290,"ParkingFloor",["id: String","free: Map&lt;SpotType, Deque&lt;Spot&gt;&gt;","all: Map&lt;id, ParkingSpot&gt;","observers: List&lt;ParkingObserver&gt;"],["addSpot(s)","peekFree(size): ParkingSpot","freeCount(size): int","occupy(s) / vacate(s)","addObserver(o)"])
+put("spot",300,560,290,"ParkingSpot",["id: String","type: SpotType","vehicle: Vehicle  (null = free)"],["isFree(): boolean","assign(v) / release()"])
+put("fit",300,720,290,"Fit",["ORDER: Map&lt;VehicleType, List&lt;SpotType&gt;&gt;"],[])
+put("ticket",640,300,240,"Ticket",["id: int","spot: ParkingSpot","floor: ParkingFloor","vehicle: Vehicle","entryMs / exitMs: long","status: TicketStatus"],[])
+put("tstatus",640,470,240,"TicketStatus",["ISSUED, PAID, LOST, CLOSED"],[],"enum")
+put("stype",640,560,240,"SpotType",["SMALL, COMPACT, LARGE"],[],"enum")
+put("vtype",640,650,240,"VehicleType",["MOTORCYCLE, CAR, TRUCK"],[],"enum")
+put("vehicle",10,560,220,"Vehicle",["plate: String","type: VehicleType"],[],"",True)
+put("kinds",10,680,220,"Car | Motorcycle | Truck",[],["Car(plate) &rarr; super(plate, CAR)"])
+put("obs",10,300,220,"ParkingObserver",[],["onChange(floorId, free)"],"interface")
+put("board",10,420,220,"DisplayBoard",[],["onChange(...) &rarr; print"])
+put("pricing",930,20,250,"PricingStrategy",[],["price(t: Ticket): double"],"interface")
+put("flat",930,110,250,"FlatHourlyPricing",["RATE: Map&lt;SpotType,int&gt;"],["price(t): hours x RATE[size]"])
+put("surge",930,215,250,"WeekendSurgePricing",["base: PricingStrategy"],["price(t): base.price(t) x 1.5"])
+put("assign",930,330,250,"SpotAssignmentStrategy",[],["find(floor, type): ParkingSpot"],"interface")
+put("smallest",930,420,250,"SmallestFitStrategy",[],["find: for size in Fit.ORDER[type]:","  floor.peekFree(size)"])
+put("pay",930,530,250,"PaymentProcessor",[],["pay(amount): boolean"],"interface")
+put("card",930,620,250,"CardPayment | CashPayment",[],["pay(amount) &rarr; true"])
+def ln(a,b,kind,label="",via=None):
+    (x1,y1),(x2,y2)=a,b
+    d=f"M{x1} {y1}"+("".join(f"L{px} {py}" for px,py in via) if via else "")+f"L{x2} {y2}"
+    st={"inherit":'stroke="var(--muted)" marker-end="url(#uTri)"',"compose":'stroke="var(--text)" marker-start="url(#uDia)" marker-end="url(#uArr)"',"assoc":'stroke="var(--muted)" marker-end="url(#uArr)"',"inject":'stroke="var(--acc)" stroke-dasharray="5 4" marker-end="url(#uArr)"',"notify":'stroke="var(--acc2)" stroke-dasharray="2 3" marker-end="url(#uArr)"'}[kind]
+    s=f'<path d="{d}" fill="none" stroke-width="1.3" {st}/>'
+    if label:
+        if via: ax,ay,bx,by=x1,y1,via[0][0],via[0][1]
+        else: ax,ay,bx,by=x1,y1,x2,y2
+        mx,my=(ax+bx)/2,(ay+by)/2
+        if abs(ay-by)<2: s+=f'<text x="{mx}" y="{my-5}" text-anchor="middle" font-size="10.5" fill="var(--muted)">{label}</text>'
+        else: s+=f'<text x="{mx+6}" y="{my+4}" font-size="10.5" fill="var(--muted)">{label}</text>'
+    return s
+defs='<defs><marker id="uTri" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto"><path d="M0 0L12 6L0 12z" fill="var(--bg3)" stroke="var(--muted)" stroke-width="1.2"/></marker><marker id="uDia" viewBox="0 0 12 12" refX="1" refY="6" markerWidth="12" markerHeight="12" orient="auto"><path d="M1 6L6 1L11 6L6 11z" fill="var(--text)"/></marker><marker id="uArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10" fill="none" stroke="currentColor" stroke-width="1.3"/></marker></defs>'
+edges=[
+ ln(B["kinds"]["t"],B["vehicle"]["b"],"inherit"),
+ ln(B["board"]["t"],B["obs"]["b"],"inherit"),
+ ln(B["flat"]["t"],B["pricing"]["b"],"inherit"),ln((B["surge"]["t"][0]-60,B["surge"]["t"][1]),(B["pricing"]["b"][0]-60,B["pricing"]["b"][1]),"inherit"),
+ ln(B["smallest"]["t"],B["assign"]["b"],"inherit"),ln(B["card"]["t"],B["pay"]["b"],"inherit"),
+ ln(B["lot"]["b"],B["floor"]["t"],"compose","1..*"),ln(B["floor"]["b"],B["spot"]["t"],"compose","1..*"),
+ ln(B["lot"]["r"],B["ticket"]["t"],"compose","active",[(B["ticket"]["t"][0],B["lot"]["r"][1])]),
+ ln(B["ticket"]["l"],B["spot"]["r"],"assoc","",[(B["spot"]["r"][0]+20,B["ticket"]["l"][1])]),
+ ln(B["ticket"]["b"],B["tstatus"]["t"],"assoc"),
+ ln(B["spot"]["r"],B["stype"]["l"],"assoc"),
+ ln((B["ticket"]["l"][0],B["ticket"]["l"][1]+30),(B["floor"]["r"][0],B["ticket"]["l"][1]+30),"assoc"),
+ ln((B["lot"]["r"][0],B["lot"]["r"][1]-40),(B["pricing"]["l"][0],B["pricing"]["l"][1]),"inject","injected",[(B["pricing"]["l"][0]-30,B["lot"]["r"][1]-40),(B["pricing"]["l"][0]-30,B["pricing"]["l"][1])]),
+ ln((B["lot"]["r"][0],B["lot"]["r"][1]-20),(B["assign"]["l"][0],B["assign"]["l"][1]),"inject","",[(B["assign"]["l"][0]-45,B["lot"]["r"][1]-20),(B["assign"]["l"][0]-45,B["assign"]["l"][1])]),
+ ln((B["lot"]["r"][0],B["lot"]["r"][1]),(B["pay"]["l"][0],B["pay"]["l"][1]),"inject","",[(B["pay"]["l"][0]-60,B["lot"]["r"][1]),(B["pay"]["l"][0]-60,B["pay"]["l"][1])]),
+ ln(B["surge"]["l"],(B["pricing"]["l"][0]-15,B["pricing"]["l"][1]+12),"assoc","",[(B["pricing"]["l"][0]-15,B["surge"]["l"][1])]),
+ ln((B["floor"]["l"][0],B["obs"]["r"][1]),B["obs"]["r"],"notify","notifies"),
+ ln(B["gates"]["r"],(B["lot"]["l"][0],B["gates"]["r"][1]),"assoc","calls"),
+ ln(B["smallest"]["l"],(B["fit"]["r"][0],B["fit"]["r"][1]),"assoc","",[(B["fit"]["r"][0]+30,B["smallest"]["l"][1]),(B["fit"]["r"][0]+30,B["fit"]["r"][1])]),
+]
+def lg(x,y,kind,text):
+    st={"inherit":'stroke="var(--muted)" marker-end="url(#uTri)"',"compose":'stroke="var(--text)" marker-start="url(#uDia)" marker-end="url(#uArr)"',"assoc":'stroke="var(--muted)" marker-end="url(#uArr)"',"inject":'stroke="var(--acc)" stroke-dasharray="5 4" marker-end="url(#uArr)"',"notify":'stroke="var(--acc2)" stroke-dasharray="2 3" marker-end="url(#uArr)"'}[kind]
+    return f'<path d="M{x} {y}L{x+44} {y}" fill="none" stroke-width="1.3" {st}/><text x="{x+52}" y="{y+4}" font-size="11" fill="var(--muted)">{text}</text>'
+legend='<g>'+lg(20,815,"inherit","extends / implements")+lg(240,815,"compose","owns (composition)")+lg(460,815,"assoc","references")+lg(640,815,"inject","injected (handed in)")+lg(860,815,"notify","notifies")+'<rect x="1040" y="806" width="30" height="18" rx="3" fill="var(--bg3)" stroke="var(--acc)" stroke-dasharray="5 3"/><text x="1078" y="819" font-size="11" fill="var(--muted)">interface</text><text x="1150" y="819" font-size="11" font-style="italic" fill="var(--muted)">abstract</text></g>'
+UMLSVG='<svg viewBox="0 0 1230 840" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--mono)">'+defs+"".join(edges)+"".join(parts)+legend+'</svg>'
+
+
+def _mv(w,h,inner): return '<div class="fullboard mv"><svg viewBox="0 0 %s %s" xmlns="http://www.w3.org/2000/svg" style="font-family:var(--mono)">%s</svg></div>'%(w,h,inner)
+def _bx(x,y,w,h,t,sub="",acc=False,dash=False):
+    st="var(--acc)" if acc else "var(--line)"; f="var(--bg3)"
+    g='<g transform="translate(%s %s)"><rect width="%s" height="%s" rx="6" fill="%s" stroke="%s" stroke-width="1.3"%s/>'%(x,y,w,h,f,st,' stroke-dasharray="5 3"' if dash else '')
+    g+='<text x="%s" y="%s" text-anchor="middle" dominant-baseline="middle" font-size="12.5" fill="var(--text)">%s</text>'%(w/2,h/2-(6 if sub else 0),t)
+    if sub: g+='<text x="%s" y="%s" text-anchor="middle" dominant-baseline="middle" font-size="10.5" fill="var(--muted)">%s</text>'%(w/2,h/2+10,sub)
+    return g+'</g>'
+def _ar(d,acc=False,dash=False): return '<path d="%s" fill="none" stroke="%s" stroke-width="1.3"%s marker-end="url(#uArr)"/>'%(d,"var(--acc)" if acc else "var(--muted)",' stroke-dasharray="5 4"' if dash else '')
+def _tx(x,y,t,col="var(--muted)",fs=11,anc="middle"): return '<text x="%s" y="%s" text-anchor="%s" font-size="%s" fill="%s">%s</text>'%(x,y,anc,fs,col,t)
+_D=defs
+# move 1: sentence with nouns -> boxes
+m1=_D+'<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'+_tx(615,47,"a VEHICLE enters a GATE; a FLOOR has SPOTS of three sizes; issue a TICKET; take PAYMENT; answer AVAILABILITY","var(--text)",12.5)
+for k,(x,t,sub,acc) in enumerate([(30,"Vehicle","plate, type",1),(230,"Gate","no state: a caller",0),(430,"Floor","its spots",1),(630,"Spot","size, occupant",1),(830,"Ticket","spot, vehicle, times, status",1),(1040,"Availability","a question: a method",0)]):
+    w=190 if t=="Ticket" else 170; m1+=_bx(x,110,w,46,t,sub,acc=bool(acc),dash=not acc)+_ar("M%s 64 V110"%(x+w/2))
+m1+=_tx(615,190,"solid = has its own state, becomes a class.   dashed = no state of its own: a caller or a method","var(--muted)",11)
+# move 2: verbs -> owner of the state
+m2=_D
+for k,(verb,cls,meth) in enumerate([("assign a vehicle to a spot","Spot  (owns the occupant)","spot.assign(v)"),("find a free spot of a size","Floor  (owns the free lists)","floor.peekFree(size)"),("park a vehicle","ParkingLot  (owns floors + tickets + lock)","lot.park(v)")]):
+    y=24+k*56; m2+=_bx(30,y,330,44,verb,"the verb")+_ar("M360 %s H430"%(y+22),True)+_bx(430,y,400,44,cls,"the class whose state it touches",acc=True)+_ar("M830 %s H900"%(y+22),True)+_bx(900,y,300,44,meth,"the method")
+m2+=_tx(615,215,"a verb whose state is spread over two classes goes to the class that owns both: that class becomes the orchestrator","var(--muted)",11)
+# move 3: rules -> interfaces handed in
+m3=_D+_bx(30,60,220,90,"ParkingLot","configure(pricing, assignment)",acc=True)
+for k,(t,sub) in enumerate([("PricingStrategy","flat today, surge tomorrow"),("SpotAssignmentStrategy","smallest fit, nearest exit"),("PaymentProcessor","card, cash, UPI")]):
+    y=24+k*60; m3+=_ar("M250 105 H330 V%s H400"%(y+22),True,True)+_bx(400,y,300,44,t,sub,dash=True)
+    m3+=_bx(760,y,420,44,"%s"%(["FlatHourly / WeekendSurge","SmallestFit / NearestToExit","CardPayment / CashPayment"][k]),"the classes that can be handed in")+_ar("M760 %s H700"%(y+22))
+m3+=_tx(615,215,"dashed lavender = handed in. the lot never builds these, so swapping one is a new class and one changed line","var(--muted)",11)
+# move 4: two gates, one spot, the gap
+m4=_D+_bx(30,30,160,44,"gate 1","reads: C1 free")+_bx(30,110,160,44,"gate 2","reads: C1 free")+_bx(330,70,180,44,"spot C1","free",acc=True)
+m4+=_ar("M190 52 H330 V70")+_ar("M190 132 H330 V114")+_tx(260,40,"read","var(--muted)",10.5)+_tx(260,160,"read","var(--muted)",10.5)
+m4+='<rect x="540" y="20" width="300" height="140" rx="6" fill="none" stroke="#f38ba8" stroke-dasharray="4 3"/>'+_tx(690,45,"the gap","#f38ba8",12)+_tx(690,70,"both saw free, both write:","#f38ba8",11)+_tx(690,90,"two cars, one spot","#f38ba8",11)+_tx(690,130,"fix: read + write as ONE step, under one lock","var(--text)",11)
+m4+=_bx(880,40,320,100,"ParkingLot.lock","find + occupy + issue = one step",acc=True)+_tx(1040,165,"the lock lives where the shared state lives","var(--muted)",10.5)+_tx(1040,185,"listeners (the board) are called after unlock","var(--muted)",10.5)
+# move 5: each collection and its question
+m5=_D
+for k,(q,shape,cost) in enumerate([("next free spot of this size?","Map&lt;SpotType, Deque&lt;Spot&gt;&gt;  head = answer","O(1)"),("this ticket, by plate?","Map&lt;plate, Ticket&gt;","O(1)"),("which floor is this ticket on?","Ticket.floor stored at entry","O(1), no search"),("does a car fit a compact spot?","Fit.ORDER: Map&lt;VehicleType, List&lt;SpotType&gt;&gt;","one lookup")]):
+    y=20+k*50; m5+=_bx(30,y,360,40,q,"the question")+_ar("M390 %s H450"%(y+20),True)+_bx(450,y,520,40,shape,"the shape",acc=True)+_ar("M970 %s H1030"%(y+20),True)+_bx(1030,y,170,40,cost,"")
+MV={1:_mv(1230,205,m1),2:_mv(1230,230,m2),3:_mv(1230,230,m3),4:_mv(1230,200,m4),5:_mv(1230,225,m5)}
+
+FULL='<div class="fullboard">'+UMLSVG+'</div>'
+steps_js=json.dumps([{k:(v if k!="code" else v) for k,v in s.items()} for s in S])
+steps_js=steps_js.replace('%%FULLBOARD%%',json.dumps(FULL)[1:-1])
+for _k,_v in MV.items(): steps_js=steps_js.replace('%%MOVE'+str(_k)+'%%',json.dumps(_v)[1:-1])
+page=f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Parking Lot -- LLD workbench</title>
+<style>
+:root{{--bg:#0f1419;--bg2:#161b22;--bg3:#1c2330;--line:#2a3441;--text:#d6dde6;--muted:#7d8896;--acc:#3ddbb0;--acc2:#7cc4ff;--warn:#f0a35e;--err:#ff6b6b;--mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;--ui:-apple-system,"Segoe UI",Inter,Roboto,sans-serif}}
+*{{box-sizing:border-box}} html,body{{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--ui);font-size:14px}}
+.top{{height:48px;display:flex;align-items:center;gap:16px;padding:0 16px;background:var(--bg2);border-bottom:1px solid var(--line)}}
+.top h1{{font-size:15px;font-weight:600;margin:0}} .top .sub{{color:var(--muted);font-size:12px}}
+.mode{{margin-left:auto;display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}} .mode button{{background:transparent;color:var(--muted);border:0;padding:6px 14px;cursor:pointer;font:inherit}} .mode button.on{{background:var(--acc);color:#04211a;font-weight:600}}
+.kbd{{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--muted)}}
+.wrap{{display:grid;grid-template-columns:240px 1fr 520px;height:calc(100% - 48px)}} .wrap.wide{{grid-template-columns:240px 1fr 0}} .wrap.wide .right{{display:none}}
+.side{{background:var(--bg2);border-right:1px solid var(--line);overflow:auto;padding:10px 0}}
+.side .grp{{padding:10px 16px 4px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}}
+.side .st{{display:flex;gap:10px;align-items:baseline;padding:7px 16px;cursor:pointer;border-left:3px solid transparent}} .side .st:hover{{background:var(--bg3)}} .side .st.on{{border-left-color:var(--acc);background:var(--bg3)}} .side .st.done{{color:var(--muted)}}
+.side .st .n{{font-family:var(--mono);font-size:11px;color:var(--muted);min-width:18px}}
+.main{{overflow:auto;padding:0}} .right{{background:var(--bg2);border-left:1px solid var(--line);overflow:auto;padding:14px}}
+.hdr{{padding:16px 22px 8px;display:flex;align-items:baseline;gap:12px}} .hdr h2{{margin:0;font-size:18px;font-weight:600}} .hdr .stage{{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:2px 7px}}
+.think{{margin:8px 22px 14px;padding:12px 14px;background:var(--bg3);border-left:3px solid var(--acc2);border-radius:0 6px 6px 0;line-height:1.55}} .think b{{color:var(--acc2)}} .fullboard{{margin:0 0 14px;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:8px}} .fullboard svg{{width:100%;height:auto;display:block}} .fullboard.mv{{margin:8px 0 10px;padding:6px}} .fullboard .nd,.fullboard .e,.fullboard .el{{opacity:1!important}} .fullboard .nd rect{{fill:var(--bg3)!important;stroke:var(--line)!important}} .think table{{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}}  .think th,.think td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}} .think th{{color:var(--muted);font-weight:500}} .think code{{font-family:var(--mono);font-size:12px;color:var(--acc)}}
+.say{{margin:0 22px 6px;color:var(--muted);font-size:13px}} .prim{{margin:0 22px 12px;font-size:12px;color:var(--muted)}} .prim a{{color:var(--acc2);font-family:var(--mono)}} .say::before{{content:"say aloud: ";color:var(--warn);font-weight:600}}
+.ed{{margin:0 22px 20px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--bg2)}}
+.ed .tab{{display:flex;gap:8px;align-items:center;padding:6px 12px;background:var(--bg3);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--muted)}} .ed .tab b{{color:var(--text);font-weight:500}}
+.ed .chips{{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--bg2)}} .chip{{font-size:10px;border:1px solid var(--line);border-radius:999px;padding:1px 7px;color:var(--muted)}} .chip.new{{border-color:var(--acc);color:var(--acc)}}
+pre{{margin:0;padding:14px 0;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;tab-size:4}} pre .ln{{display:inline-block;width:44px;text-align:right;padding-right:14px;color:#3d4756;user-select:none}}
+.k{{color:#c792ea}} .s{{color:#c3e88d}} .c{{color:#5c6773;font-style:italic}} .n{{color:#f78c6c}} .t{{color:#82aaff}}
+.nav{{display:flex;gap:10px;padding:0 22px 24px}} .nav button{{background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 14px;cursor:pointer;font:inherit}} .nav button.pri{{background:var(--acc);color:#04211a;border-color:var(--acc);font-weight:600}}
+.right h3{{margin:4px 0 10px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}}
+#cd{{width:100%;height:auto;display:block}} .nd rect{{fill:var(--bg3);stroke:var(--line);stroke-width:1.2}} .nd text{{fill:var(--text);font-family:var(--mono)}} .nd .lb{{font-size:12px}} .nd .sb{{font-size:9.5px;fill:var(--muted)}}
+.nd.iface rect{{stroke-dasharray:4 3}} .nd.enum rect{{rx:14}} .nd{{opacity:0;transition:opacity .3s}} .nd.seen{{opacity:.45}} .nd.cur{{opacity:1}} .nd.cur rect{{stroke:var(--acc);stroke-width:1.8;fill:#12302a}}
+.e{{fill:none;stroke:var(--line);stroke-width:1.2;opacity:0;transition:opacity .3s;color:var(--line)}} .e.seen{{opacity:.6}} .e.cur{{opacity:1;stroke:var(--acc);color:var(--acc)}} .e.isa{{}} .e.ref{{stroke-dasharray:4 3}} .e.use{{stroke-dasharray:1.5 3}}
+.legend{{display:flex;gap:12px;font-size:11px;color:var(--muted);margin:8px 0 14px;flex-wrap:wrap}} .legend span::before{{content:"";display:inline-block;width:22px;border-top:1.5px solid var(--muted);margin-right:5px;vertical-align:middle}} .legend .own::before{{}} .legend .ref::before{{border-top-style:dashed}} .legend .use::before{{border-top-style:dotted}}
+.pat{{margin-top:10px}} .pat div{{display:flex;justify-content:space-between;padding:6px 8px;border-bottom:1px solid var(--line);font-size:12px}} .pat div span:last-child{{color:var(--muted)}} .pat div.on{{color:var(--acc)}} .pat div.on span:last-child{{color:var(--text)}}
+/* practice */
+.prac{{display:none;padding:22px}} .prac.on{{display:block}} .main.pmode .study{{display:none}}
+.card{{border:1px solid var(--line);border-radius:8px;background:var(--bg2);margin-bottom:16px}} .card .ch{{display:flex;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}} .card .ch h3{{margin:0;font-size:15px}} .card .cb{{padding:14px 16px;line-height:1.6}}
+.timer{{margin-left:auto;font-family:var(--mono);font-size:12px;background:transparent;color:var(--acc);border:1px solid var(--acc);border-radius:999px;padding:4px 12px;cursor:pointer}} .timer.run{{background:var(--acc);color:#04211a}} .timer.done{{border-color:var(--err);color:var(--err)}}
+.kind{{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:2px 6px;white-space:nowrap}} .ans table{{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}} .ans th,.ans td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}} .ans th{{color:var(--muted);font-weight:500}} .ans .ed{{margin:10px 0}} .say2{{margin:8px 0 0;padding:8px 12px;background:#132a24;border-left:3px solid var(--acc);border-radius:0 6px 6px 0}} .say2 b{{color:var(--acc)}}
+.prompt{{background:var(--bg3);border-left:3px solid var(--warn);padding:10px 14px;border-radius:0 6px 6px 0;font-style:italic;margin-bottom:10px}}
+details{{border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin-top:10px}} summary{{cursor:pointer;color:var(--acc2);font-weight:600}} a{{color:var(--acc)}}
+.right .lock{{display:none;color:var(--muted);padding:40px 10px;text-align:center;border:1px dashed var(--line);border-radius:8px}} .right.locked .lock{{display:block}} .right.locked #cd,.right.locked .legend,.right.locked .pat,.right.locked h3:nth-of-type(2){{display:none}} summary small{{color:var(--muted);font-weight:400}}
+table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}} th{{color:var(--text);font-weight:500;white-space:nowrap}} td{{color:var(--muted)}}
+ul.chk{{list-style:none;padding:0;margin:6px 0}} ul.chk li::before{{content:"[ ] ";font-family:var(--mono);color:var(--muted)}}
+.miss textarea{{width:100%;min-height:80px;background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px;font:13px var(--mono)}}
+@media (max-width:1100px){{.wrap{{grid-template-columns:200px 1fr}} .right{{display:none}}}}
+</style></head><body>
+<div class="top"><h1>Parking Lot</h1><span class="sub">LLD workbench &middot; Java &middot; reference compiled on OpenJDK 21; demo, 7 failure tests and a 50-thread race pass</span><span class="sub"><span class="kbd">&larr;</span> <span class="kbd">&rarr;</span> steps</span>
+<div class="mode"><button id="mStudy" class="on">Study</button><button id="mPrac">Practice</button></div></div>
+<div class="wrap">
+<nav class="side" id="side"></nav>
+<section class="main" id="main">
+  <div class="study" id="study"></div>
+  <div class="prac" id="prac">{PRAC_HTML}</div>
+</section>
+<aside class="right" id="right"><h3>Class diagram -- grows with the steps</h3><div class="lock">Locked in Practice mode until the Stage 2 fold is opened.</div>{SVG}<div class="legend"><span class="own">owns</span><span class="ref">references</span><span class="use">uses / injected</span><span>hollow head = is-a</span></div>
+<h3>Patterns, named when earned</h3><div class="pat" id="pat"><div data-at="7"><span>Strategy</span><span>step 7: pricing</span></div><div data-at="8"><span>Strategy</span><span>step 8: assignment</span></div><div data-at="9"><span>Observer</span><span>step 9: the board</span></div><div data-at="10"><span>Strategy / one lot</span><span>step 10: payment</span></div><div data-at="14"><span>Decorator, State</span><span>step 14: surge, lost ticket</span></div></div></aside>
+</div>
+<script>
+const STEPS={steps_js};
+const KW=/\\b(abstract|boolean|break|case|catch|class|continue|default|do|double|else|enum|extends|final|finally|for|if|implements|import|int|interface|long|new|null|package|private|protected|public|return|static|super|switch|synchronized|this|throw|throws|try|void|while|var|record|true|false)\\b/g;
+const TY=/\\b([A-Z][A-Za-z0-9]*)\\b/g;
+function hl(src){{return src.split('\\n').map((l,i)=>{{let e=l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');const parts=e.split(/(\\/\\/.*$|"(?:[^"\\\\]|\\\\.)*")/);e=parts.map((p,j)=>j%2?(p.startsWith('//')?'<span class="c">'+p+'</span>':'<span class="s">'+p+'</span>'):p.replace(KW,'<span class="k">$1</span>').replace(TY,'<span class="t">$1</span>').replace(/\\b(\\d+(?:\\.\\d+)?)\\b/g,'<span class="n">$1</span>')).join('');return '<span class="ln">'+(i+1)+'</span>'+e;}}).join('\\n');}}
+let cur=parseInt(localStorage.getItem('pl.step')||'1',10);
+const side=document.getElementById('side'),study=document.getElementById('study');
+function classesSoFar(n){{const out=[];STEPS.filter(s=>s.id<=n&&s.code).forEach(s=>{{(s.code.match(/(?:class|interface|enum)\\s+([A-Z]\\w*)/g)||[]).forEach(m=>out.push({{name:m.split(/\\s+/)[1],step:s.id}}));}});return out;}}
+function render(){{
+  side.innerHTML='';let g='';STEPS.forEach(s=>{{if(s.stage!==g){{g=s.stage;side.insertAdjacentHTML('beforeend','<div class="grp">'+g+'</div>');}}side.insertAdjacentHTML('beforeend','<div class="st'+(s.id===cur?' on':s.id<cur?' done':'')+'" data-id="'+s.id+'"><span class="n">'+String(s.id).padStart(2,'0')+'</span><span>'+s.title+'</span></div>');}});
+  const s=STEPS[cur-1];const chips=classesSoFar(cur).map(c=>'<span class="chip'+(c.step===cur?' new':'')+'">'+c.name+'</span>').join('');
+  study.innerHTML='<div class="hdr"><span class="stage">'+s.stage+'</span><h2>'+String(s.id).padStart(2,'0')+' &middot; '+s.title+'</h2></div><div class="think">'+s.think+'</div><p class="say">'+s.say+'</p>'+(s.prim&&s.prim.length?'<p class="prim">primer: '+s.prim.map(x=>'<a href="java-primer.html#'+x+'" target="_blank">'+x+'</a>').join(' &middot; ')+'</p>':'')+(s.code?'<div class="ed"><div class="tab"><b>Main.java</b> &middot; classes so far; step '+s.id+' adds the highlighted ones</div><div class="chips">'+chips+'</div><pre>'+hl(s.code)+'</pre></div>':'')+'<div class="nav"><button id="prev">&larr; prev</button><button id="next" class="pri">next &rarr;</button></div>';
+  document.getElementById('prev').onclick=()=>go(cur-1);document.getElementById('next').onclick=()=>go(cur+1);
+  document.querySelectorAll('#cd .nd').forEach(n=>{{const st=+n.dataset.step;n.classList.toggle('cur',st===cur||(s.nodes.includes(n.dataset.id||'')));n.classList.toggle('seen',st<cur);}});
+  document.querySelectorAll('#cd .e').forEach(e=>{{const st=+e.dataset.step;e.classList.toggle('cur',st===cur);e.classList.toggle('seen',st<cur);}});
+  document.querySelectorAll('#pat div').forEach(d=>d.classList.toggle('on',+d.dataset.at<=cur));
+  document.querySelector('.wrap').classList.toggle('wide',!!s.wide);localStorage.setItem('pl.step',cur);study.scrollIntoView();
+}}
+function go(n){{if(n<1||n>STEPS.length)return;cur=n;setMode('study');render();}}
+side.addEventListener('click',e=>{{const t=e.target.closest('.st');if(t)go(+t.dataset.id);}});
+document.addEventListener('keydown',e=>{{const t=e.target;if(t&&(t.tagName==='TEXTAREA'||t.tagName==='INPUT'||t.isContentEditable))return;if(e.key==='ArrowRight')go(cur+1);if(e.key==='ArrowLeft')go(cur-1);}});
+const main=document.getElementById('main'),prac=document.getElementById('prac');
+function setMode(m){{const p=m==='prac';main.classList.toggle('pmode',p);prac.classList.toggle('on',p);if(p){{document.querySelectorAll('#cd .nd,#cd .e').forEach(n=>{{n.classList.add('seen');n.classList.remove('cur');}});}}document.getElementById('mStudy').classList.toggle('on',!p);document.getElementById('mPrac').classList.toggle('on',p);localStorage.setItem('pl.mode',m);}}
+document.getElementById('mStudy').onclick=()=>setMode('study');document.getElementById('mPrac').onclick=()=>setMode('prac');
+document.getElementById('goStudy').onclick=()=>go(4);document.querySelectorAll('#prac pre code.java').forEach(el=>{{el.innerHTML=hl(el.textContent);}});
+document.querySelectorAll('button.timer[data-min]').forEach(b=>{{const total=+b.dataset.min*60;let left=total,id=null;const show=()=>{{b.textContent=(id?'':'start ')+Math.floor(left/60)+':'+String(left%60).padStart(2,'0');}};b.onclick=()=>{{if(id){{clearInterval(id);id=null;b.classList.remove('run');show();return;}}if(left<=0)left=total;b.classList.remove('done');b.classList.add('run');id=setInterval(()=>{{left--;show();if(left<=0){{clearInterval(id);id=null;b.classList.remove('run');b.classList.add('done');b.textContent='time -- open the fold';}}}},1000);show();}};show();}});
+const miss=document.getElementById('miss');try{{miss.value=localStorage.getItem('pl.miss')||'';}}catch(e){{}}miss.addEventListener('input',()=>{{try{{localStorage.setItem('pl.miss',miss.value);}}catch(e){{}}}});
+// nodes need data-id for step highlighting by name
+document.querySelectorAll('#cd .nd').forEach((n,i)=>n.dataset.id=Object.keys({json.dumps(NODES)})[i]);
+setMode(localStorage.getItem('pl.mode')||'study');render();
+</script></body></html>'''
+(H/"parking-lot-workbench.html").write_text(page); print("written",len(page))
+
+# ---- guard: the Build steps, typed in order, must compile and run (a reviewer found they did not)
+import subprocess,tempfile,os
+_code="\n".join(st["code"] for st in S if st["stage"]=="Build" and st["code"])
+_hdr="import java.util.*;\nimport java.util.concurrent.*;\nimport java.util.concurrent.atomic.*;\nimport java.util.concurrent.locks.*;\nimport java.time.*;\n"
+_d=tempfile.mkdtemp(prefix="plwb_"); open(os.path.join(_d,"Main.java"),"w").write(_hdr+_code)
+_r=subprocess.run(["/opt/homebrew/opt/openjdk@21/bin/javac","Main.java"],cwd=_d,capture_output=True,text=True)
+if _r.returncode!=0: raise SystemExit("BUILD STEPS DO NOT COMPILE:\n"+_r.stderr)
+_r=subprocess.run(["/opt/homebrew/opt/openjdk@21/bin/java","Main"],cwd=_d,capture_output=True,text=True)
+if _r.returncode!=0 or "race winners = 1" not in _r.stdout: raise SystemExit("BUILD STEPS DO NOT RUN:\n"+_r.stdout[-500:]+_r.stderr[-500:])
+print("guard: assembled Build steps compile and run (race winners = 1)")

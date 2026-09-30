@@ -1,0 +1,172 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+/**
+ * One test per claim the design makes. Each one reproduces the failure an ATM actually has in the field --
+ * a retained card, an empty cassette, a decline, a jam, a bank that never answers -- and proves the code
+ * ends in a state where the customer has lost nothing.
+ */
+public class FailureTests {
+    static int failures = 0;
+    /** Print one line per claim and remember how many were wrong. */
+    static void check(boolean ok, String what) {
+        System.out.println((ok ? "PASS " : "FAIL ") + what);
+        if (!ok) failures++;
+    }
+    static final Clock CLOCK = () -> 1_757_000_000_000L;      // a fixed "today", so nothing depends on the wall clock
+
+    /** A machine with its own cassettes, wired to the bank handed in. */
+    static ATM machine(String id, BankService bank, NoteFeeder feeder, int[] counts) {
+        CashDispenser d = new CashDispenser(feeder);
+        Note[] all = Note.values();
+        for (int i = 0; i < counts.length; i++) d.refill(all[i], counts[i]);
+        ATM a = new ATM(id, bank, d);
+        a.setClock(CLOCK);
+        a.configure(new AmountRules(100, 25_000, 100), new FewestNotes());
+        return a;
+    }
+
+    public static void main(String[] args) throws Exception {
+        InMemoryBank core = new InMemoryBank();
+        core.issueCard("CARD-1", "1234");
+
+        // 1. three wrong PINs retain the card: the visit ends and nothing is left in the slot
+        core.open("A1", 10_000);
+        ATM m1 = machine("T1", core, new WorkingFeeder(), new int[] { 2, 4, 3, 5 });
+        m1.insertCard(new Card("CARD-1", "A1"));
+        for (int i = 0; i < 2; i++)
+            try { m1.enterPin("0000"); check(false, "a wrong PIN must be refused"); } catch (IllegalArgumentException e) { }
+        boolean retained = false;
+        try { m1.enterPin("0000"); } catch (CardRetained e) { retained = true; }
+        check(retained, "the third wrong PIN retains the card");
+        check(m1.state() == SessionState.IDLE, "after a retained card the machine is IDLE, not holding a session");
+        try { m1.balance(); check(false, "a balance enquiry with no card must be refused"); }
+        catch (IllegalStateException e) { check(true, "an action with no card is refused: " + e.getMessage()); }
+
+        // 2. the cassettes cannot make the amount: refused BEFORE the bank is asked
+        core.open("A2", 10_000);
+        FlakyBank watch = new FlakyBank(core);
+        ATM m2 = machine("T2", watch, new WorkingFeeder(), new int[] { 0, 1, 0, 0 });   // one 500 note, nothing else
+        m2.insertCard(new Card("CARD-1", "A2"));
+        m2.enterPin("1234");
+        Withdrawal w2 = null;
+        try { m2.withdraw(1_000); check(false, "must refuse"); } catch (WithdrawalFailed f) { w2 = f.w; }
+        check(w2.state == TxnState.REFUSED, "an amount the cassettes cannot make is REFUSED: " + w2.note);
+        check(watch.debits.get() == 0, "the bank was never asked, so no money moved");
+        check(core.balance("A2") == 10_000, "the balance is untouched");
+
+        // 3. the bank declines after the notes were reserved: every note goes back
+        core.open("A3", 500);
+        ATM m3 = machine("T3", core, new WorkingFeeder(), new int[] { 0, 4, 0, 0 });    // 2,000 in 500s
+        m3.insertCard(new Card("CARD-1", "A3"));
+        m3.enterPin("1234");
+        Withdrawal w3 = null;
+        try { m3.withdraw(1_000); check(false, "must refuse"); } catch (WithdrawalFailed f) { w3 = f.w; }
+        check(w3.state == TxnState.REFUSED, "a declined debit dispenses nothing: " + w3.note);
+        check(core.balance("A3") == 500, "the balance is exactly what it was");
+        check(m3.state() == SessionState.AUTHENTICATED, "the customer is still in the session and can ask for less");
+        Withdrawal ok3 = m3.withdraw(500);
+        check(ok3.state == TxnState.DISPENSED && core.balance("A3") == 0, "a smaller amount then works: " + ok3.notes);
+
+        // 4. the dispenser jams AFTER the debit: the account is credited back, the notes are retracted
+        core.open("A4", 10_000);
+        CashDispenser jam = new CashDispenser(new JammingFeeder(1));
+        jam.refill(Note.N500, 4);
+        ATM m4 = new ATM("T4", core, jam);
+        m4.setClock(CLOCK);
+        m4.insertCard(new Card("CARD-1", "A4"));
+        m4.enterPin("1234");
+        Withdrawal w4 = null;
+        try { m4.withdraw(1_000); check(false, "a jam must be reported"); } catch (WithdrawalFailed f) { w4 = f.w; }
+        check(w4.state == TxnState.REVERSED, "a jam after the debit is REVERSED, not swallowed");
+        check(core.balance("A4") == 10_000, "the customer got nothing and was charged nothing");
+        check(jam.retracted() == 2 && jam.cash() == 1_000, "the two stuck notes are in the retract bin, not back in the cassette");
+
+        // 5. the bank never answers: dispense nothing, record UNKNOWN, reconcile later
+        core.open("A5", 10_000);
+        FlakyBank slow = new FlakyBank(core);
+        slow.next(BankReply.TIMEOUT);
+        ATM m5 = machine("T5", slow, new WorkingFeeder(), new int[] { 0, 4, 0, 0 });
+        m5.insertCard(new Card("CARD-1", "A5"));
+        m5.enterPin("1234");
+        Withdrawal w5 = null;
+        try { m5.withdraw(1_000); check(false, "a timeout must not look like success"); } catch (WithdrawalFailed f) { w5 = f.w; }
+        check(w5.state == TxnState.UNKNOWN, "a bank that does not answer leaves the row UNKNOWN");
+        check(core.balance("A5") == 10_000, "nothing was debited while nobody knew");
+        check(m5.unresolved().size() == 1, "the row is waiting for reconciliation");
+        new Reconciler(core).settle(m5.unresolved());
+        check(core.balance("A5") == 10_000 && w5.state != TxnState.UNKNOWN,
+              "reconciliation settles it under the same key and the balance still adds up: " + w5.state);
+
+        // 6. note selection is exact, and backs off a drawer greed alone cannot pay from
+        CashDispenser odd = new CashDispenser(new WorkingFeeder());
+        odd.refill(Note.N500, 1); odd.refill(Note.N200, 3);
+        EnumMap<Note, Integer> plan = odd.reserve(600);
+        long sum = 0;
+        for (Map.Entry<Note, Integer> e : plan.entrySet()) sum += (long) e.getKey().value * e.getValue();
+        check(sum == 600 && plan.get(Note.N200) == 3, "600 from {500x1, 200x3} backs off the 500 and pays 200x3");
+        check(odd.count(Note.N500) == 1 && odd.count(Note.N200) == 0, "only the notes in the plan left the cassettes");
+        CashDispenser few = new CashDispenser(new WorkingFeeder());
+        few.refill(Note.N2000, 5); few.refill(Note.N500, 10); few.refill(Note.N100, 10);
+        check(few.reserve(2_600).equals(new EnumMap<>(Map.of(Note.N2000, 1, Note.N500, 1, Note.N100, 1))),
+              "2,600 is three notes, not thirteen");
+        check(few.reserve(50) == null, "an amount no combination can make is refused, not approximated");
+
+        // 7. a receipt printer that throws cannot break a withdrawal
+        core.open("A7", 10_000);
+        ATM m7 = machine("T7", core, new WorkingFeeder(), new int[] { 0, 4, 0, 0 });
+        m7.addObserver(e -> { throw new RuntimeException("printer out of paper"); });
+        AuditLog audit = new AuditLog();
+        m7.addObserver(audit);
+        m7.insertCard(new Card("CARD-1", "A7"));
+        m7.enterPin("1234");
+        Withdrawal w7 = m7.withdraw(1_000);
+        check(w7.state == TxnState.DISPENSED && core.balance("A7") == 9_000, "the withdrawal succeeds although the printer threw");
+        check(audit.count("WITHDRAW") == 1, "the listener after the broken one still heard about it");
+
+        // 8. the same idempotency key moves money exactly once
+        core.open("A8", 10_000);
+        BankReply first = core.debit("A8", 1_000, "KEY-8");
+        BankReply again = core.debit("A8", 1_000, "KEY-8");
+        check(first == BankReply.OK && again == BankReply.OK && core.balance("A8") == 9_000,
+              "a retried debit under the same key returns the first answer and charges once");
+
+        // 9. forty machines, one account: the balance never goes below zero and the cash adds up
+        core.open("RACE", 10_000);
+        int machines = 40;
+        List<ATM> fleet = new ArrayList<>();
+        List<CashDispenser> drawers = new ArrayList<>();
+        for (int i = 0; i < machines; i++) {
+            CashDispenser d = new CashDispenser(new WorkingFeeder());
+            d.refill(Note.N500, 2);
+            drawers.add(d);
+            ATM a = new ATM("R" + i, core, d);
+            a.setClock(CLOCK);
+            fleet.add(a);
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(machines);
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger paid = new AtomicInteger();
+        AtomicLong handedOut = new AtomicLong();
+        for (ATM a : fleet) pool.submit(() -> {
+            a.insertCard(new Card("CARD-1", "RACE"));
+            a.enterPin("1234");
+            go.await();
+            try { handedOut.addAndGet(a.withdraw(500).amount); paid.incrementAndGet(); } catch (WithdrawalFailed ignored) { }
+            return null;
+        });
+        go.countDown();
+        pool.shutdown();
+        pool.awaitTermination(20, TimeUnit.SECONDS);
+        long stillInDrawers = 0;
+        for (CashDispenser d : drawers) stillInDrawers += d.cash();
+        check(paid.get() == 20, "exactly twenty of forty machines paid out, not twenty-one: " + paid.get());
+        check(core.balance("RACE") == 0, "the balance landed exactly on zero and never went below it");
+        check(handedOut.get() == 10_000 && stillInDrawers == 40_000 - 10_000,
+              "the cash that left the drawers equals the money that left the account");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

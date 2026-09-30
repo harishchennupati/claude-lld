@@ -1,0 +1,859 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+/**
+ * What a ledger row did to the balance. The type carries the direction, so the amount on a row is always
+ * positive and nobody has to remember whether a minus sign meant "money out" or "a correction".
+ */
+enum TxnType { OPENING, DEPOSIT, WITHDRAW, TRANSFER_IN, TRANSFER_OUT, INTEREST, FEE, REVERSAL }
+
+/**
+ * An account's life. ACTIVE takes postings; DORMANT is an ACTIVE account nobody has touched for months, and any
+ * customer posting wakes it; FROZEN refuses every posting until somebody unfreezes it; CLOSED is final and never
+ * reopens, and an account can only reach it at exactly zero.
+ */
+enum AccountStatus { ACTIVE, DORMANT, FROZEN, CLOSED }
+
+/** Which kind of account this is. Only a key: the behaviour lives in the withdrawal rules and the interest rule. */
+enum AccountKind { SAVINGS, CURRENT }
+
+/** Everything this bank refuses to do throws one of these, so a caller can catch the whole family in one line. */
+class BankingException extends RuntimeException {
+    /** @param message what was refused, in words a support agent could read out. */
+    BankingException(String message) { super(message); }
+}
+
+/** A withdrawal rule said no: the minimum balance, the overdraft ceiling, a daily cap, a two-person approval. */
+class RuleViolation extends BankingException {
+    /** @param message which rule refused, and with what numbers. */
+    RuleViolation(String message) { super(message); }
+}
+
+/** The account is FROZEN or CLOSED, so nothing may be posted to it at all. */
+class AccountNotActive extends BankingException {
+    /** @param message the account id and the status that refused. */
+    AccountNotActive(String message) { super(message); }
+}
+
+/** No account with that id in this bank. */
+class NoSuchAccount extends BankingException {
+    /** @param message the id that was not found. */
+    NoSuchAccount(String message) { super(message); }
+}
+
+/** Somebody tried to add INR to USD. Caught in the value type, so it can never reach a balance. */
+class CurrencyMismatch extends BankingException {
+    /** @param message the two currencies that do not add up. */
+    CurrencyMismatch(String message) { super(message); }
+}
+
+/**
+ * Exact money: a count of paise plus a currency, immutable. There is no double anywhere in this file. Arithmetic
+ * across two currencies throws instead of quietly producing a number that means nothing, and every add and
+ * subtract is checked for overflow rather than wrapping silently.
+ */
+record Money(long paise, String currency) implements Comparable<Money> {
+    /** The one currency this demo uses. Multi-currency is a follow-up, and the type is already ready for it. */
+    static final String INR = "INR";
+    /** Guards the value type itself: a currency is never null and never blank. */
+    Money {
+        if (currency == null || currency.isBlank()) throw new CurrencyMismatch("a Money needs a currency");
+    }
+    /** Parse "1234.50" into 123450 paise of INR, exactly. Used at the edge (a form, a file), never in the maths. */
+    static Money inr(String amount) {
+        return new Money(new java.math.BigDecimal(amount).movePointRight(2).longValueExact(), INR);
+    }
+    /** A raw paise count in a currency, for tests and for arithmetic that already produced paise. */
+    static Money of(long paise, String currency) { return new Money(paise, currency); }
+    /** Zero in a currency: the identity for plus, and the only balance at which an account may be closed. */
+    static Money zero(String currency) { return new Money(0, currency); }
+    /** This plus that, same currency, overflow-checked. */
+    Money plus(Money other) { return new Money(Math.addExact(paise, same(other)), currency); }
+    /** This minus that, same currency, overflow-checked. The result may be negative: that is an overdraft. */
+    Money minus(Money other) { return new Money(Math.subtractExact(paise, same(other)), currency); }
+    /** True when the balance is below zero, which only a current account is ever allowed to be. */
+    boolean isNegative() { return paise < 0; }
+    /** Strictly less than, same currency. */
+    boolean lessThan(Money other) { return paise < same(other); }
+    /** The other amount's paise, after proving the currencies match. The single place the guard lives. */
+    private long same(Money other) {
+        if (!currency.equals(other.currency()))
+            throw new CurrencyMismatch(currency + " and " + other.currency() + " do not add up");
+        return other.paise();
+    }
+    /** Order by amount, same currency only. */
+    public int compareTo(Money other) { return Long.compare(paise, same(other)); }
+    /** "INR 1234.50", the minus sign in front of the number. Presentation only; the maths never sees a string. */
+    public String toString() {
+        String sign = paise < 0 ? "-" : "";
+        long a = Math.abs(paise);
+        return currency + " " + sign + (a / 100) + "." + String.format("%02d", a % 100);
+    }
+}
+
+/** A person who may own several accounts. Only the id ever reaches an account, so a rename cannot move money. */
+record Customer(String id, String name) {}
+
+/**
+ * One immutable ledger row: what happened, how much, and what the balance was immediately after. Immutable on
+ * purpose — an audit trail you can edit is not an audit trail. The running balance is stored on the row so a
+ * statement never has to re-add a year of history.
+ */
+record Txn(long seq, String accountId, TxnType type, Money amount, Money balanceAfter,
+           long atMs, String ref, String note) {
+    /** One line of a printed statement. */
+    public String toString() {
+        return seq + " " + type + " " + amount + " -> " + balanceAfter + (note == null ? "" : "  (" + note + ")");
+    }
+}
+
+/** A period of an account's history: the balance it started the window with, the rows, and where it ended. */
+record Statement(String accountId, long fromMs, long toMs, Money opening, Money closing, List<Txn> rows) {
+    /** The statement as text, the way a customer would read it. */
+    String print() {
+        StringBuilder sb = new StringBuilder("statement " + accountId + "  opening " + opening + "\n");
+        for (Txn t : rows) sb.append("   ").append(t).append("\n");
+        return sb.append("   closing ").append(closing).append("\n").toString();
+    }
+}
+
+/** What a caller gets back from a transfer, and what a retry of the same transfer id gets back again. */
+record TransferReceipt(String transferId, String fromId, String toId, Money amount, long atMs) {}
+
+/** Where time comes from. Injected everywhere, so a test can say "six months later" without sleeping. */
+interface Clock {
+    /** Milliseconds since the epoch, as this bank understands the time. */
+    long nowMs();
+}
+
+/**
+ * A veto on taking money out. Given the account and the amount it either stays silent or throws RuleViolation.
+ * One method, because "how far down may this balance go" is the sentence the interviewer will change. Rules are
+ * called with the account lock already held, so a rule may read the balance and is expected to be quick.
+ */
+interface WithdrawalRule {
+    /** Say nothing, or throw RuleViolation. Called inside the lock, before anything is written. */
+    void check(Account account, Money amount, long nowMs);
+    /** Memory for a stateful rule (a daily cap), called inside the same lock only after the row was written. */
+    default void onWithdrawn(Account account, Money amount, long nowMs) {}
+    /** The name in an error message and in a rule listing. */
+    default String name() { return getClass().getSimpleName(); }
+}
+
+/** Savings: the balance may never fall below a floor. The one sentence savings and current disagree about. */
+final class MinBalanceRule implements WithdrawalRule {
+    private final Money floor;
+    /** @param floor the lowest balance this account may ever hold. */
+    MinBalanceRule(Money floor) { this.floor = floor; }
+    /** Refuse any withdrawal that would leave the balance under the floor. */
+    public void check(Account account, Money amount, long nowMs) {
+        Money after = account.balance().minus(amount);
+        if (after.lessThan(floor))
+            throw new RuleViolation("minimum balance " + floor + ": " + amount + " would leave " + after);
+    }
+}
+
+/** Current: the balance may sink below zero, but only as far as the overdraft ceiling. */
+final class OverdraftRule implements WithdrawalRule {
+    private final Money limit;
+    /** @param limit how far below zero this account may go, as a positive amount. */
+    OverdraftRule(Money limit) { this.limit = limit; }
+    /** Refuse any withdrawal that would take the balance past minus the ceiling. */
+    public void check(Account account, Money amount, long nowMs) {
+        Money after = account.balance().minus(amount);
+        Money lowest = Money.zero(after.currency()).minus(limit);
+        if (after.lessThan(lowest))
+            throw new RuleViolation("overdraft limit " + limit + ": " + amount + " would leave " + after);
+    }
+}
+
+/**
+ * How much interest an account earns over a period. A separate rule from the withdrawal vetoes, because it
+ * changes for a different reason: the RBI moves a rate, the product team runs a promotion.
+ */
+interface InterestRule {
+    /** The interest earned on this balance over these many days. Never negative. */
+    Money interest(Money balance, int days);
+}
+
+/** Simple interest at an annual rate in basis points (400 = 4.00% a year), accrued by the day, rounded down. */
+final class SimpleInterest implements InterestRule {
+    private final int annualBasisPoints;
+    /** @param annualBasisPoints hundredths of a percent a year: 400 is 4.00%. */
+    SimpleInterest(int annualBasisPoints) { this.annualBasisPoints = annualBasisPoints; }
+    /** balance x rate x days / 365, in integer paise, rounded down; an overdrawn balance earns nothing. */
+    public Money interest(Money balance, int days) {
+        if (balance.paise() <= 0 || days <= 0) return Money.zero(balance.currency());
+        long paise = balance.paise() * annualBasisPoints * days / (10_000L * 365L);
+        return Money.of(paise, balance.currency());
+    }
+}
+
+/**
+ * A festival bonus on top of whatever rule this account kind already has: it wraps a rule instead of replacing
+ * it, so the base rate and the promotion stay separate and the promotion can be taken off again by removing one
+ * wrapper. This is the Decorator, and it exists because the rate is one sentence and the bonus is another.
+ */
+final class PromoInterest implements InterestRule {
+    private final InterestRule base;
+    private final int bonusBasisPoints;
+    /** @param base the rule this promotion adds to; @param bonusBasisPoints the extra annual rate, 50 = 0.50%. */
+    PromoInterest(InterestRule base, int bonusBasisPoints) { this.base = base; this.bonusBasisPoints = bonusBasisPoints; }
+    /** The base rule's interest plus the bonus, computed the same way. */
+    public Money interest(Money balance, int days) {
+        return base.interest(balance, days).plus(new SimpleInterest(bonusBasisPoints).interest(balance, days));
+    }
+}
+
+/**
+ * What the bank charges for moving money. Another rule that changes for its own reasons (a pricing meeting),
+ * so it is handed in rather than written into the transfer. Return null or zero for "no fee".
+ */
+interface FeePolicy {
+    /** The fee to charge the source account for this transfer, or null for none. */
+    Money feeFor(Account from, Account to, Money amount);
+}
+
+/**
+ * Something outside the account that wants to know a row was written: an SMS, an audit file, a fraud engine.
+ * The account never learns what any of them are, and they are all called after the lock is released.
+ */
+interface AccountListener {
+    /** A row has just been committed to this account. Never called with the account lock held. */
+    void onPosted(Account account, Txn txn);
+}
+
+/** Prints every posting. The audit trail an operations team watches; it must never be able to break a posting. */
+final class AuditLog implements AccountListener {
+    private final List<String> lines = new CopyOnWriteArrayList<>();
+    /** Record the row. */
+    public void onPosted(Account account, Txn txn) { lines.add(account.id() + " " + txn); }
+    /** How many postings this log saw; the tests use it to prove listeners ran after the lock. */
+    int size() { return lines.size(); }
+}
+
+/** Shouts when a lot of money leaves an account. The classic "alert on a large withdrawal" the interviewer asks for. */
+final class LargeWithdrawalAlert implements AccountListener {
+    private final Money threshold;
+    private final List<String> alerts = new CopyOnWriteArrayList<>();
+    /** @param threshold the amount above which one withdrawal is worth an alert. */
+    LargeWithdrawalAlert(Money threshold) { this.threshold = threshold; }
+    /** Alert on WITHDRAW and TRANSFER_OUT rows above the threshold; ignore everything else. */
+    public void onPosted(Account account, Txn txn) {
+        if ((txn.type() == TxnType.WITHDRAW || txn.type() == TxnType.TRANSFER_OUT)
+            && threshold.lessThan(txn.amount()))
+            alerts.add("ALERT " + account.id() + " " + txn.amount() + " left the account");
+    }
+    /** The alerts raised so far. */
+    List<String> alerts() { return alerts; }
+}
+
+/**
+ * The aggregate root for one account: one balance, the ledger that explains it, one status, and ONE lock over
+ * all three. Every write goes through the private post(), and post() is only ever called with the lock held, so
+ * the row and the running balance can never land out of step. Withdrawal rules run inside that same hold, so
+ * nobody can drain the account between "yes, you have enough" and the row being written. Listeners are called
+ * after the lock is released. deposit, withdraw and the transfer halves are final: a subclass cannot skip a rule.
+ */
+abstract class Account {
+    private final String id;
+    private final String customerId;
+    private final AccountKind kind;
+    private final String currency;
+    private final Clock clock;                                  // handed in; nothing here reads the wall clock
+    private final List<AccountListener> listeners;              // the bank's list, shared, copy-on-write
+    private final List<WithdrawalRule> rules = new CopyOnWriteArrayList<>();
+    private final List<Txn> ledger = new ArrayList<>();         // append only, in time order; guarded by lock
+    private final ReentrantLock lock = new ReentrantLock();     // reentrant: a rule calls balance() inside check()
+    private Money balance;                                      // guarded by lock
+    private AccountStatus status = AccountStatus.ACTIVE;        // guarded by lock
+    private long seq = 0;                                       // guarded by lock
+    private long lastActivityMs;                                // guarded by lock
+
+    /**
+     * Open the account and write its OPENING row. The row is written but deliberately not published: the object
+     * is not fully built yet, so no listener may see it.
+     */
+    Account(String id, String customerId, AccountKind kind, Money opening, Clock clock, List<AccountListener> listeners) {
+        this.id = id; this.customerId = customerId; this.kind = kind;
+        this.currency = opening.currency(); this.clock = clock; this.listeners = listeners;
+        this.balance = Money.zero(currency);
+        this.lastActivityMs = clock.nowMs();
+        lock.lock();
+        try { post(TxnType.OPENING, opening, balance.plus(opening), null, "account opened"); }
+        finally { lock.unlock(); }
+    }
+
+    /** The account number. Immutable, and it doubles as the key that orders the locks in a transfer. */
+    final String id() { return id; }
+    /** Who owns it. */
+    final String customerId() { return customerId; }
+    /** Savings or current: the key into the bank's interest registry. */
+    final AccountKind kind() { return kind; }
+    /** The one currency this account holds. */
+    final String currency() { return currency; }
+    /** The stored balance, not a fold over the ledger: one field read under the lock, O(1). */
+    final Money balance() { lock.lock(); try { return balance; } finally { lock.unlock(); } }
+    /** Where the account is in its life. */
+    final AccountStatus status() { lock.lock(); try { return status; } finally { lock.unlock(); } }
+    /** When a customer last moved money here. Interest and fees do not count; the dormancy sweep reads this. */
+    final long lastActivityMs() { lock.lock(); try { return lastActivityMs; } finally { lock.unlock(); } }
+    /** Hand in one more veto. Setup only; rules compose, and every one of them must agree to a withdrawal. */
+    final void addRule(WithdrawalRule rule) { rules.add(rule); }
+    /** The vetoes currently on this account, for a screen or a test. */
+    final List<WithdrawalRule> rules() { return Collections.unmodifiableList(rules); }
+
+    /**
+     * Money in. A bank does not refuse your money, so a deposit passes no rules — but a FROZEN or CLOSED account
+     * refuses every posting. The row and the new balance are written in one lock hold; listeners hear afterwards.
+     */
+    final Txn deposit(Money amount, String note) {
+        requirePositive(amount);
+        Txn t;
+        lock.lock();
+        try {
+            requirePostable(); requireSameCurrency(amount);
+            t = post(TxnType.DEPOSIT, amount, balance.plus(amount), null, note);
+        } finally { lock.unlock(); }
+        publish(t);
+        return t;
+    }
+
+    /**
+     * Money out. Every rule must agree, and the checks run in the SAME lock hold that writes the row, so no other
+     * thread can empty the account between the approval and the posting. A rule that says no throws before
+     * anything is written: no row, no balance change, nothing to undo, and the caller may retry.
+     */
+    final Txn withdraw(Money amount, String note) {
+        requirePositive(amount);
+        Txn t;
+        lock.lock();
+        try {
+            requirePostable(); requireSameCurrency(amount);
+            long now = clock.nowMs();
+            for (WithdrawalRule rule : rules) rule.check(this, amount, now);     // every rule, before any write
+            t = post(TxnType.WITHDRAW, amount, balance.minus(amount), null, note);
+            for (WithdrawalRule rule : rules) rule.onWithdrawn(this, amount, now); // a stateful rule remembers
+        } finally { lock.unlock(); }
+        publish(t);
+        return t;
+    }
+
+    /**
+     * Everything that could make a credit fail, asked before a single paise leaves the other account. Called by
+     * Bank.transfer with both locks held. If this throws, the source has not been touched.
+     */
+    final void checkCanReceive(Money amount) {
+        requirePositive(amount);
+        lock.lock();
+        try { requirePostable(); requireSameCurrency(amount); } finally { lock.unlock(); }
+    }
+
+    /** The debit half of a transfer: the rules and the TRANSFER_OUT row in one hold. Returned unpublished. */
+    final Txn debitForTransfer(Money amount, String transferId, String note) {
+        requirePositive(amount);
+        lock.lock();
+        try {
+            requirePostable(); requireSameCurrency(amount);
+            long now = clock.nowMs();
+            for (WithdrawalRule rule : rules) rule.check(this, amount, now);
+            Txn t = post(TxnType.TRANSFER_OUT, amount, balance.minus(amount), transferId, note);
+            for (WithdrawalRule rule : rules) rule.onWithdrawn(this, amount, now);
+            return t;
+        } finally { lock.unlock(); }
+    }
+
+    /** The credit half: it cannot fail, because checkCanReceive already asked everything it could refuse on. */
+    final Txn creditForTransfer(Money amount, String transferId, String note) {
+        lock.lock();
+        try {
+            requirePostable(); requireSameCurrency(amount);
+            return post(TxnType.TRANSFER_IN, amount, balance.plus(amount), transferId, note);
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * Undo a posting by writing its opposite, never by editing a row. Deliberately allowed on a frozen account:
+     * you must always be able to unwind money that should not have moved.
+     */
+    final Txn postReversal(Money amount, boolean intoTheAccount, String ref, String note) {
+        Txn t;
+        lock.lock();
+        try {
+            Money after = intoTheAccount ? balance.plus(amount) : balance.minus(amount);
+            t = post(TxnType.REVERSAL, amount, after, ref, note);
+        } finally { lock.unlock(); }
+        publish(t);
+        return t;
+    }
+
+    /** The interest the bank's rule computed, as its own row so a statement can show it. Does not wake a dormant account. */
+    final Txn postInterest(Money interest) {
+        Txn t;
+        lock.lock();
+        try {
+            requirePostable();
+            t = post(TxnType.INTEREST, interest, balance.plus(interest), null, "interest");
+        } finally { lock.unlock(); }
+        publish(t);
+        return t;
+    }
+
+    /** A charge the bank raised (a transfer fee, an overdraft penalty). Also not customer activity. */
+    final Txn postFee(Money fee, String ref, String note) {
+        Txn t = postFeeRow(fee, ref, note);
+        publish(t);
+        return t;
+    }
+
+    /** The fee row without telling anybody: for a caller that is holding two locks and will publish after them. */
+    final Txn postFeeRow(Money fee, String ref, String note) {
+        lock.lock();
+        try {
+            requirePostable();
+            return post(TxnType.FEE, fee, balance.minus(fee), ref, note);
+        } finally { lock.unlock(); }
+    }
+
+    /** ACTIVE or DORMANT to FROZEN. The balance is untouched; every posting is refused until it is unfrozen. */
+    final void freeze() {
+        lock.lock();
+        try {
+            if (status == AccountStatus.CLOSED) throw new AccountNotActive(id + " is CLOSED");
+            status = AccountStatus.FROZEN;
+        } finally { lock.unlock(); }
+    }
+
+    /** FROZEN back to ACTIVE. Nothing else may leave FROZEN. */
+    final void unfreeze() {
+        lock.lock();
+        try {
+            if (status != AccountStatus.FROZEN) throw new AccountNotActive(id + " is " + status + ", not FROZEN");
+            status = AccountStatus.ACTIVE;
+        } finally { lock.unlock(); }
+    }
+
+    /** Close, only at exactly zero, so money can never be stranded in an account nobody can reach. CLOSED is final. */
+    final void close() {
+        lock.lock();
+        try {
+            if (status == AccountStatus.CLOSED) return;
+            if (balance.paise() != 0)
+                throw new RuleViolation("account " + id + " still holds " + balance + ": empty it before closing");
+            status = AccountStatus.CLOSED;
+        } finally { lock.unlock(); }
+    }
+
+    /** ACTIVE and untouched for idleMs becomes DORMANT. Returns true if this call changed it. */
+    final boolean markDormantIfIdle(long nowMs, long idleMs) {
+        lock.lock();
+        try {
+            if (status != AccountStatus.ACTIVE || nowMs - lastActivityMs < idleMs) return false;
+            status = AccountStatus.DORMANT;
+            return true;
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * The rows in a window, plus the balance the window opened and closed with. The ledger is appended in time
+     * order, so both ends are a binary search: O(log n + k), never a scan of the whole history.
+     */
+    final Statement statement(long fromMs, long toMs) {
+        lock.lock();
+        try {
+            int from = firstAtOrAfter(fromMs), to = firstAtOrAfter(toMs + 1);
+            Money opening = from == 0 ? Money.zero(currency) : ledger.get(from - 1).balanceAfter();
+            Money closing = to == 0 ? opening : ledger.get(to - 1).balanceAfter();
+            return new Statement(id, fromMs, toMs, opening, closing, List.copyOf(ledger.subList(from, to)));
+        } finally { lock.unlock(); }
+    }
+
+    /** A copy of the whole ledger. A copy, because handing out the live list would hand out the audit trail. */
+    final List<Txn> ledger() { lock.lock(); try { return List.copyOf(ledger); } finally { lock.unlock(); } }
+
+    /** How many rows this account has. O(1), and the tests use it to prove a refusal wrote nothing. */
+    final int rowCount() { lock.lock(); try { return ledger.size(); } finally { lock.unlock(); } }
+
+    /** Index of the first row at or after this instant. Binary search over rows that are already in time order. */
+    private int firstAtOrAfter(long ms) {
+        int lo = 0, hi = ledger.size();
+        while (lo < hi) { int mid = (lo + hi) >>> 1; if (ledger.get(mid).atMs() < ms) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+
+    /**
+     * The ONE writer. Called with the lock held; the row, the balance, the sequence number and the activity stamp
+     * all move together here or not at all. Interest and fees are the bank's activity, not the customer's, so
+     * they do not wake a dormant account.
+     */
+    private Txn post(TxnType type, Money amount, Money after, String ref, String note) {
+        Txn t = new Txn(++seq, id, type, amount, after, clock.nowMs(), ref, note);
+        balance = after;
+        ledger.add(t);
+        if (type != TxnType.INTEREST && type != TxnType.FEE) {
+            lastActivityMs = t.atMs();
+            if (status == AccountStatus.DORMANT) status = AccountStatus.ACTIVE;   // any customer posting wakes it
+        }
+        return t;
+    }
+
+    /** Tell the listeners, AFTER the lock, each in a try/catch: a broken SMS gateway cannot break a posting. */
+    final void publish(Txn t) {
+        for (AccountListener l : listeners) {
+            try { l.onPosted(this, t); } catch (RuntimeException ignored) { /* never break a posting for a listener */ }
+        }
+    }
+
+    /** Take this account's lock. Package-private for exactly one caller: Bank.transfer, which takes two in id order. */
+    final void lockAccount() { lock.lock(); }
+    /** Release it. */
+    final void unlockAccount() { lock.unlock(); }
+
+    /** FROZEN and CLOSED refuse every posting; ACTIVE and DORMANT accept. */
+    private void requirePostable() {
+        if (status == AccountStatus.FROZEN || status == AccountStatus.CLOSED)
+            throw new AccountNotActive("account " + id + " is " + status);
+    }
+    /** A posting in another currency is a bug, not a conversion. */
+    private void requireSameCurrency(Money amount) {
+        if (!amount.currency().equals(currency))
+            throw new CurrencyMismatch("account " + id + " holds " + currency + ", not " + amount.currency());
+    }
+    /** Zero and negative amounts are refused at the door, so no row can ever mean "minus a negative". */
+    private void requirePositive(Money amount) {
+        if (amount.paise() <= 0) throw new RuleViolation("amount must be positive, not " + amount);
+    }
+}
+
+/**
+ * Savings: earns interest, and may never fall below a floor. The floor arrives as a rule object rather than an
+ * overridden method, so a second veto (a daily cap, a fraud hold) composes with it instead of replacing it.
+ */
+final class SavingsAccount extends Account {
+    private final Money minBalance;
+    /** Open a savings account and wire in its one rule: the minimum balance. */
+    SavingsAccount(String id, String customerId, Money opening, Money minBalance,
+                   Clock clock, List<AccountListener> listeners) {
+        super(id, customerId, AccountKind.SAVINGS, opening, clock, listeners);
+        this.minBalance = minBalance;
+        addRule(new MinBalanceRule(minBalance));
+    }
+    /** The floor this account may never go under. */
+    Money minBalance() { return minBalance; }
+}
+
+/**
+ * Current: may run negative, down to the overdraft ceiling, and earns no interest. Everything else about it is
+ * identical to savings, which is the point: the subclass holds the is-a difference and nothing else.
+ */
+final class CurrentAccount extends Account {
+    private final Money overdraftLimit;
+    /** Open a current account and wire in its one rule: the overdraft ceiling. */
+    CurrentAccount(String id, String customerId, Money opening, Money overdraftLimit,
+                   Clock clock, List<AccountListener> listeners) {
+        super(id, customerId, AccountKind.CURRENT, opening, clock, listeners);
+        this.overdraftLimit = overdraftLimit;
+        addRule(new OverdraftRule(overdraftLimit));
+    }
+    /** How far below zero this account may go. */
+    Money overdraftLimit() { return overdraftLimit; }
+}
+
+/**
+ * The bank: it owns the customers, the accounts, the interest rules, the listeners and the clock, and it is the
+ * only place that may hold two account locks at once — which is why the two-account invariant (a transfer) lives
+ * here and not on Account. An account reaching into another account is how two threads each hold one lock and
+ * wait forever for the other.
+ */
+final class Bank {
+    private final Map<String, Customer> customers = new ConcurrentHashMap<>();
+    private final Map<String, Account> accounts = new ConcurrentHashMap<>();
+    private final Map<String, List<String>> accountsOf = new ConcurrentHashMap<>();
+    private final Map<String, TransferReceipt> transfers = new ConcurrentHashMap<>();   // idempotency, by transfer id
+    private final List<AccountListener> listeners = new CopyOnWriteArrayList<>();
+    private final EnumMap<AccountKind, InterestRule> interestRules = new EnumMap<>(AccountKind.class);
+    private Clock clock = System::currentTimeMillis;
+    private FeePolicy fees = (from, to, amount) -> null;                                // no fee until one is handed in
+    private long dormantAfterMs = 180L * 24 * 3600 * 1000;
+
+    /**
+     * Hand in the rules and the clock. The bank never builds an interest rule, and every account it opens is
+     * handed this clock, which is why it must be called before the first account exists.
+     */
+    void configure(Map<AccountKind, InterestRule> rules, Clock clock) {
+        if (!accounts.isEmpty())
+            throw new IllegalStateException("configure the bank before opening accounts: each account is handed the clock");
+        interestRules.clear(); interestRules.putAll(rules); this.clock = clock;
+    }
+    /** Hand in what a transfer costs. The fee row is written inside the same two locks as the transfer itself. */
+    void setFeePolicy(FeePolicy p) { fees = p; }
+    /** Change how long an untouched account stays ACTIVE before the sweep marks it DORMANT. */
+    void dormantAfterDays(int days) { dormantAfterMs = days * 24L * 3600 * 1000; }
+    /** Subscribe a listener. The list is shared with every account, so this reaches all of them at once. */
+    void addListener(AccountListener l) { listeners.add(l); }
+    /** Register a customer. */
+    Customer addCustomer(Customer c) { customers.put(c.id(), c); return c; }
+    /** A customer by id, or null. */
+    Customer customer(String id) { return customers.get(id); }
+
+    /** Open a savings account with a minimum balance. */
+    SavingsAccount openSavings(String id, String customerId, Money opening, Money minBalance) {
+        SavingsAccount a = new SavingsAccount(id, customerId, opening, minBalance, clock, listeners);
+        register(a); return a;
+    }
+    /** Open a current account with an overdraft ceiling. */
+    CurrentAccount openCurrent(String id, String customerId, Money opening, Money overdraft) {
+        CurrentAccount a = new CurrentAccount(id, customerId, opening, overdraft, clock, listeners);
+        register(a); return a;
+    }
+    /** Index the account by its id and under its owner. Both lookups are O(1). */
+    private void register(Account a) {
+        if (accounts.putIfAbsent(a.id(), a) != null) throw new RuleViolation("account id already exists: " + a.id());
+        accountsOf.computeIfAbsent(a.customerId(), k -> new CopyOnWriteArrayList<>()).add(a.id());
+    }
+    /** An account by id. O(1), and it throws rather than returning null, so no caller can forget the check. */
+    Account account(String id) {
+        Account a = accounts.get(id);
+        if (a == null) throw new NoSuchAccount("no account " + id);
+        return a;
+    }
+    /** The ids this customer owns. O(1). */
+    List<String> accountsOf(String customerId) { return accountsOf.getOrDefault(customerId, List.of()); }
+
+    /**
+     * Move money between two accounts so that nobody can ever see the debit without the credit. The ORDER is the
+     * design:
+     *   1  the transfer id: if it already has a receipt, return it and post nothing, so a retry is free;
+     *   2  take BOTH locks, lower account id first — a total order over the ids, so two opposite transfers can
+     *      never form a wait cycle, which means deadlock is impossible rather than rare;
+     *   3  ask the destination everything that could refuse a credit BEFORE any money leaves the source;
+     *   4  debit the source: its rules run and the row is written in the same hold;
+     *   5  credit the destination: it cannot fail, because step 3 already asked;
+     *   6  charge the fee, if the handed-in policy wants one, as a third row in the same hold;
+     *   7  record the receipt under the same locks, release both, and only then tell the listeners.
+     * Anything that throws before step 4 leaves both accounts exactly as they were. Nothing is recorded for a
+     * failed transfer, so the same id may be retried once the reason is fixed.
+     */
+    TransferReceipt transfer(String transferId, String fromId, String toId, Money amount, String note) {
+        TransferReceipt prior = transfers.get(transferId);
+        if (prior != null) return prior;                            // fast path: a retry takes no lock at all
+        Account from = account(fromId), to = account(toId);
+        if (from == to) throw new RuleViolation("a transfer needs two different accounts: " + fromId);
+        Account first = fromId.compareTo(toId) < 0 ? from : to;     // THE total order: by account id
+        Account second = (first == from) ? to : from;
+        Txn out, in, feeRow = null;
+        TransferReceipt receipt;
+        first.lockAccount();
+        second.lockAccount();
+        try {
+            TransferReceipt raced = transfers.get(transferId);
+            if (raced != null) return raced;                        // a duplicate that reached the locks first
+            to.checkCanReceive(amount);                             // everything that could refuse the credit
+            out = from.debitForTransfer(amount, transferId, note);
+            try {
+                in = to.creditForTransfer(amount, transferId, note);
+            } catch (RuntimeException impossible) {                 // belt and braces: never leave money in mid-air
+                from.postReversal(amount, true, transferId, "reversal: the credit failed");
+                throw impossible;
+            }
+            Money fee = fees.feeFor(from, to, amount);              // the fee is a third row in the SAME two locks,
+            if (fee != null && fee.paise() > 0)                     // so a transfer and its charge are never apart
+                feeRow = from.postFeeRow(fee, transferId, "transfer fee");
+            receipt = new TransferReceipt(transferId, fromId, toId, amount, out.atMs());
+            transfers.put(transferId, receipt);
+        } finally { second.unlockAccount(); first.unlockAccount(); }
+        from.publish(out); to.publish(in);                          // after both locks: a slow SMS stalls nobody
+        if (feeRow != null) from.publish(feeRow);
+        return receipt;
+    }
+
+    /** The receipt for a transfer id, or null if it never completed. */
+    TransferReceipt receipt(String transferId) { return transfers.get(transferId); }
+
+    /**
+     * End of period: every account earns what its KIND's rule says, as its own row. The balance is read a moment
+     * before the row is written, exactly like a bank's end-of-day figure, so this is run when nothing is in flight.
+     */
+    List<Txn> accrueInterest(int days) {
+        List<Txn> posted = new ArrayList<>();
+        for (Account a : accounts.values()) {
+            InterestRule rule = interestRules.get(a.kind());
+            if (rule == null || a.status() == AccountStatus.CLOSED || a.status() == AccountStatus.FROZEN) continue;
+            Money interest = rule.interest(a.balance(), days);
+            if (interest.paise() > 0) posted.add(a.postInterest(interest));
+        }
+        return posted;
+    }
+
+    /** The dormancy sweep: anything ACTIVE and untouched for the dormancy period becomes DORMANT. */
+    int markDormant() {
+        long now = clock.nowMs();
+        int n = 0;
+        for (Account a : accounts.values()) if (a.markDormantIfIdle(now, dormantAfterMs)) n++;
+        return n;
+    }
+
+    /** Close an account. Refused unless the balance is exactly zero. */
+    void close(String accountId) { account(accountId).close(); }
+
+    /**
+     * What the bank holds in one currency, summed from the stored balances. Deliberately not a snapshot: read it
+     * when nothing is in flight. A transfer never changes it, which is the invariant the race test proves.
+     */
+    Money totalAssets(String currency) {
+        Money total = Money.zero(currency);
+        for (Account a : accounts.values()) if (a.currency().equals(currency)) total = total.plus(a.balance());
+        return total;
+    }
+
+    /** Every account, for a sweep or a report. */
+    Collection<Account> accounts() { return accounts.values(); }
+}
+
+/**
+ * Deliberately broken, and kept: a balance in a plain long with += , which is read-add-write and therefore loses
+ * updates under threads. Main runs the same eighty thousand deposits through this and through a real Account, so
+ * the bug the lock prevents can be seen rather than claimed.
+ */
+final class NaiveAccount {
+    private long paise = 0;
+    /** Read-add-write, unguarded. Two threads can read the same number and both write the same result. */
+    void deposit(long amount) { paise += amount; }
+    /** Whatever survived. */
+    long balance() { return paise; }
+}
+
+/**
+ * Proof it works: a demo of both account types, the rules, a transfer with its retry, a statement, interest and
+ * dormancy on an injected clock, then the lost-update bug shown live, then sixty-four threads firing transfers in
+ * both directions between four accounts while the bank's total assets stay to the paise where they started.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        long day = 24L * 3600 * 1000;
+        long[] now = { 1_700_000_000_000L };                       // the injected clock: the tests own the time
+        Bank bank = new Bank();
+        bank.configure(Map.of(AccountKind.SAVINGS, new SimpleInterest(400)), () -> now[0]);
+        bank.dormantAfterDays(180);
+        AuditLog audit = new AuditLog();
+        LargeWithdrawalAlert alerts = new LargeWithdrawalAlert(Money.inr("50000.00"));
+        bank.addListener(audit); bank.addListener(alerts);
+
+        bank.addCustomer(new Customer("c1", "Asha"));
+        bank.addCustomer(new Customer("c2", "Bharat"));
+        SavingsAccount asha = bank.openSavings("SB-1001", "c1", Money.inr("100000.00"), Money.inr("1000.00"));
+        CurrentAccount shop = bank.openCurrent("CA-2001", "c2", Money.inr("20000.00"), Money.inr("50000.00"));
+        System.out.println("opened " + asha.id() + " " + asha.balance() + " and " + shop.id() + " " + shop.balance());
+
+        // savings keeps its floor: this withdrawal would leave INR 500, under the INR 1000 minimum
+        try {
+            asha.withdraw(Money.inr("99500.00"), "atm");
+        } catch (RuleViolation e) { System.out.println("expected: " + e.getMessage()); }
+        System.out.println("after the refusal the balance is untouched: " + asha.balance()
+                           + ", rows " + asha.rowCount());
+
+        // current may go negative, but only to the ceiling
+        shop.withdraw(Money.inr("60000.00"), "supplier");
+        System.out.println("current account overdrawn to " + shop.balance());
+        try {
+            shop.withdraw(Money.inr("20000.00"), "too far");
+        } catch (RuleViolation e) { System.out.println("expected: " + e.getMessage()); }
+
+        // a transfer: ordered locks, the destination checked first, then debit and credit as one step
+        TransferReceipt r = bank.transfer("T-1", "SB-1001", "CA-2001", Money.inr("25000.00"), "rent");
+        System.out.println("transfer " + r.transferId() + " " + r.amount()
+                           + " -> " + asha.balance() + " / " + shop.balance());
+        // the same transfer id again (a retried request): one receipt, no second pair of rows
+        TransferReceipt again = bank.transfer("T-1", "SB-1001", "CA-2001", Money.inr("25000.00"), "rent");
+        System.out.println("retry of T-1 returned the same receipt: " + (r.equals(again))
+                           + ", asha is still " + asha.balance());
+
+        // a frozen destination refuses the credit, and the source is not touched
+        shop.freeze();
+        Money beforeFreeze = asha.balance();
+        try {
+            bank.transfer("T-2", "SB-1001", "CA-2001", Money.inr("1000.00"), "blocked");
+        } catch (AccountNotActive e) { System.out.println("expected: " + e.getMessage()); }
+        System.out.println("the source was not debited: " + beforeFreeze.equals(asha.balance())
+                           + ", and T-2 has no receipt: " + (bank.receipt("T-2") == null));
+        shop.unfreeze();
+
+        // interest on the injected clock: thirty days at 4.00% a year, savings only
+        now[0] += 30 * day;
+        List<Txn> interest = bank.accrueInterest(30);
+        System.out.println("interest rows " + interest.size() + " -> " + interest.get(0).amount()
+                           + " (a current account earns none)");
+
+        // a festival bonus of 0.50% for the next month: a wrapper, not an edited rule
+        InterestRule promo = new PromoInterest(new SimpleInterest(400), 50);
+        System.out.println("thirty days on " + asha.balance() + ": plain "
+                           + new SimpleInterest(400).interest(asha.balance(), 30)
+                           + ", with the festival bonus " + promo.interest(asha.balance(), 30));
+
+        // the statement for the window we just lived through
+        System.out.print(asha.statement(1_700_000_000_000L, now[0]).print());
+
+        // dormancy: six months with nobody touching the shop account
+        now[0] += 200 * day;
+        System.out.println("dormancy sweep marked " + bank.markDormant() + " account(s); shop is " + shop.status());
+        shop.deposit(Money.inr("100.00"), "a customer pays");
+        System.out.println("one posting wakes it: " + shop.status());
+
+        // closing is refused while money is inside
+        try {
+            bank.close("SB-1001");
+        } catch (RuleViolation e) { System.out.println("expected: " + e.getMessage()); }
+
+        // the bug the lock prevents, shown rather than claimed: 80,000 unguarded deposits of one paise
+        NaiveAccount naive = new NaiveAccount();
+        Bank quiet = new Bank();                                   // its own bank, so the audit count below stays readable
+        quiet.configure(Map.of(), () -> now[0]);
+        SavingsAccount locked = quiet.openSavings("SB-9999", "c1", Money.zero(Money.INR), Money.zero(Money.INR));
+        runConcurrently(8, 10_000, () -> naive.deposit(1));
+        runConcurrently(8, 10_000, () -> locked.deposit(Money.of(1, Money.INR), "x"));
+        System.out.println("80,000 x 1 paise: naive=" + naive.balance()
+                           + " paise (lost updates), locked=" + locked.balance().paise() + " paise");
+
+        // sixty-four threads, transfers in both directions between four accounts: the total must not move
+        Bank busy = new Bank();
+        busy.configure(Map.of(), () -> now[0]);
+        for (int i = 0; i < 4; i++) busy.openCurrent("A" + i, "c1", Money.inr("10000.00"), Money.inr("100000.00"));
+        Money before = busy.totalAssets(Money.INR);
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fired = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            final int n = i;
+            fired.add(pool.submit(() -> {
+                go.await();
+                String a = "A" + (n % 4), b = "A" + ((n + 1) % 4);
+                return busy.transfer("X" + n, n % 2 == 0 ? a : b, n % 2 == 0 ? b : a, Money.inr("100.00"), "r" + n);
+            }));
+        }
+        go.countDown();
+        int done = 0;
+        for (Future<?> f : fired) { f.get(); done++; }
+        pool.shutdown();
+        System.out.println("64 concurrent transfers: completed=" + done
+                           + " total assets before=" + before + " after=" + busy.totalAssets(Money.INR));
+        if (done != 64 || !before.equals(busy.totalAssets(Money.INR)))
+            throw new AssertionError("a transfer created or destroyed money");
+        System.out.println("audit log saw " + audit.size() + " postings; alerts " + alerts.alerts().size());
+    }
+
+    /** Run one job threads x times each, all released together, and wait for every one of them. */
+    private static void runConcurrently(int threads, int times, Runnable job) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int t = 0; t < threads; t++) fs.add(pool.submit(() -> {
+            go.await();
+            for (int i = 0; i < times; i++) job.run();
+            return null;
+        }));
+        go.countDown();
+        for (Future<?> f : fs) f.get();
+        pool.shutdown();
+    }
+}

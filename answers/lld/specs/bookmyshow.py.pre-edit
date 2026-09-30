@@ -1,0 +1,646 @@
+# Movie ticket booking (BookMyShow) LLD workbench.
+# problem -> twelve moves, each a picture -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, pathlib
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+SRC = (H / "bookmyshow/Main.java").read_text()
+EXT = (H / "bookmyshow/Extensions.java").read_text()
+TST = (H / "bookmyshow/FailureTests.java").read_text()
+
+def cut(src, a, b=None):
+    """raw slice between two exact markers, keeping the first marker's line"""
+    i = src.index(a)
+    i = src.rfind("\n", 0, i) + 1
+    j = src.index(b, i) if b else len(src)
+    return src[i:j].rstrip() + "\n"
+
+def X(a, b):
+    """one '// ---- ext:' block of Extensions.java"""
+    import re as _re
+    marks = [m.start() for m in _re.finditer(r"(?m)^// ---- ext:", EXT)] + [EXT.index("/** Runs every extension")]
+    i = next(m for m in marks if a in EXT[m:m + 160])
+    j = next(m for m in marks if m > i)
+    return EXT[i:j].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ problem page pictures
+
+# what the code must do: hold, then pay-and-confirm, with the seat map as a line
+pf = _D
+rows = [("hold", 30, [("a user picks seats", "B3 and B4 at the 6pm show"),
+                      ("is every one of them free?", "a lapsed hold counts as free"),
+                      ("mark them all HELD", "by this booking, for five minutes"),
+                      ("a booking, PENDING", "its seats and its amount, frozen")]),
+        ("pay &amp; confirm", 165, [("charge the card", "outside the lock, about 1.5 s"),
+                      ("still ours, still in time?", "re-checked under the lock"),
+                      ("mark them all SOLD", "the booking is CONFIRMED"),
+                      ("the SMS, the analytics", "after the lock is released")])]
+for lab, y, boxes in rows:
+    pf += _tx(80, y + 31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 150 + k * 270
+        pf += _bx(x, y, 250, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x + 250, y + 27, x + 270), True)
+pf += _ar("M545 84 V95", dash=True) + _bx(420, 95, 250, 40, "one seat taken: nothing is held", "", dash=True)
+pf += _ar("M545 219 V230", dash=True) + _bx(385, 230, 320, 40, "the hold lapsed: refund, refuse", "", dash=True)
+pf += _tx(80, 296, "seat map", "var(--acc)", 13)
+pf += _tx(150, 296, "at any moment, without scanning the screen: is B4 free at the 9pm show?  how many gold seats are left?", "var(--text)", 12, "start")
+pf += _tx(615, 330, "many phones hit the same show at the same instant: one chair must never become two tickets, and a failed payment must leave nothing half-done", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 345, pf)
+
+# one evening, replayed
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("18:41:02  asha taps B4", ["B4 at the 6pm show is AVAILABLE", "held for her until 18:46:02", "booking BK7, PENDING, Rs 250.00", "gold free: 5 of 6"], True),
+      ("18:41:02.000  raj taps B4", ["the same millisecond, another phone", "the show's lock lets exactly one in", "raj is told: seat B4 is HELD", "nothing was half-written"], False),
+      ("18:43:10  asha's card clears", ["the gateway took 1.4 s, no lock held", "re-check: still hers, 2m52s left", "only now: B4 SOLD, BK7 CONFIRMED", "the SMS goes out after the unlock"], True),
+      ("18:46:03  meena taps C1", ["C1 was held by a card that declined", "that hold died three seconds ago", "no sweeper ran: this look frees it", "meena holds C1, booking BK9"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k * 290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x + 125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x + 125)
+    pe += _card(x, 60, 250, 110, t, lines, acc=acc)
+P_EX = _mv(1230, 185, pe)
+
+# ============================================================ derivation move pictures
+MV = {}
+
+# 1: the nouns, and the split that decides everything
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a USER picks a SHOW (a MOVIE on a SCREEN at a TIME), reads the SEAT MAP, HOLDS SEATS for a few minutes, PAYS, gets a BOOKING", "var(--text)", 12.5)
+for k, (t, sub, acc) in enumerate([("Seat", "row, number, class", 1), ("Screen", "its fixed seat layout", 1),
+                                   ("Show", "its seats, its lock", 1), ("ShowSeat", "status, holder, expiry", 1),
+                                   ("Booking", "seats, amount, status", 1), ("seat map", "a question: a method", 0)]):
+    x = 25 + k * 200
+    m1 += _bx(x, 110, 180, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + 90))
+m1 += _tx(615, 186, "solid = has its own state, becomes a class.   dashed = no state of its own: a caller or a method", "var(--muted)", 11)
+m1 += _tx(615, 208, "the split that decides the whole design: a SEAT is a chair and has no status; a SHOW SEAT is that chair at one show, and that is where the status lives", "var(--acc)", 11.5)
+MV[1] = _mv(1230, 222, m1)
+
+# 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("is this seat free right now?", "ShowSeat  (owns status and expiry)", "ss.freeAt(now)"),
+                                       ("hold these seats, all or nothing", "Show  (owns the seats, the bookings, the lock)", "show.hold(user, ids, pricing)"),
+                                       ("charge the card", "PaymentProcessor  (owns no state here)", "pay.charge(amountPaise)"),
+                                       ("sell the seats we still hold", "Show  (the same state, the same lock)", "show.commit(booking, ref)")]):
+    y = 20 + k * 54
+    m2 += _bx(30, y, 340, 44, verb, "the verb") + _ar("M370 %s H410" % (y + 22), True)
+    m2 += _bx(410, y, 420, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H870" % (y + 22), True)
+    m2 += _bx(870, y, 330, 44, meth, "the method")
+m2 += _tx(615, 256, "a verb whose state is spread over many seats goes to the class that owns them all: the show. A verb that owns nothing, like charging a card, is handed in and runs outside the lock.", "var(--muted)", 11)
+MV[2] = _mv(1230, 268, m2)
+
+# 3: rules -> one-method interfaces handed in
+m3 = _D + _bx(30, 75, 230, 110, "BookingService", "configure(pricing, policy)", acc=True)
+for k, (t, sub, impls) in enumerate([("PricingRule", "class rate today, surge tomorrow", "ClassPricing / WeekendSurge / Demand"),
+                                     ("SeatPolicy", "any free seat, or three together", "AnyFreeSeats / AdjacentSeats"),
+                                     ("PaymentProcessor", "UPI, card, wallet; it can say no", "UpiPayment / CardPayment"),
+                                     ("BookingObserver", "SMS, analytics, a data pipe", "SmsNotifier / Analytics")]):
+    y = 20 + k * 58
+    m3 += _ar("M260 130 H330 V%s H400" % (y + 22), True, True) + _bx(400, y, 330, 44, t, sub, dash=True)
+    m3 += _bx(770, y, 430, 44, impls, "the classes that can be handed in") + _ar("M770 %s H730" % (y + 22))
+m3 += _tx(615, 266, "dashed lavender = handed in. the service and the show never build these, so a new rule is a new class and one changed line", "var(--muted)", 11)
+MV[3] = _mv(1230, 280, m3)
+
+# 4: the gap between reading and writing
+m4 = _D + _bx(30, 30, 170, 44, "phone 1", "reads: B4 free") + _bx(30, 110, 170, 44, "phone 2", "reads: B4 free")
+m4 += _bx(330, 70, 190, 44, "ShowSeat B4", "AVAILABLE", acc=True)
+m4 += _ar("M200 52 H330 V70") + _ar("M200 132 H330 V114") + _tx(260, 40, "read", "var(--muted)", 10.5) + _tx(260, 160, "read", "var(--muted)", 10.5)
+m4 += '<rect x="545" y="20" width="300" height="140" rx="6" fill="none" stroke="#f38ba8" stroke-dasharray="4 3"/>'
+m4 += _tx(695, 45, "the gap", "#f38ba8", 12) + _tx(695, 70, "both saw AVAILABLE, both write HELD:", "#f38ba8", 11) + _tx(695, 90, "one chair, two tickets", "#f38ba8", 11)
+m4 += _tx(695, 130, "fix: check and take as ONE step, one lock", "var(--text)", 11)
+m4 += _bx(875, 40, 325, 100, "Show.lock", "check all + hold all = one step", acc=True)
+m4 += _tx(615, 180, "the lock lives where the shared state lives: on the show, not on the service and not on the seat", "var(--muted)", 11)
+m4 += _tx(615, 200, "the clock is read INSIDE the lock too, so two callers can never disagree about whether a hold has lapsed; listeners are called after the unlock", "var(--muted)", 11)
+MV[4] = _mv(1230, 214, m4)
+
+# 5: each collection, its question, its shape
+m5 = _D
+for k, (q, shape, sub, cost) in enumerate([("is seat B4 free in THIS show?", "Map&lt;seatId, ShowSeat&gt;  on the show", "screen order, so 'adjacent' means what it says", "O(1)"),
+                                           ("which booking is BK7?", "Map&lt;bookingId, Booking&gt;  on its show", "plus Map&lt;bookingId, Show&gt; on the service: which show", "O(1)"),
+                                           ("how many gold seats are left?", "Map&lt;SeatClass, Integer&gt;  a counter", "moved by one at every hold, release and cancel", "O(1)"),
+                                           ("which seats does BK7 hold?", "Booking.seats: the list, frozen at hold", "confirm can never reprice or drop one", "O(1), no search"),
+                                           ("three gold seats together?", "walk the free seats of that class once", "the only walk in the design, ~40 seats", "O(seats in a class)")]):
+    y = 20 + k * 50
+    m5 += _bx(30, y, 360, 40, q, "the question") + _ar("M390 %s H440" % (y + 20), True)
+    m5 += _bx(440, y, 560, 40, shape, sub, acc=True) + _ar("M1000 %s H1030" % (y + 20), True)
+    m5 += _bx(1030, y, 170, 40, cost, "")
+m5 += _tx(615, 290, "every scan avoided here is a scan avoided INSIDE the lock, which is the only place a scan would have cost anybody anything", "var(--muted)", 11)
+MV[5] = _mv(1230, 303, m5)
+
+# 6: two state machines and the order at the critical step
+m6 = _D + _tx(30, 26, "ShowSeat", "var(--acc)", 12.5, "start")
+m6 += _bx(30, 34, 160, 44, "AVAILABLE", "nobody has it") + _bx(330, 34, 160, 44, "HELD", "one booking, until t", acc=True) + _bx(630, 34, 160, 44, "SOLD", "paid for", acc=True)
+m6 += _ar("M190 56 H330", True) + _tx(260, 48, "hold: all or nothing", "var(--muted)", 10)
+m6 += _ar("M490 56 H630", True) + _tx(560, 48, "commit: re-checked", "var(--muted)", 10)
+m6 += _ar("M410 78 V104 H110 V78", dash=True) + _tx(260, 118, "the hold lapses, or is released", "var(--muted)", 10)
+m6 += _ar("M710 78 V136 H110 V78", dash=True) + _tx(430, 150, "cancelled: back on sale, money back", "var(--muted)", 10)
+m6 += _tx(30, 178, "Booking", "var(--acc)", 12.5, "start")
+m6 += _bx(30, 190, 160, 44, "PENDING", "seats only held") + _bx(330, 190, 160, 44, "CONFIRMED", "paid and sold", acc=True)
+m6 += _bx(630, 186, 160, 40, "CANCELLED", "given back") + _bx(630, 246, 160, 40, "EXPIRED", "the hold died")
+m6 += _ar("M190 212 H330", True) + _tx(260, 204, "paid AND still ours", "var(--muted)", 10)
+m6 += _ar("M110 234 V266 H630", dash=True) + _tx(370, 260, "the hold lapsed, or was released", "var(--muted)", 10)
+m6 += _ar("M490 206 H630", dash=True) + _tx(560, 198, "cancelled", "var(--muted)", 10)
+m6 += '<rect x="830" y="20" width="370" height="250" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(1015, 44, "the order, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1  lock: is every seat free?  then all HELD", "2  UNLOCK.  charge the card: about 1.5 s",
+                       "3  lock: still HELD by us, not expired?", "     only then SOLD, booking CONFIRMED",
+                       "a decline releases nothing: the hold just", "runs out and the seat comes back by itself",
+                       "a hold that lapsed at step 3: refund, refuse", "a second confirm: refused before any charge"]):
+    m6 += _tx(845, 68 + k * 24, l, "var(--text)" if k < 4 else "var(--muted)", 11, "start")
+m6 += _tx(615, 310, "two little state machines and one rule: nothing is committed before the money has moved, and nothing is trusted across the gap where the lock was not held", "var(--muted)", 11)
+MV[6] = _mv(1230, 324, m6)
+
+# 7: what is inside the lock, and two hundred phones at once
+m7 = _D + _card(30, 20, 540, 160, "inside the show's lock: about 2 microseconds",
+                ["look up three seat ids in a map", "read three statuses and three expiry stamps",
+                 "price three seats: three table lookups", "write status, holder and expiry on three seats",
+                 "put the booking in a map, move one counter"], acc=True)
+m7 += _ar("M570 100 H640", True) + _tx(605, 90, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 160, "outside the lock: milliseconds to seconds",
+            ["the payment gateway: about 1,500,000 us", "the SMS and the analytics pipe: after the unlock",
+             "the seat map on the phone: its own short lock", "the user choosing where to sit: 30 seconds",
+             "nothing slow is ever inside: that is the whole trick"])
+m7 += _tx(615, 210, "two hundred phones press on the same hot show at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k * 118
+    m7 += _bx(x, 224, 106, 40, "phone %d" % (k + 1), "waits %s us" % ("0" if k == 0 else "%.0f" % (k * 2)), acc=(k == 9))
+m7 += _tx(615, 292, "the tenth phone waits eighteen microseconds for the lock, then spends a second and a half at the gateway with the lock long released: one at a time is true, and nobody can tell", "var(--muted)", 11)
+MV[7] = _mv(1230, 305, m7)
+
+# 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(300, 42, "one lock per show: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["locked part of a three-seat hold: ~2 us; of a confirm: ~1 us",
+                       "a blockbuster's hot show at peak: ~200 hold attempts a second",
+                       "200 x 2 us = 400 us of lock in every 1,000,000 us: busy 0.04%",
+                       "about one request in 2,500 waits, and it waits two microseconds",
+                       "put the 1.5 s gateway INSIDE and the show does 0.67 bookings a second"]):
+    m8 += _tx(35, 66 + k * 24, l, RED if k == 4 else "var(--muted)", 11, "start")
+m8 += _tx(880, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 lock-free reads of the seat map", "volatile fields + a snapshot: the display never takes the write lock"),
+                              ("2 compare-and-set per seat", "swap the holder null to a booking id; roll back the ones already taken"),
+                              ("3 move the hold out of the process", "SET seat bookingId NX PX 300000: the only rung that survives four servers")]):
+    m8 += _bx(600, 58 + k * 50, 600, 42, t, sub, acc=(k == 0))
+m8 += _tx(615, 222, "say the arithmetic first: every rung costs code, and two of these three are only worth it once a number says so", "var(--muted)", 11)
+MV[8] = _mv(1230, 236, m8)
+
+# 9: what can go wrong, and the test for each
+m9 = _D
+for k, (t, sub, fix) in enumerate([("two phones, one seat", "one chair, two tickets", "check all and take all under one lock; test: 50 threads, one latch, exactly one hold"),
+                                   ("the card is declined", "the seat is lost, or wrongly freed", "release nothing; the hold runs out; test: decline, then the seat returns at expiry"),
+                                   ("the gateway outlives the hold", "the seat is sold twice", "re-check the hold under the lock; test: a gateway that moves the clock past expiry"),
+                                   ("the webhook fires twice", "charged twice, or sold twice", "refuse a confirm that is not PENDING; test: two confirms, charges == 1"),
+                                   ("the SMS gateway throws", "the booking dies with it", "publish after the unlock, inside a catch; test: a listener that always throws"),
+                                   ("three together, none free", "half a booking", "choose and take in one locked section; test: nothing held after the refusal")]):
+    y = 24 + k * 46
+    m9 += _bx(30, y, 300, 40, t, sub) + _ar("M330 %s H380" % (y + 20), True) + _bx(380, y, 820, 40, fix, "", acc=True)
+m9 += _tx(615, 322, "every claim this design makes has a test: FailureTests.java runs all six and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 336, m9)
+
+# 10: the patterns, named after the fact
+cols = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 830)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface PricingRule { long pricePaise(Show, Seat); }  via configure()", None), ("swap a rule without opening the show", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("WeekendSurgePricing(base): base.pricePaise(...) x 1.5 on a weekend show", None), ("add to a rule instead of copying it", None)],
+          [("Observer", "var(--text)"), ("move 3", None), ("publish(event, booking) after the unlock; SmsNotifier, Analytics listen", None), ("the user hears; the show never learns what SMS is", None)],
+          [("State", "var(--text)"), ("move 6", None), ("SeatStatus + BookingStatus, and the order hold, pay, re-check, sell", None), ("an illegal move cannot happen", None)],
+          [("Factory", "var(--muted)"), ("not yet", None), ("screens arrive built; it pays when a layout is read from a file", "var(--muted)"), ("say 'not yet, and here is what would make me'", "var(--muted)")],
+          [("Singleton", "var(--muted)"), ("never here", None), ("main builds one BookingService and hands it out; tests build their own", "var(--muted)"), ("one global is one test you cannot write", "var(--muted)")],
+          [("Builder, Command, Template", "var(--muted)"), ("never", None), ("no move produced them", "var(--muted)"), ("a pattern without a move is decoration", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 275, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 290, m10)
+
+# 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 555)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("ShowSeat: its own status. Show: its seats, its lock, the order. BookingService: the sequence.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("weekend surge = one new class and one changed configure() line", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("total += pricing.pricePaise(this, ss.seat);  never 'is it the surge one?'", None)],
+          [("I", "var(--acc)"), ("small interfaces, so a fake for a test is one line", None), ("move 3", None), ("PricingRule, SeatPolicy, Clock, BookingObserver: one method each", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("new Show(..., () -&gt; now[0], holdMs);   svc.confirm(id, a gateway that declines)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# 12: every twist is one of five moves
+m12 = _D
+tw = [("a new rule", "surge, demand, a coupon, best-available", "a new class behind the existing interface + one configure line", "", "move 3"),
+      ("someone new wants to know", "SMS, analytics, the big screen in the lobby", "one more observer; the booking path does not change a line", "", "move 3"),
+      ("a new step in a life", "a waitlist offer, a partial cancel, a refund", "a new state and one row in the transition table", "", "move 6"),
+      ("a new invariant across seats", "three seats must be next to each other", "choose AND take inside the SAME locked section: all or nothing", "", "move 4"),
+      ("state that must outlive the process", "persist it; four app servers", "the maps behind a repository, and the hold becomes a conditional UPDATE", "UPDATE show_seat SET status='HELD' WHERE seat=? AND status='AVAILABLE': the database's compare-and-set", "move 5 + this one")]
+for k, (t, sub, fix, fsub, mv) in enumerate(tw):
+    y = 24 + k * 54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y + 22), True) + _bx(420, y, 660, 44, fix, fsub, acc=True) + _tx(1150, y + 27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the Show and the BookingService do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 326, m12)
+
+# ============================================================ UML
+uml_reset()
+# left column: the callers, the listeners, the injected clock, and the catalog that never changes
+put("checkout", 10, 20, 225, "Checkout / kiosk", ["svc: BookingService"], ["pay pressed &rarr; hold()", "gateway returned &rarr; confirm()"])
+put("obs", 10, 150, 225, "BookingObserver", [], ["onBooking(event, booking)"], "interface")
+put("listeners", 10, 245, 225, "SmsNotifier | Analytics", [], ["onBooking(...) &rarr; send / count"])
+put("clock", 10, 330, 225, "Clock", [], ["nowMs(): long"], "interface")
+put("theatre", 10, 420, 225, "Theatre", ["id, city: String", "screens: List&lt;Screen&gt;"], [])
+put("screen", 10, 520, 225, "Screen", ["id: String", "seats: List&lt;Seat&gt;"], [])
+put("seat", 10, 620, 225, "Seat", ["id, row: String", "number: int", "seatClass: SeatClass", "no status lives here"], [])
+put("sclass", 10, 750, 225, "SeatClass", ["SILVER, GOLD, PLATINUM"], [], "enum")
+# centre column: the orchestrator, the aggregate root, and the seat it owns
+put("svc", 300, 20, 320, "BookingService", ["shows: Map&lt;id, Show&gt;", "byBooking: Map&lt;bookingId, Show&gt;", "pricing: PricingRule", "policy: SeatPolicy", "observers: List&lt;BookingObserver&gt;"],
+    ["configure(pricing, policy)", "hold(show, user, seatIds): Booking", "holdBest(show, user, class, n)", "confirm(bookingId, pay): Booking", "cancel(bookingId, pay) / release(id)"])
+put("show", 300, 280, 320, "Show", ["id, movie: String", "screen: Screen", "startMs: long", "seats: Map&lt;seatId, ShowSeat&gt;", "bookings: Map&lt;id, Booking&gt;", "free: Map&lt;SeatClass, Integer&gt;", "lock: ReentrantLock", "clock: Clock,  holdMs: long"],
+    ["hold(user, ids, pricing): Booking", "holdBest(user, class, n, policy, ..)", "commit(booking, ref): boolean", "release(b) / cancel(b): long", "freeCount(class) / statusOf(id)", "seatMap() / sweepExpired()"])
+put("showseat", 300, 640, 320, "ShowSeat", ["seat: Seat", "status: SeatStatus", "holdBookingId: String", "holdExpiresMs: long"], ["freeAt(now): boolean"])
+# middle-right column: the booking and the two state enums, each under the class it belongs to
+put("booking", 655, 340, 235, "Booking", ["id, userId: String", "show: Show", "seats: List&lt;ShowSeat&gt;", "amountPaise: long", "holdExpiresMs: long", "status: BookingStatus", "paymentRef: String"], [])
+put("bstatus", 655, 530, 235, "BookingStatus", ["PENDING, CONFIRMED,", "CANCELLED, EXPIRED"], [], "enum")
+put("sstatus", 655, 640, 235, "SeatStatus", ["AVAILABLE, HELD, SOLD"], [], "enum")
+# right column: the rules that get handed in, each with its implementations
+put("pricing", 950, 20, 250, "PricingRule", [], ["pricePaise(show, seat): long"], "interface")
+put("classp", 950, 110, 250, "ClassPricing", ["RATE: Map&lt;SeatClass, Long&gt;"], ["pricePaise &rarr; RATE[class]"])
+put("surge", 950, 215, 250, "WeekendSurgePricing", ["base: PricingRule"], ["pricePaise &rarr; base x 1.5"])
+put("policy", 950, 330, 250, "SeatPolicy", [], ["choose(free, n): List&lt;ShowSeat&gt;"], "interface")
+put("policies", 950, 420, 250, "AnyFreeSeats | AdjacentSeats", [], ["choose &rarr; first n | n in a row"])
+put("pay", 950, 530, 250, "PaymentProcessor", [], ["charge(paise): String ref", "refund(ref, paise)"], "interface")
+put("pays", 950, 650, 250, "UpiPayment | CardPayment", [], ["charge(...) &rarr; a payment ref"])
+
+edges = [
+    ln(B["listeners"]["t"], B["obs"]["b"], "inherit"),
+    ln(B["classp"]["t"], B["pricing"]["b"], "inherit"),
+    ln((B["surge"]["t"][0] - 60, B["surge"]["t"][1]), (B["pricing"]["b"][0] - 60, B["pricing"]["b"][1]), "inherit"),
+    ln(B["surge"]["l"], (B["pricing"]["l"][0] - 15, B["pricing"]["l"][1] + 12), "assoc", "", [(B["pricing"]["l"][0] - 15, B["surge"]["l"][1])]),
+    ln(B["policies"]["t"], B["policy"]["b"], "inherit"),
+    ln(B["pays"]["t"], B["pay"]["b"], "inherit"),
+    # the catalog, top to bottom on the left
+    ln(B["theatre"]["b"], B["screen"]["t"], "compose", "1..*"),
+    ln(B["screen"]["b"], B["seat"]["t"], "compose", "1..*"),
+    ln(B["seat"]["b"], B["sclass"]["t"], "assoc"),
+    # the spine: service owns shows, a show owns one ShowSeat per chair and its bookings
+    ln(B["svc"]["b"], B["show"]["t"], "compose", "shows"),
+    ln(B["show"]["b"], B["showseat"]["t"], "compose", "one per chair"),
+    ln(B["show"]["r"], B["booking"]["l"], "compose"),
+    ln(B["showseat"]["l"], B["seat"]["r"], "assoc"),
+    ln((300, 540), (235, 540), "assoc", "layout"),
+    ln((235, 357), (300, 357), "inject", "injected"),
+    # a booking points at its show seats; each state enum sits under its own class
+    ln((655, 460), (620, 730), "assoc", "", [(637, 460), (637, 730)]),
+    ln(B["booking"]["b"], B["bstatus"]["t"], "assoc"),
+    ln((620, 715), (772, 690), "assoc", "", [(772, 715)]),
+    # the rules, handed in through configure()
+    ln((620, 88), B["pricing"]["l"], "inject", "injected", [(936, 88), (936, B["pricing"]["l"][1])]),
+    ln((620, 112), B["policy"]["l"], "inject", "", [(920, 112), (920, B["policy"]["l"][1])]),
+    ln((620, 136), B["pay"]["l"], "inject", "", [(908, 136), (908, B["pay"]["l"][1])]),
+    ln((300, 177), (235, 177), "notify", "notifies"),
+    ln((235, 65), (300, 65), "assoc", "calls"),
+    '<text x="643" y="622" font-size="10.5" fill="var(--muted)">seats</text>',
+]
+UMLSVG = uml_svg(1230, 880, edges, legend_y=850)
+
+# ============================================================ page 1: the problem
+REQ = ('<div class="req"><div><b>Functional requirements</b><ul>'
+       '<li>A show is one movie, on one screen, at one time; its seats are its own.</li>'
+       '<li>Hold: take one or more named seats for a few minutes, all of them or none.</li>'
+       '<li>Pay, then confirm: the seats become sold only after the money moved.</li>'
+       '<li>A hold that is not confirmed in time dies, and the seats come back.</li>'
+       '<li>Cancel a confirmed booking: the seats go back on sale and the money goes back.</li>'
+       '<li>Price by seat class, and changeable (weekends cost more) without touching the flow.</li>'
+       '<li>"Three seats together" as well as "these three seats".</li>'
+       '<li>Answer "is B4 free at the 9pm show?" and "how many gold seats are left?"</li></ul></div>'
+       '<div><b>Non-functional requirements</b><ul>'
+       '<li>Many phones on one show at the same time: one chair is never two tickets.</li>'
+       '<li>Nothing half-done: a declined card leaves the state exactly as it was.</li>'
+       '<li>Seat lookup, hold and the free count are O(1); nothing scans the screen.</li>'
+       '<li>Pricing, seat choice and payment swappable without changing the core.</li>'
+       '<li>One source of truth for a seat at a show: its ShowSeat, under its show\'s lock.</li>'
+       '<li>Money is integer paise. A double loses fractions of a rupee across a sum.</li>'
+       '<li>In memory, one process, no database (say it; a follow-up adds one).</li></ul></div></div>')
+
+PROMPT = ('"Design the booking part of BookMyShow. A user picks a show, picks seats, gets a few minutes to pay, and the '
+          'seats must not be sold to anybody else in the meantime. Two people will tap the same seat at the same moment. '
+          'I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+    '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+    '<div class="move"><h3>The problem, in plain words</h3><p>A cinema chain sells seats for shows. A <b>show</b> is one movie, '
+    'on one screen, at one time: the 6pm and the 9pm show use the same physical chairs but sell them separately. A user opens '
+    'a show, sees which seats are free, picks some, and the system must take those seats off the market for a few minutes while '
+    'the user pays. If the payment goes through, the seats are sold; if it fails or the user walks away, the seats come back '
+    'on sale by themselves. Hundreds of phones hit a popular show in the same second, so the load-bearing rule is this: one '
+    'chair at one show must never become two tickets, and a group booking is all of its seats or none of them.</p></div>'
+    '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, with a '
+    '<code>main</code> that books a seat end to end and a race that proves the invariant. The interviewer is watching for, in '
+    'this order: the questions you ask before typing; which classes exist and which one owns which state (and whether you '
+    'split the chair from the chair-at-a-show); hold, pay and confirm working end to end; what happens when two phones tap '
+    'the same seat in the same millisecond; where the rules that will change (price, which seats, how to pay) live, so a '
+    'change is a new class and not an edit; and what happens when the card is declined or the gateway is slower than your '
+    'hold. Then the twists: surge pricing, three seats together, a sweeper, a waitlist, four app servers, a retried '
+    'webhook.</p></div>'
+    '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+    '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+    '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+    '<tr><td>Do users hold seats and then pay, or is it booked on the click?</td><td>Hold with a five-minute window, then pay</td><td>The HELD state, the expiry, and the whole critical step (moves 4, 6)</td></tr>'
+    '<tr><td>Can the same chair be sold at two different shows?</td><td>Yes: availability belongs to the show, not the chair</td><td>Seat splits into Seat and ShowSeat (move 1)</td></tr>'
+    '<tr><td>One process, or several app servers?</td><td>One, in memory, today</td><td>A ReentrantLock per show; a follow-up moves it out (moves 4, 12)</td></tr>'
+    '<tr><td>Is payment real, and can it fail or be slow?</td><td>Mocked behind an interface; it can decline and can take seconds</td><td>Payment outside the lock, and the re-check inside it (move 6)</td></tr>'
+    '<tr><td>How is a seat priced?</td><td>A flat rate per seat class; weekends cost more</td><td>Pricing behind an interface, surge as a wrapper (move 3)</td></tr>'
+    '<tr><td>Must a group of seats be together, and is it all-or-nothing?</td><td>All-or-nothing always; together only if asked</td><td>Two passes under one lock, and a seat policy (moves 3, 4)</td></tr>'
+    '<tr><td>Are cancellation and refunds in scope?</td><td>Cancel yes, partial refunds no</td><td>The CANCELLED state and refund on the payment interface (move 6)</td></tr>'
+    '<tr><td>Search, seat maps, waitlists, analytics?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr></table></div>'
+    '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ +
+    '<div class="move"><h3>One evening, replayed</h3></div>' + P_EX +
+    '<div class="grade"><b>Say before typing:</b> one process, in memory; a chair has no status, a chair-at-a-show does; a hold '
+    'lasts five minutes and dies on its own; money is integer paise; a group is all its seats or none. Named as out of scope: '
+    'search and the catalog, seat maps at scale, waitlists, partial refunds, four app servers; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 2: the twelve moves
+DER_LEAD = ('Run these twelve on any LLD and the class diagram, the lock, the tests, the patterns, SOLID and the answer to '
+            'every twist fall out in that order. Nothing is chosen up front, and no pattern is named before the move that '
+            'produced it. For this problem the first move is the one that decides everything: one of the nouns splits in two.')
+
+MOVES = [
+("Move 1: underline the nouns, and watch one of them split in two.",
+ "Reading the prompt again: a <b>user</b> opens a <b>show</b> (a <b>movie</b> on a <b>screen</b> at a <b>time</b>), reads the "
+ "<b>seat map</b>, holds some <b>seats</b>, <b>pays</b>, and gets a <b>booking</b>. Screen has a fixed layout: a class. Seat has "
+ "a row, a number and a class: a class. Show has its own time and its own inventory: a class. Booking has seats, an amount and a "
+ "status: a class. The user is a caller, so it is a string id, not a model, and the seat map is a question I answer, so it is a "
+ "method. Then the move that decides the whole design: is a seat free? That cannot be a field on <code>Seat</code>, because the "
+ "same chair is free at 6pm and sold at 9pm and one boolean would make those two shows fight over one field. So <b>Seat</b> "
+ "splits: the chair stays immutable and shared, and a new class <b>ShowSeat</b> holds the status of that chair at one show. "
+ "Every other decision on this page rests on that line.", 1),
+
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Is this seat free right now\" reads a status and an expiry stamp, both on the show seat, so <code>showSeat.freeAt(now)</code>. "
+ "\"Hold these three seats, all or nothing\" touches three show seats, the bookings map and the free counts at once; only the "
+ "show sees all of them, so <code>show.hold(user, ids, pricing)</code>. \"Charge the card\" touches none of our state at all, so it "
+ "is handed in and called by the orchestrator, not by the show. \"Sell the seats we still hold\" touches the same state as the hold, "
+ "so it is the same class and the same lock: <code>show.commit(booking, ref)</code>. A verb whose state is spread over many "
+ "objects goes to the class that owns them all; that is how a small ShowSeat and one busy Show appear without planning them.", 2),
+
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Price will change: flat per class today, one and a half times on weekends tomorrow, demand-based the round after. Which seats "
+ "to hand out will change: any free ones today, three together tomorrow. How to pay will change: UPI, card, wallet, and it can say "
+ "no. Who must be told will change: the user, then analytics, then the screen in the lobby. Each becomes a one-method interface "
+ "the service is <i>given</i> in <code>configure()</code> and never builds. This is where the patterns come from, not the other way "
+ "round: a swappable rule behind an interface is <b>Strategy</b>; a rule that wraps another and adds to it (weekend surge over the "
+ "flat rate) is <b>Decorator</b>; a service that announces \"this booking confirmed\" to whoever subscribed, without knowing what an "
+ "SMS is, is <b>Observer</b>. I write them; I do not announce them.", 3),
+
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two phones read \"B4 is AVAILABLE\" in the same millisecond and both write \"HELD\". Between the read and the write is the gap, and "
+ "the gap is the whole problem: one chair, two tickets. So checking every requested seat and taking every requested seat must be "
+ "one indivisible step, in the class that owns those seats: the show. One <code>ReentrantLock</code> per show, because the show is "
+ "the natural unit of contention: two different shows never wait for each other, and a lock on the whole cinema would make the 9pm "
+ "screen queue behind the 6pm one. The clock is read inside the lock too, so two callers can never disagree about whether a hold "
+ "has lapsed. And anything that only listens, like the SMS, is called after the lock is released, never inside it.", 4),
+
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"Is B4 free in this show\": a map from seat id to show seat, kept in screen order so that \"adjacent\" still means something. "
+ "\"Which booking is BK7\": a map by booking id on the show, plus a tiny map from booking id to show on the service so a caller "
+ "with only an id can be routed in one hop. \"How many gold seats are left\": a counter per seat class, moved by one at every hold, "
+ "release and cancel, instead of counting seats. \"Which seats does this booking hold\": the list on the booking, frozen when the "
+ "hold was taken, so confirm can never quietly reprice or drop one. Only one question needs a walk, \"three gold seats together\", "
+ "and it walks about forty seats. Every scan avoided here is a scan avoided inside the lock, which is the only place a scan would "
+ "have cost anybody anything.", 5),
+
+("Move 6: a seat and a booking each have a life cycle, and the ORDER at the critical step is the design.",
+ "A show seat is AVAILABLE, or HELD by one booking until a moment in time, or SOLD. A booking is PENDING while it only holds seats, "
+ "CONFIRMED once the money moved and the seats were committed, EXPIRED if the hold died first, CANCELLED if a sale was given back. "
+ "Writing those down forces the question the interviewer is waiting to ask: what if the payment fails, or is slower than the hold? "
+ "The answer is an order. One, under the lock: check every seat is free, then mark them all HELD. Two, with no lock held at all: "
+ "charge the card, which takes a second or two. Three, under the lock again: the seats must still be HELD by <i>this</i> booking and "
+ "the hold must not have expired; only then do they become SOLD. A declined card releases nothing, so the user can try another card "
+ "and the hold simply runs out if they do not. A hold that lapsed while the card was being charged is refunded and refused, which is "
+ "the one line that makes selling a seat twice impossible. A second confirm is refused before any money moves.", 6),
+
+("Move 7: yes, one lock per show makes holds happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every hold on this show takes the same lock, is a blockbuster now a "
+ "queue? It is, for about two microseconds. Inside the lock there are three map lookups, three status reads, three price lookups, "
+ "nine field writes and one counter. Everything slow is outside it: the payment gateway at about one and a half seconds, the SMS, "
+ "the analytics pipe, the user deciding where to sit. So when two hundred phones press the same show at the same instant, the tenth "
+ "one waits about eighteen microseconds for the lock and then spends a second and a half at the gateway with the lock long released. "
+ "One at a time is true and nobody can tell, as long as nothing slow gets inside. The one rule that protects this: the pricing rule "
+ "is called inside the lock, so it must stay arithmetic; if a rule ever needs a network call, price before taking the lock and pass "
+ "the amount in.", 7),
+
+("Move 8: say the arithmetic, then name the ladder.",
+ "A hot show at peak takes about two hundred hold attempts a second. Two hundred times two microseconds is four hundred microseconds "
+ "of lock in every million: the lock is busy about four hundredths of one per cent of the time, roughly one request in two thousand "
+ "five hundred waits, and it waits two microseconds. Now the number that matters: put the one and a half second gateway inside the "
+ "lock and the same show manages zero point six seven bookings a second and the queue never drains. That is why payment is outside. "
+ "Then the ladder, in the order you would climb it: lock-free reads of the seat map, using volatile fields and a snapshot, so the "
+ "display never touches the write lock; compare-and-set per seat instead of the show's lock, which buys more concurrency and costs "
+ "you real rollback code when the third seat of a group refuses; and finally moving the hold out of the process entirely, which is "
+ "the only rung that survives a second app server. Say the arithmetic first: climbing without it is complexity nobody asked for.", 8),
+
+("Move 9: list what can go wrong, and write the test for each before the hour is over.",
+ "Two phones on one seat (exactly one hold). A declined card (nothing released, the hold runs out, the seat comes back). A gateway "
+ "slower than the hold (the re-check refuses and the money is refunded). A webhook that fires twice (charged once, sold once). An "
+ "SMS gateway that throws (the booking still confirms). Three seats together when no three are free (nothing at all is held). Each "
+ "of these is a few lines in FailureTests.java, and each is a bug that ships if the matching line of the design is dropped. Time "
+ "comes from an injected clock, so the expiry tests move the clock instead of sleeping, and the slow-gateway test is simply a "
+ "payment processor that pushes the clock past the hold while it is \"charging\". A design that cannot show its tests is a claim.", 9),
+
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every pattern here came out of a move, which is why each can be defended in one sentence. Strategy is move 3: price, seat choice "
+ "and payment are rules that will change, so each sits behind a one-method interface the service is handed. Decorator is the weekend "
+ "surge: a new rule that wraps the old one rather than replacing it, so the flat rule never changes. Observer is move 3 plus move 4's "
+ "rule that a listener must not be inside the lock: the service announces \"confirmed\" and the SMS and analytics listen. State is "
+ "move 6: two enums and one order, so an illegal move cannot happen. Factory has not earned a place: screens and seats arrive built, "
+ "and it pays the moment a layout is read from a file. Singleton is deliberately absent: <code>main</code> builds one BookingService "
+ "and hands it out, which is exactly why every test can build its own. A pattern without a move behind it is decoration.", 10),
+
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "S: a class has one reason to change, which move 2 gave you. A show seat changes when its own status does; a show when its seats, "
+ "its lock or the order does; the service only when the sequence does. O: a new behaviour is a new class and one changed line, never "
+ "an opened one, which weekend surge proves. L: the show adds up <code>pricing.pricePaise(...)</code> and never asks which rule it "
+ "got. I: the interfaces have one method each, so a fake for a test is a lambda. D: the show is handed its clock and the service is "
+ "handed its rules, which is exactly why a test can inject a clock it controls and a gateway that declines. SOLID is not a list to "
+ "recite; it is the check that the twelve moves did their job.", 11),
+
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (surge, demand pricing, a coupon, best-available seats) is a new class behind an interface that already exists plus one "
+ "configure line. Someone new who wants to know (SMS, analytics, the screen in the lobby) is one more observer and the booking path "
+ "does not change a line. A new step in a life (a waitlist offer, a partial cancel, a refund state) is a new state and one row in the "
+ "transition table. A new invariant across seats (three of them must be next to each other) is choosing and taking inside the same "
+ "locked section, so a run cannot be broken between picking it and getting it. State that must outlive the process (persist it, or run "
+ "four app servers) is the maps behind a repository interface, and the hold becomes a conditional update: set the row to HELD where it "
+ "is still AVAILABLE, and zero rows updated means somebody else won. That is the database's compare-and-set, the same idea as the lock, "
+ "one atomic step deciding the winner. For all five, Show and BookingService do not change; that is the test that the derivation was "
+ "right. Page 05 has the code for each.", 12),
+]
+MOVES = [(t, MV[k], txt) for (t, txt, k) in MOVES]
+
+HOW_TO_READ = (
+    '<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed list of values). '
+    'Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = implements. Filled '
+    'diamond = owns: the service owns the shows, a show owns one ShowSeat per chair and owns its bookings, a screen owns its '
+    'seats. Plain arrow = references: a ShowSeat points at the chair it is a booking of, a Booking points at its show seats. '
+    'Dashed lavender = handed in through <code>configure()</code> or the constructor. Dotted blue = notifies, and it happens '
+    'after the lock is released. <b>Where state lives:</b> the left column and the bottom-left are the catalog and never change '
+    'while anybody books; every mutable field in the whole design is on a ShowSeat or a Booking, and every write to one of them '
+    'happens inside its show\'s lock. The service holds no seat state at all: it sequences hold, pay and commit, and it is the '
+    'only class that talks to the gateway.')
+
+# ============================================================ page 4: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each class '
+              'and method says what it does and what it guarantees; read only those first for the shape, then the bodies for the '
+              'mechanics. Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java (the reference '
+              'code for every follow-up) and FailureTests.java (six claims proven; '
+              '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 5: follow-ups
+IMPLEMENT = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3><button class="timer" data-min="60">start 60:00</button></div>'
+             '<div class="cb"><div class="prompt">' + PROMPT + '</div>Before typing, write your six to eight clarifying questions; then type in the order '
+             'of Main.java: the enums (SeatClass, SeatStatus, BookingStatus), the catalog (Seat with no status, Screen, Theatre), ShowSeat and Booking, the '
+             'three small exceptions, Clock, the four one-method interfaces with one implementation each, the Show with its map of seats, its lock and the '
+             'hold / commit / release / cancel order, the BookingService that puts payment between the two locked halves, and a main with the fifty-thread '
+             'race.</div></div>')
+
+FU = [
+("Weekend surge, one and a half times, without touching Show or BookingService.", "functional", 10,
+ "Price is already an interface, so surge is one new class that wraps the flat rule: it asks the flat rule for the price, looks at "
+ "the day the <i>show</i> starts, and multiplies by 1.5 on a Saturday or a Sunday. Nothing else changes; the only edit is the "
+ "<code>configure</code> line that hands the rule in. It reads the show's start time, not the wall clock, so a Tuesday booking for "
+ "a Saturday show still pays the weekend price, and a test needs no clock at all. Demand pricing and coupons stack the same way, "
+ "each wrapping the one below it.",
+ sect(SRC, "class WeekendSurgePricing", "interface SeatPolicy") + "\n" + X("dynamic pricing", "persistence")),
+
+("Two phones tap seat B4 in the same millisecond. Prove only one of them gets it.", "non-functional", 10,
+ "The race lives in the gap between reading \"B4 is AVAILABLE\" and writing \"B4 is HELD\". <code>hold</code> does both inside one "
+ "lock on the show, in two passes: pass one checks every requested seat and touches nothing, pass two writes them all. No other "
+ "phone can run in that gap, and a seat that fails in pass one means nothing at all was written. The proof: fifty threads wait on "
+ "one latch, the latch opens, all fifty ask for seat C1, and the test counts the bookings that came back: exactly one, and "
+ "forty-nine get SeatUnavailable.",
+ sect(SRC, "    Booking hold(String userId", "    Booking holdBest(String userId") + "\n" + cut(TST, "        // 1. fifty phones", "        // 2. the card is declined")),
+
+("One lock per show. Does that scale, or have you serialised the whole cinema?", "non-functional", 5,
+ "It scales, and the answer is arithmetic, not opinion. The locked part of a three-seat hold is three map lookups, three status "
+ "reads, three price lookups and nine field writes: about two microseconds. A hot show at peak takes about two hundred hold "
+ "attempts a second, so the lock is busy four hundred microseconds in every million, and about one request in two and a half "
+ "thousand waits two microseconds for it. Two different shows share nothing, so a thirty-show multiplex has thirty locks and they "
+ "never meet. The number that would break it is the gateway: one and a half seconds inside the lock would take the show down to "
+ "0.67 bookings a second, which is exactly why payment sits between the two locked halves and not inside either of them.",
+ X("per-seat compare-and-set", "ExtDemo")),
+
+("The card is declined. What is the state of the system, and show me the code.", "functional", 10,
+ "Nothing is half done and nothing is released. <code>confirm</code> charges the card with no lock held; when the gateway returns "
+ "null it throws and returns, so the booking is still PENDING and the seats are still HELD by it. The user can try another card "
+ "against the same booking for the rest of the five minutes. If they walk away instead, nobody has to clean up: the next person who "
+ "looks at that seat finds a hold whose time has passed, reclaims it, marks the dead booking EXPIRED and takes the seat. The test "
+ "declines a card, checks the seat is still HELD, moves the clock five minutes and one millisecond, and watches the seat come back "
+ "with no sweeper having run.",
+ sect(SRC, "    Booking confirm(String bookingId", "    void release(String bookingId)") + "\n" + cut(TST, "        // 2. the card is declined", "        // 3. the gateway is slower")),
+
+("The gateway takes four minutes and your hold is five. Then the webhook fires three times.", "non-functional", 10,
+ "These are the two ways confirm can sell a seat twice, and both are closed inside the lock. The pre-check before charging is "
+ "advisory: it fails cheaply and saves a pointless charge, but it proves nothing, because the hold can lapse while the gateway is "
+ "thinking. So <code>commit</code> re-checks under the lock, immediately before marking anything SOLD: every seat must still be "
+ "HELD, still stamped with <i>this</i> booking id, and still in time. If not, the seats are given back, the booking is EXPIRED and "
+ "the caller refunds the charge. That is the single most important line in the class. For the retried webhook, a confirm on a "
+ "booking that is not PENDING is refused before any money moves, and a second confirm that races the first is caught by the same "
+ "locked check and refunded. When the caller owns the retry, an idempotency key makes it a plain no-op.",
+ sect(SRC, "    boolean commit(Booking b", "    void release(Booking b)") + "\n" + X("idempotent confirm", "per-seat compare-and-set")),
+
+("The seat map is read ten thousand times a second. Keep it O(1), and off the write lock.", "non-functional", 5,
+ "No new structure. \"How many gold seats are left\" is a counter on the show that moves by one at every hold, release and cancel, "
+ "so it is one map lookup and never a count of seats. \"Is B4 free\" is one lookup in the show's seat map, and a hold whose time has "
+ "passed is drawn as free, so an abandoned cart never shows as taken. Both take the show's lock for a few nanoseconds today, which "
+ "is honest at ten thousand reads a second. When that stops being true, the three mutable fields on a ShowSeat are already volatile: "
+ "the read path can walk the map with no lock at all and render a snapshot. It is a snapshot, not a promise; only a hold promises.",
+ cut(SRC, "    /** How many seats of a class", "    /** Hand back every hold")),
+
+("Three seats together, or none at all.", "twist", 10,
+ "The policy is handed in, so \"together\" is one new class: given the free seats of a class in screen order, it looks for a run of "
+ "three with the same row and consecutive numbers and returns it, or returns nothing. The important part is not the search, it is "
+ "where it runs. <code>holdBest</code> builds the candidate list, calls the policy and takes the seats <i>in the same locked "
+ "section</i>, so another family cannot take the middle seat of the run between the choosing and the taking. If no run exists, the "
+ "method throws and not one seat was touched: the test checks the free count is unchanged and that all four scattered free seats are "
+ "still AVAILABLE. Say the word atomic.",
+ sect(SRC, "    Booking holdBest(String userId", "    boolean commit(Booking b") + "\n" + sect(SRC, "class AdjacentSeats", "/**\n * How money moves")),
+
+("Do you need a background job to expire holds?", "design", 5,
+ "For correctness, no. A hold is a lease with a time on it, and every place that could be blocked by a stale hold treats a lapsed "
+ "one as free: the check inside <code>hold</code>, the candidate list inside <code>holdBest</code>, the seat map, the free count. "
+ "The first person who wants that seat reclaims it, marks the dead booking EXPIRED and takes it. So an abandoned cart can never "
+ "sterilise inventory, which is the thing a sweeper is usually sold as fixing. A sweeper is still worth having for the display: "
+ "until somebody looks, the free count reads one lower than the truth, which is the safe direction to be wrong in but makes the "
+ "screen look busier than it is. A scheduled pass or a DelayQueue keyed on the expiry time both do it; both are optimisations of a "
+ "path that is already correct without them.",
+ X("a background sweeper", "many theatres")),
+
+("Now run it on four app servers. Or: persist it.", "twist", 10,
+ "One JVM's lock guards nothing once there are four JVMs, so the hold has to leave the process. The maps become a repository behind "
+ "an interface and the claim becomes a conditional update: set the row to HELD where the status is still AVAILABLE or the old hold "
+ "has lapsed; zero rows updated means somebody else got it. That is the database's compare-and-set, and it is the same idea as the "
+ "lock: one atomic step decides the winner. In Redis it is <code>SET seatKey bookingId NX PX 300000</code> and a compare-and-delete "
+ "to release, so one server can never drop another's hold. Nothing else in the design moves: Show, Booking and the state machines "
+ "are untouched, because the only thing that changed is where the atomic step happens.",
+ X("persistence", "idempotent confirm")),
+
+("Where does time come from, and how do you test a hold expiring without sleeping?", "design", 5,
+ "The show is handed a <code>Clock</code>, a one-method interface, and it reads it inside the lock so two callers can never disagree "
+ "about whether a hold has lapsed. Nothing else in the design reads the wall clock. A test hands in a lambda over a one-element "
+ "array and moves it: hold a seat, add five minutes and one millisecond, and the seat is free. The nastiest test in the file is the "
+ "same trick worn as a costume: a payment processor whose <code>charge</code> pushes the clock past the hold before returning "
+ "success, which is exactly a gateway that took longer than your window. Confirm must then refuse and refund, and the assertions "
+ "check the card was charged once and refunded once.",
+ cut(TST, "        // 3. the gateway is slower", "        // 4. a second confirm")),
+
+("Which pattern is where, and why did each one earn its place?", "design", 5,
+ "None was chosen up front; each is what a move produced. Strategy is move 3: price, seat choice and payment are the rules that "
+ "change, so each is a one-method interface handed to the service. Decorator is the weekend surge, which wraps the flat rule instead "
+ "of replacing it, and stacks with demand pricing and coupons. Observer is move 3 plus move 4's rule that a listener must never be "
+ "inside the lock: the service publishes \"CONFIRMED\" after the unlock, inside a catch, so a dead SMS gateway cannot kill a booking. "
+ "State is move 6: SeatStatus and BookingStatus, plus the order at the critical step. Factory has not earned a place, and would the "
+ "moment a screen layout came from a file. Singleton is deliberately absent, which is why every test builds its own service.",
+ "// Strategy: a rule behind a one-method interface, handed in\ninterface PricingRule { long pricePaise(Show show, Seat seat); }\n"
+ "void configure(PricingRule pricing, SeatPolicy policy) { this.pricing = pricing; this.policy = policy; }\n\n"
+ "// Decorator: wrap the rule below and add to it\nclass WeekendSurgePricing implements PricingRule { private final PricingRule base; /* base.pricePaise(...) * 1.5 */ }\n\n"
+ "// Observer: announce after the unlock, and survive a broken listener\nprivate void publish(String event, Booking b) {\n"
+ "    for (BookingObserver o : observers) {\n        try { o.onBooking(event, b); } catch (RuntimeException e) { System.err.println(\"[listener failed] \" + e.getMessage()); }\n    }\n}\n\n"
+ "// State: two enums and one order -- hold, pay, re-check, sell\nenum SeatStatus { AVAILABLE, HELD, SOLD }\nenum BookingStatus { PENDING, CONFIRMED, CANCELLED, EXPIRED }\n"),
+
+("Which SOLID letter is where in this code?", "design", 5,
+ "S: each class has one reason to change. A show seat tracks its own status, a show its seats and its lock and the order, the "
+ "service the sequence, a pricing class the money; nobody does two of those. O: weekend surge was a new class and one changed line, "
+ "and Show did not open. L: the show adds up <code>pricing.pricePaise(...)</code> and never asks which rule it was given. I: the "
+ "interfaces have one method each, so a declining gateway in a test is a lambda. D: the show depends on the Clock interface it is "
+ "handed and the service on the rules it is handed, which is exactly why the tests can inject a clock they control and a gateway "
+ "that counts its charges.",
+ "// S: one reason to change each\nclass ShowSeat { /* status, holder, expiry */ }   class Show { /* its seats, its lock, the order */ }   class BookingService { /* the sequence */ }\n"
+ "// O: new behaviour = a new class and one changed line, nothing opened\nsvc.configure(new WeekendSurgePricing(new ClassPricing(), ZoneId.of(\"UTC\"), 1.5), new AdjacentSeats());\n"
+ "// L: any implementation drops in; the show never checks the concrete type\nfor (ShowSeat ss : want) total += pricing.pricePaise(this, ss.seat);\n"
+ "// I: one method per interface\ninterface SeatPolicy { List<ShowSeat> choose(List<ShowSeat> candidates, int count); }\n"
+ "// D: depend on the interface, hand in the implementation; tests hand in fakes\nnew Show(\"SIX\", \"Interstellar\", screen, startMs, () -> now[0], HOLD);\nsvc.confirm(b.id, new CountingGateway(false));   // a gateway that always declines\n"),
+
+("Enum for the seat class, or a Seat subclass? And where would a Factory pay?", "design", 3,
+ "Enum, until a class gains behaviour of its own. Three tiers that differ only in what they cost are data: one row in a rate table. "
+ "A recliner that must be reclined, or a wheelchair space with its own booking rules, is behaviour, and that is when a subclass pays. "
+ "The same answer applies to the statuses: SeatStatus and BookingStatus are enums because the transitions live in one place, in the "
+ "order at the critical step, not inside each state. A Factory earns its place when a screen layout arrives as configuration: a "
+ "registry from a string to a constructor turns adding a seat kind into one registration instead of a growing switch.",
+ "// data, not classes: a tier is a row\nprivate static final Map<SeatClass, Long> RATE = new EnumMap<>(Map.of(\n"
+ "    SeatClass.SILVER, 15_000L, SeatClass.GOLD, 25_000L, SeatClass.PLATINUM, 40_000L));\n\n"
+ "// when a tier gains behaviour, a subclass pays -- and Seat stops being final\nclass ReclinerSeat extends Seat { void recline() { /* talks to the seat motor */ } }\n\n"
+ "// a factory only once creation grows: a registry, so a new kind is one registration\nMap<String, BiFunction<String, Integer, Seat>> registry = Map.of(\n"
+ "    \"RECLINER\", (row, n) -> new ReclinerSeat(row, n, SeatClass.PLATINUM));\nSeat s = registry.get(kind).apply(row, number);\n"),
+]
+
+# ============================================================ build
+spec = dict(
+    slug="bookmyshow",
+    title="Movie Ticket Booking",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 6 failure tests and a 50-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DER_LEAD,
+    moves=MOVES,
+    uml_svg=UMLSVG,
+    how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", SRC), ("Extensions.java", EXT), ("FailureTests.java", TST)],
+    test_class="FailureTests",
+    followups=FU,
+    implement_card_html=IMPLEMENT,
+)
+build(spec)

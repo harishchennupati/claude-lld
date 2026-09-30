@@ -1,0 +1,790 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/** What kind of edit this is. The grouping rule and the Edit menu read it; nothing else in the system branches on it. */
+enum EditKind { TYPING, PASTE, DELETE, REPLACE, MACRO }
+
+/** Where time comes from. Injected, so a test decides whether two keystrokes were forty milliseconds or forty minutes apart. */
+interface Clock { long nowMs(); }
+
+/**
+ * Where the caret is and what is highlighted. anchor is where the drag started, caret is where it is now, so a
+ * backwards selection has its caret before its anchor. Two ints and no behaviour of its own: a record, never a class with a lock.
+ */
+record Selection(int anchor, int caret) {
+    /** The lower of the two offsets: where a delete of this selection would start. */
+    int start() { return Math.min(anchor, caret); }
+    /** The higher of the two offsets: one past the last selected character. */
+    int end() { return Math.max(anchor, caret); }
+    /** How many characters are highlighted. Zero means a bare caret. */
+    int length() { return end() - start(); }
+    /** True when nothing is highlighted, which is the normal typing case. */
+    boolean isEmpty() { return anchor == caret; }
+    /** A bare caret at one offset. */
+    static Selection at(int i) { return new Selection(i, i); }
+}
+
+// "how big can one document get?" -> the storage is the thing that changes -> hide it behind an interface -> Strategy
+/**
+ * How the characters are stored. A StringBuilder is honest to about a megabyte, a gap buffer past that, a piece
+ * table past that again, and every one of them answers exactly these six questions. Deliberately NOT thread-safe:
+ * this is a data structure, not a service, and whoever owns it owns the lock.
+ */
+interface TextBuffer {
+    /** How many characters the document holds right now. */
+    int length();
+    /** Put s in so that its first character lands at offset at. Throws if at is outside [0, length()]. */
+    void insert(int at, String s);
+    /** Remove len characters at at and RETURN them. That return value is the whole reason undo needs no snapshot. */
+    String delete(int at, int len);
+    /** The whole document as one immutable String. O(n): the Editor pays it once per edit, readers never do. */
+    String text();
+    /** Characters in [from, to). Used by copy, by cut and by find. */
+    String substring(int from, int to);
+    /** The offset of the first occurrence of needle at or after from, or -1. Naive scan: fine at this size. */
+    int indexOf(String needle, int from);
+}
+
+/**
+ * The obvious buffer, and the right one to write first in an interview: a StringBuilder. Every insert and delete
+ * is an array copy of everything after the edit, which is invisible on a 20 KB file and fatal on a 10 MB one.
+ */
+final class StringBuilderBuffer implements TextBuffer {
+    private final StringBuilder buf = new StringBuilder();
+    public int length() { return buf.length(); }
+    public void insert(int at, String s) { buf.insert(at, s); }
+    public String delete(int at, int len) { String gone = buf.substring(at, at + len); buf.delete(at, at + len); return gone; }
+    public String text() { return buf.toString(); }
+    public String substring(int from, int to) { return buf.substring(from, to); }
+    public int indexOf(String needle, int from) { return buf.indexOf(needle, from); }
+}
+
+/**
+ * The real answer for an editor: one char array with a hole in it, and the hole is kept where the caret is. Typing
+ * writes into the hole, so an insert at the caret is O(1) amortised however long the document is; the array copy is
+ * paid once, when the caret jumps somewhere else and the hole has to follow it.
+ */
+final class GapBuffer implements TextBuffer {
+    private char[] a;
+    private int gapStart, gapEnd;                      // the hole is [gapStart, gapEnd); everything else is text
+
+    /** A buffer with room for 64 characters before the first grow. */
+    GapBuffer() { this(64); }
+    /** A buffer sized for a document you already know the length of, so the first edits do not resize. */
+    GapBuffer(int capacity) { a = new char[Math.max(8, capacity)]; gapStart = 0; gapEnd = a.length; }
+
+    public int length() { return a.length - (gapEnd - gapStart); }
+    /** Logical offset i, jumping over the hole. This is the only place the gap is visible. */
+    private char raw(int i) { return i < gapStart ? a[i] : a[i + (gapEnd - gapStart)]; }
+
+    /**
+     * Move the hole to offset at. One System.arraycopy, and a typist never pays it, because after an insert at the
+     * caret the hole is already sitting exactly where the next keystroke lands.
+     */
+    void moveGap(int at) {
+        if (at == gapStart) return;
+        if (at < gapStart) { int n = gapStart - at; System.arraycopy(a, at, a, gapEnd - n, n); gapStart -= n; gapEnd -= n; }
+        else { int n = at - gapStart; System.arraycopy(a, gapEnd, a, gapStart, n); gapStart += n; gapEnd += n; }
+    }
+
+    /** Make sure the hole can hold need more characters; doubles the array and re-opens the hole in place. */
+    private void grow(int need) {
+        if (gapEnd - gapStart >= need) return;
+        int tail = a.length - gapEnd;
+        char[] b = new char[Math.max(a.length * 2, length() + need + 64)];
+        System.arraycopy(a, 0, b, 0, gapStart);
+        System.arraycopy(a, gapEnd, b, b.length - tail, tail);
+        a = b; gapEnd = b.length - tail;
+    }
+
+    public void insert(int at, String s) {
+        if (at < 0 || at > length()) throw new IndexOutOfBoundsException("insert at " + at + " of " + length());
+        grow(s.length());
+        moveGap(at);
+        for (int i = 0; i < s.length(); i++) a[gapStart++] = s.charAt(i);
+    }
+
+    public String delete(int at, int len) {
+        if (at < 0 || len < 0 || at + len > length()) throw new IndexOutOfBoundsException("delete " + len + " at " + at + " of " + length());
+        String gone = substring(at, at + len);
+        moveGap(at);
+        gapEnd += len;                                  // deleting is widening the hole: no characters move at all
+        return gone;
+    }
+
+    public String text() { return substring(0, length()); }
+
+    public String substring(int from, int to) {
+        if (from < 0 || to > length() || from > to) throw new IndexOutOfBoundsException("substring " + from + ".." + to + " of " + length());
+        StringBuilder sb = new StringBuilder(to - from);
+        for (int i = from; i < to; i++) sb.append(raw(i));
+        return sb.toString();
+    }
+
+    public int indexOf(String needle, int from) {
+        int n = length(), m = needle.length();
+        if (m == 0) return Math.min(Math.max(from, 0), n);
+        for (int i = Math.max(from, 0); i + m <= n; i++) {
+            int k = 0;
+            while (k < m && raw(i + k) == needle.charAt(k)) k++;
+            if (k == m) return i;
+        }
+        return -1;
+    }
+}
+
+/**
+ * The thing being edited: characters plus a caret. It has no lock and no synchronized method on purpose -- a lock
+ * per method would make each call atomic and still let the read-then-write pair tear. The Editor owns both.
+ */
+final class Document {
+    private final TextBuffer buf;
+    private Selection sel = Selection.at(0);
+
+    /** Build a document over whichever buffer was handed in. The document never names a concrete buffer. */
+    Document(TextBuffer buf) { this.buf = Objects.requireNonNull(buf); }
+
+    /** How many characters it holds. */
+    int length() { return buf.length(); }
+    /** The whole text, copied out. O(n); the Editor calls this once per edit to publish a snapshot. */
+    String text() { return buf.text(); }
+    /** Characters in [from, to). */
+    String substring(int from, int to) { return buf.substring(from, to); }
+    /** The offset of the first hit at or after from, or -1. */
+    int indexOf(String needle, int from) { return buf.indexOf(needle, from); }
+    /** Where the caret and the highlight are right now. */
+    Selection selection() { return sel; }
+
+    /** Highlight [anchor, caret]; a drag backwards is allowed, and puts the caret before the anchor. */
+    void select(int anchor, int caret) {
+        int n = length();
+        if (anchor < 0 || caret < 0 || anchor > n || caret > n) throw new IndexOutOfBoundsException("selection " + anchor + ".." + caret + " of " + n);
+        sel = new Selection(anchor, caret);
+    }
+    /** Drop the highlight and put the bare caret at one offset. */
+    void moveTo(int caret) { select(caret, caret); }
+
+    /** Put s in at at; the caret lands after it, which is what a typist expects. */
+    void insert(int at, String s) { buf.insert(at, s); sel = Selection.at(at + s.length()); }
+    /** Take len characters out at at and hand them back; the caret lands where they used to be. */
+    String delete(int at, int len) { String gone = buf.delete(at, len); sel = Selection.at(at); return gone; }
+}
+
+// "ctrl+Z must put it back" -> keep the CHANGE, not the document -> the change becomes an object -> Command
+/**
+ * One reversible edit. Two promises every implementation keeps: undo() exactly cancels the last execute(), and
+ * execute() is repeatable -- which is why redo is simply execute() again, and not a third place for offsets to drift.
+ */
+interface EditCommand {
+    /** Apply the edit to the document. Must throw before touching anything if the edit is not legal here. */
+    void execute(Document doc);
+    /** Put the document back exactly as it was before the last execute(). */
+    void undo(Document doc);
+    /** What the Edit menu shows: "Undo typing", "Undo replace all". */
+    String label();
+    /** Which family this edit belongs to. The grouping rule reads it; nothing else does. */
+    EditKind kind();
+}
+
+/**
+ * Characters going in. Self-inverse: it knows what it put in, so undoing it is deleting exactly that many
+ * characters at exactly that offset. The timestamp is here so the grouping rule can ask "was that the same burst?".
+ */
+final class InsertCommand implements EditCommand {
+    private final int at;
+    private final String text;
+    private final EditKind kind;
+    private final long atMs;
+
+    /** An insert of a non-empty string at a non-negative offset; an empty insert is rejected so it cannot occupy an undo step. */
+    InsertCommand(int at, String text, EditKind kind, long atMs) {
+        if (text == null || text.isEmpty()) throw new IllegalArgumentException("an empty insert is not an edit");
+        if (at < 0) throw new IndexOutOfBoundsException("negative offset " + at);
+        this.at = at; this.text = text; this.kind = kind; this.atMs = atMs;
+    }
+    public void execute(Document doc) { doc.insert(at, text); }
+    public void undo(Document doc) { doc.delete(at, text.length()); }
+    public String label() {
+        return switch (kind) { case TYPING -> "typing"; case PASTE -> "paste"; case REPLACE -> "replace"; default -> "insert"; };
+    }
+    public EditKind kind() { return kind; }
+
+    /** The offset this insert starts at. */
+    int at() { return at; }
+    /** The characters it puts in. */
+    String text() { return text; }
+    /** When it happened, from the injected clock. */
+    long atMs() { return atMs; }
+    /** One past the last character it wrote: where the next keystroke of the same burst would land. */
+    int endOffset() { return at + text.length(); }
+    /** A NEW command covering both, never a mutation -- a command already on the undo stack must not change under it. */
+    InsertCommand fusedWith(InsertCommand next) { return new InsertCommand(at, text + next.text, kind, next.atMs); }
+}
+
+/**
+ * Characters coming out, and the crux of the whole design: a delete is not self-inverse, so to put characters back
+ * it must have kept them. It stashes the removed string when it runs -- a memento sized to this one edit, not a
+ * copy of the document. Undoing it before it ever ran is a broken life cycle, so it throws rather than inserting null.
+ */
+final class DeleteCommand implements EditCommand {
+    private final int at;
+    private final int len;
+    private final EditKind kind;
+    private String removed;                            // filled by execute(), read by undo()
+
+    /** A delete of len characters at at. A zero-length delete is rejected so a no-op cannot occupy an undo step. */
+    DeleteCommand(int at, int len, EditKind kind) {
+        if (len <= 0) throw new IllegalArgumentException("an empty delete is not an edit");
+        if (at < 0) throw new IndexOutOfBoundsException("negative offset " + at);
+        this.at = at; this.len = len; this.kind = kind;
+    }
+    public void execute(Document doc) { removed = doc.delete(at, len); }
+    public void undo(Document doc) {
+        if (removed == null) throw new IllegalStateException("undo before execute: the memento is empty");
+        doc.insert(at, removed);
+    }
+    public String label() { return "delete"; }
+    public EditKind kind() { return kind; }
+    /** The offset it deletes from. */
+    int at() { return at; }
+    /** How many characters it takes out. */
+    int len() { return len; }
+    /** What this delete took out, or null before it has run. */
+    String removed() { return removed; }
+}
+
+// "forty replacements, one ctrl+Z" -> a step that is made of steps -> Composite
+/**
+ * A command made of commands: N edits, ONE undo step. Children run in order and are undone in REVERSE, because each
+ * child's offsets were computed against the document as the previous child left it. If a child throws, the ones that
+ * already ran are undone before the exception leaves, so a half-applied macro cannot reach the undo stack.
+ */
+class CompositeCommand implements EditCommand {
+    private final String label;
+    private final EditKind kind;
+    /** The children, in execution order. Subclasses may fill this before the first execute(). */
+    protected final List<EditCommand> parts = new ArrayList<>();
+
+    /** An empty composite that a subclass fills in later. */
+    protected CompositeCommand(String label, EditKind kind) { this.label = label; this.kind = kind; }
+    /** A composite over a known list of children, e.g. "delete the selection, then type over it". */
+    CompositeCommand(String label, EditKind kind, List<EditCommand> children) { this(label, kind); parts.addAll(children); }
+
+    public void execute(Document doc) {
+        Selection before = doc.selection();
+        int done = 0;
+        try { for (EditCommand c : parts) { c.execute(doc); done++; } }
+        catch (RuntimeException e) {                               // all of it or none of it
+            for (int i = done - 1; i >= 0; i--) parts.get(i).undo(doc);
+            doc.select(before.anchor(), before.caret());           // the caret too: nothing half-done
+            throw e;
+        }
+    }
+    public void undo(Document doc) { for (int i = parts.size() - 1; i >= 0; i--) parts.get(i).undo(doc); }
+    public String label() { return label; }
+    public EditKind kind() { return kind; }
+    /** How many child commands it holds. */
+    int size() { return parts.size(); }
+    /** The children, in execution order. A journal walks these; nothing else needs them. */
+    List<EditCommand> children() { return List.copyOf(parts); }
+}
+
+/**
+ * Find and replace every hit as one undo step. It builds its children once, against the document as it stands, and
+ * from the LAST hit backwards so that replacing a short word with a long one never moves an offset it has not used
+ * yet. After that first execute it is an ordinary composite, which is what makes redo a replay rather than a re-search.
+ */
+final class ReplaceAllCommand extends CompositeCommand {
+    private final String find;
+    private final String replacement;
+    private boolean built;
+    private int hits;
+
+    /** Replace every occurrence of find with replacement. An empty needle is refused; an empty replacement is a delete-all. */
+    ReplaceAllCommand(String find, String replacement) {
+        super("replace all \"" + find + "\" -> \"" + replacement + "\"", EditKind.REPLACE);
+        if (find == null || find.isEmpty()) throw new IllegalArgumentException("nothing to find");
+        this.find = find; this.replacement = replacement == null ? "" : replacement;
+    }
+    public void execute(Document doc) {
+        if (!built) {
+            build(doc); built = true;
+            if (parts.isEmpty()) throw new IllegalArgumentException("no occurrences of \"" + find + "\"");
+        }
+        super.execute(doc);
+    }
+    /** Scan once, then create the children back to front so earlier offsets stay valid while later ones change. */
+    private void build(Document doc) {
+        List<Integer> at = new ArrayList<>();
+        for (int i = doc.indexOf(find, 0); i >= 0; i = doc.indexOf(find, i + find.length())) at.add(i);
+        hits = at.size();
+        for (int k = hits - 1; k >= 0; k--) {
+            parts.add(new DeleteCommand(at.get(k), find.length(), EditKind.REPLACE));
+            if (!replacement.isEmpty()) parts.add(new InsertCommand(at.get(k), replacement, EditKind.REPLACE, 0L));
+        }
+    }
+    /** How many occurrences it replaced. Valid after the first execute(). */
+    int hits() { return hits; }
+}
+
+// "type five letters, expect one ctrl+Z" -> and the right answer differs per product -> hide the rule -> Strategy
+/**
+ * Decides whether two neighbouring edits collapse into ONE undo step. One method, because grouping is the rule
+ * product changes most: typing groups, a paste never does, an audited document groups nothing at all.
+ */
+interface MergePolicy {
+    /** The fused command covering both, or null to keep them as two separate undo steps. */
+    EditCommand merge(EditCommand previous, EditCommand next);
+}
+
+/**
+ * A human typing: single characters, forward, close together in time, inside one word, up to a cap so one undo step
+ * is never a whole paragraph. Anything else -- a caret jump, a pause, a space, a paste -- starts a new step.
+ */
+final class TypingBurstMergePolicy implements MergePolicy {
+    private final long windowMs;
+    private final int maxRun;
+    /** windowMs: the longest pause that still counts as the same burst. maxRun: the longest run in one undo step. */
+    TypingBurstMergePolicy(long windowMs, int maxRun) { this.windowMs = windowMs; this.maxRun = maxRun; }
+    public EditCommand merge(EditCommand previous, EditCommand next) {
+        if (!(previous instanceof InsertCommand p) || !(next instanceof InsertCommand n)) return null;
+        if (p.kind() != EditKind.TYPING || n.kind() != EditKind.TYPING) return null;
+        if (n.text().length() != 1) return null;                             // only a keystroke joins a run
+        if (n.at() != p.endOffset()) return null;                            // the caret jumped: a new step
+        if (n.atMs() - p.atMs() > windowMs) return null;                     // a pause: a new step
+        if (p.text().length() >= maxRun) return null;                        // the cap
+        if (Character.isWhitespace(p.text().charAt(p.text().length() - 1))) return null;   // a word ended
+        return p.fusedWith(n);
+    }
+}
+
+/** Never merges: every keystroke is its own undo step. What a deterministic test wants, and what an audited document wants. */
+final class NoMergePolicy implements MergePolicy {
+    public EditCommand merge(EditCommand previous, EditCommand next) { return null; }
+}
+
+// "a 4 KB paste must never be swallowed into a word" -> add the rule to every policy instead of copying it -> Decorator
+/**
+ * The one rule no grouping policy is allowed to break, wrapped around all of them instead of copied into each: only
+ * plain typing may ever merge. A paste, a replace-all or a macro is always its own undo step, including under a rule
+ * somebody writes next year.
+ */
+final class PasteIsItsOwnStep implements MergePolicy {
+    private final MergePolicy base;
+    /** Wraps any policy, present or future. The Editor applies this in configure(); nothing else needs to know. */
+    PasteIsItsOwnStep(MergePolicy base) { this.base = Objects.requireNonNull(base); }
+    public EditCommand merge(EditCommand previous, EditCommand next) {
+        if (previous.kind() != EditKind.TYPING || next.kind() != EditKind.TYPING) return null;
+        return base.merge(previous, next);
+    }
+}
+
+/**
+ * Two stacks and a size cap. It knows nothing about text -- only about commands -- which is why replace-all, a macro
+ * and a keystroke all travel through it unchanged. Three behaviours are the whole class: a new edit clears redo,
+ * a redone command goes back on the undo stack without re-entering the grouping rule, and the oldest step is evicted.
+ */
+final class UndoManager {
+    private final Deque<EditCommand> undoStack = new ArrayDeque<>();
+    private final Deque<EditCommand> redoStack = new ArrayDeque<>();
+    private final int limit;
+    private MergePolicy policy;
+    private boolean evicted;                            // once the oldest step is gone, "back to the original" is unreachable
+
+    /** limit is the number of undo STEPS kept, not characters; the grouping rule decides how much text a step is. */
+    UndoManager(int limit, MergePolicy policy) {
+        if (limit <= 0) throw new IllegalArgumentException("history limit must be positive");
+        this.limit = limit; this.policy = Objects.requireNonNull(policy);
+    }
+    /** Swap the grouping rule at run time. The stacks are untouched; only future merges change. */
+    void setPolicy(MergePolicy p) { policy = Objects.requireNonNull(p); }
+
+    /**
+     * Record an edit that ALREADY happened. Redo is cleared first, because history here is linear: once you type
+     * after undoing, the abandoned branch is gone on purpose. Then the grouping rule gets one chance to fuse this
+     * edit into the step below it.
+     */
+    void record(EditCommand cmd) {
+        redoStack.clear();
+        EditCommand prev = undoStack.peek();
+        if (prev != null) {
+            EditCommand fused = policy.merge(prev, cmd);
+            if (fused != null) { undoStack.pop(); undoStack.push(fused); return; }
+        }
+        undoStack.push(cmd);
+        while (undoStack.size() > limit) { undoStack.removeLast(); evicted = true; }
+    }
+    /** Pop the last step, reverse it, and park it on the redo stack. The caller has already checked canUndo(). */
+    EditCommand undo(Document doc) { EditCommand c = undoStack.pop(); c.undo(doc); redoStack.push(c); return c; }
+    /** Pop the last undone step and execute it again. Not through record(): no merge, and redo is not cleared. */
+    EditCommand redo(Document doc) { EditCommand c = redoStack.pop(); c.execute(doc); undoStack.push(c); return c; }
+
+    /** Is there a step to reverse? */
+    boolean canUndo() { return !undoStack.isEmpty(); }
+    /** Is there a reversed step to re-apply? */
+    boolean canRedo() { return !redoStack.isEmpty(); }
+    /** How many undo steps are on the stack. */
+    int depth() { return undoStack.size(); }
+    /** How many redo steps are on the stack. */
+    int redoDepth() { return redoStack.size(); }
+    /** True once a step has been thrown away, which is why "unsaved" cannot be derived from an empty undo stack. */
+    boolean evicted() { return evicted; }
+    /** The top n step labels, newest first: exactly what the Edit menu renders. */
+    List<String> labels(int n) {
+        List<String> out = new ArrayList<>();
+        for (EditCommand c : undoStack) { if (out.size() == n) break; out.add(c.label()); }
+        return out;
+    }
+}
+
+/** The clipboard, in memory. One string, because a cut and a copy both end in "hold this until somebody pastes it". */
+final class Clipboard {
+    private volatile String content = "";
+    /** Replace what is held. Null is treated as empty. */
+    void put(String s) { content = s == null ? "" : s; }
+    /** What is held right now. */
+    String get() { return content; }
+    /** True when there is nothing to paste. */
+    boolean isEmpty() { return content.isEmpty(); }
+}
+
+/**
+ * What every listener is handed after an edit lands. It carries the version, the new text AND the command itself, so
+ * a renderer can repaint, a journal can write the change alone instead of the whole file, and a listener that missed
+ * a version can see the gap. The command is immutable once executed; listeners read it, they never run it.
+ */
+record EditEvent(long version, String kind, String label, String text, int caret, EditCommand command) {}
+
+// "somebody repaints, somebody autosaves, somebody highlights" -> the editor must not know any of them -> Observer
+/** Anybody who wants to know the document changed: a renderer, autosave, a syntax highlighter, a plugin, an audit log. */
+interface EditListener {
+    /** Called after the edit has landed and the lock has been released. Must not throw; if it does, it is ignored. */
+    void onEdit(EditEvent event);
+}
+
+/** The simplest listener there is: keep a line per edit. Stands in for the view in a headless demo. */
+final class ConsoleRenderer implements EditListener {
+    private final List<String> lines = new ArrayList<>();
+    public void onEdit(EditEvent e) { lines.add("v" + e.version() + " " + e.kind() + " " + e.label()); }
+    /** Everything it has been told, oldest first. */
+    List<String> lines() { return lines; }
+}
+
+/**
+ * Autosave, and the reason readers never take the lock: it keeps the last published snapshot and version, which the
+ * Editor handed it, and writes them on its own thread whenever it likes. "Unsaved" is a comparison of two versions,
+ * never "is the undo stack empty" -- the stack lies as soon as the cap has evicted a step.
+ */
+final class Autosave implements EditListener {
+    private volatile long latest, savedVersion;
+    private volatile String pending = "", written = "";
+    private volatile int writes;
+    public void onEdit(EditEvent e) { latest = e.version(); pending = e.text(); }
+    /** Is there anything to write? */
+    boolean isDirty() { return latest != savedVersion; }
+    /** Write whatever the last event published. A timer thread calls this; it never touches the editor or its lock. */
+    void save() { written = pending; savedVersion = latest; writes++; }
+    /** The text last written to disk. */
+    String written() { return written; }
+    /** The version last written to disk. */
+    long savedVersion() { return savedVersion; }
+    /** How many times save() actually ran. */
+    int writes() { return writes; }
+}
+
+/**
+ * The only door into the document. It owns the buffer, the history, the clipboard, the lock, the version counter and
+ * the published snapshot, and one rule holds the whole design together: the buffer, the history and the version move
+ * together or not at all. Readers never take the lock; they read a volatile reference to an immutable String.
+ */
+final class Editor {
+    private final Document doc;
+    private final UndoManager history;
+    private final Clipboard clip = new Clipboard();
+    private final ReentrantLock lock = new ReentrantLock();
+    private final List<EditListener> listeners = new CopyOnWriteArrayList<>();
+    private final AtomicLong version = new AtomicLong();
+    private volatile String snapshot = "";
+    private Clock clock = System::currentTimeMillis;
+
+    /** A gap buffer, two hundred undo steps, and typing that groups into words: the sane default. */
+    Editor() { this(new GapBuffer(), 200, new TypingBurstMergePolicy(600, 40)); }
+    /** Everything handed in: the storage, how deep the history goes, and how edits group. The Editor builds none of them. */
+    Editor(TextBuffer buffer, int historyLimit, MergePolicy policy) {
+        this.doc = new Document(buffer);
+        this.history = new UndoManager(historyLimit, new PasteIsItsOwnStep(policy));
+    }
+
+    /** Hand in the grouping rule and any views. The rule is wrapped, so no rule -- including one written next year -- can swallow a paste. */
+    void configure(MergePolicy policy, EditListener... views) {
+        lock.lock();
+        try { history.setPolicy(new PasteIsItsOwnStep(policy)); } finally { lock.unlock(); }
+        listeners.addAll(Arrays.asList(views));
+    }
+    /** Hand in a clock. Nothing in this file reads the wall clock anywhere else. */
+    void setClock(Clock c) { clock = Objects.requireNonNull(c); }
+    /** Subscribe. A listener added later still sees every edit from then on. */
+    void addListener(EditListener l) { listeners.add(l); }
+
+    /**
+     * The critical step, and the ORDER is the design. The buffer moves first: if the command throws, the history
+     * never gains a step for an edit that did not happen, and such a step would later delete characters somebody
+     * else typed. Only after the mutation succeeds do the history, the version and the snapshot move, all under one
+     * lock. The listeners are told after the unlock, each inside a try/catch, so a broken plugin cannot break typing.
+     */
+    long apply(EditCommand cmd) {
+        EditEvent ev;
+        lock.lock();
+        try {
+            cmd.execute(doc);                            // 1. the mutation: this is the step that can fail
+            history.record(cmd);                         // 2. only now is there something to undo
+            ev = publishLocked("edit", cmd);             // 3. version and snapshot, still under the lock
+        } finally { lock.unlock(); }
+        fire(ev);                                        // 4. the outside world, after the unlock
+        return ev.version();
+    }
+
+    /** Bump the version and swap in a fresh immutable snapshot. Called with the lock held, never from outside. */
+    private EditEvent publishLocked(String kind, EditCommand cmd) {
+        long v = version.incrementAndGet();
+        snapshot = doc.text();
+        return new EditEvent(v, kind, cmd.label(), snapshot, doc.selection().caret(), cmd);
+    }
+    /** Tell every listener, one broken one at a time. A listener that throws is skipped; the edit already landed. */
+    private void fire(EditEvent ev) {
+        for (EditListener l : listeners) {
+            try { l.onEdit(ev); } catch (RuntimeException ignored) { /* a broken view is not a broken edit */ }
+        }
+    }
+
+    /** Type at the caret. A single character can join the burst below it; anything longer is its own step. */
+    long type(String s) {
+        lock.lock();
+        try {
+            Selection sel = doc.selection();
+            EditKind kind = s.length() == 1 ? EditKind.TYPING : EditKind.PASTE;
+            if (!sel.isEmpty()) return apply(replaceSelection(sel, s, kind));
+            return apply(new InsertCommand(sel.caret(), s, kind, clock.nowMs()));
+        } finally { lock.unlock(); }
+    }
+    /** Insert at an explicit offset, the way a plugin or a test drives the editor. */
+    long insertAt(int at, String s) { return apply(new InsertCommand(at, s, EditKind.TYPING, clock.nowMs())); }
+    /** Append at the end. Reading the length and inserting are ONE step, which is exactly why the lock is reentrant. */
+    long append(String s) {
+        lock.lock();
+        try { return apply(new InsertCommand(doc.length(), s, EditKind.TYPING, clock.nowMs())); } finally { lock.unlock(); }
+    }
+    /** Delete a range as one step. */
+    long deleteRange(int at, int len) { return apply(new DeleteCommand(at, len, EditKind.DELETE)); }
+
+    /** Backspace: the selection if there is one, otherwise one character before the caret. False at the start of the document. */
+    boolean backspace() {
+        lock.lock();
+        try {
+            Selection sel = doc.selection();
+            if (!sel.isEmpty()) { apply(new DeleteCommand(sel.start(), sel.length(), EditKind.DELETE)); return true; }
+            if (sel.caret() == 0) return false;
+            apply(new DeleteCommand(sel.caret() - 1, 1, EditKind.DELETE));
+            return true;
+        } finally { lock.unlock(); }
+    }
+
+    /** Highlight a range. Not an edit: it changes no characters, so it is not an undo step. */
+    void select(int anchor, int caret) { lock.lock(); try { doc.select(anchor, caret); } finally { lock.unlock(); } }
+    /** Move the bare caret. Also not an edit -- but it does end a typing burst, because the next insert is not contiguous. */
+    void moveTo(int caret) { lock.lock(); try { doc.moveTo(caret); } finally { lock.unlock(); } }
+
+    /** Copy the selection to the clipboard. Changes no text, so it is not an undo step. */
+    boolean copy() {
+        lock.lock();
+        try {
+            Selection s = doc.selection();
+            if (s.isEmpty()) return false;
+            clip.put(doc.substring(s.start(), s.end()));
+            return true;
+        } finally { lock.unlock(); }
+    }
+    /** Cut IS an edit: one delete command, so one ctrl+Z puts the whole selection back at once. */
+    boolean cut() {
+        lock.lock();
+        try {
+            Selection s = doc.selection();
+            if (s.isEmpty()) return false;
+            clip.put(doc.substring(s.start(), s.end()));
+            apply(new DeleteCommand(s.start(), s.length(), EditKind.DELETE));
+            return true;
+        } finally { lock.unlock(); }
+    }
+    /** Paste at the caret, replacing the selection if there is one. One step however big it is. */
+    boolean paste() {
+        lock.lock();
+        try {
+            if (clip.isEmpty()) return false;
+            Selection s = doc.selection();
+            if (!s.isEmpty()) apply(replaceSelection(s, clip.get(), EditKind.PASTE));
+            else apply(new InsertCommand(s.caret(), clip.get(), EditKind.PASTE, clock.nowMs()));
+            return true;
+        } finally { lock.unlock(); }
+    }
+    /** Delete the highlight and put s in its place, as ONE undo step. Used by typing over a selection and by paste. */
+    private EditCommand replaceSelection(Selection sel, String s, EditKind kind) {
+        return new CompositeCommand("replace selection", EditKind.MACRO,
+            List.of(new DeleteCommand(sel.start(), sel.length(), EditKind.DELETE),
+                    new InsertCommand(sel.start(), s, kind, clock.nowMs())));
+    }
+
+    /** Replace every occurrence, as ONE undo step. The Editor gains no machinery: it is a command like any other. */
+    int replaceAll(String find, String replacement) {
+        lock.lock();
+        try {
+            if (doc.indexOf(find, 0) < 0) return 0;
+            ReplaceAllCommand cmd = new ReplaceAllCommand(find, replacement);
+            apply(cmd);
+            return cmd.hits();
+        } finally { lock.unlock(); }
+    }
+
+    /** Reverse the last step. Returns false rather than throwing when there is nothing to undo. */
+    boolean undo() {
+        EditEvent ev;
+        lock.lock();
+        try {
+            if (!history.canUndo()) return false;
+            ev = publishLocked("undo", history.undo(doc));
+        } finally { lock.unlock(); }
+        fire(ev);
+        return true;
+    }
+    /** Re-apply the last reversed step. Returns false when the redo stack is empty -- including right after a new edit. */
+    boolean redo() {
+        EditEvent ev;
+        lock.lock();
+        try {
+            if (!history.canRedo()) return false;
+            ev = publishLocked("redo", history.redo(doc));
+        } finally { lock.unlock(); }
+        fire(ev);
+        return true;
+    }
+
+    /** The text, with no lock at all: a volatile reference to an immutable String that the lock swapped in. */
+    String text() { return snapshot; }
+    /** A window of the text for a viewport, off the same snapshot; the UI never copies a whole document to draw a screen. */
+    String textRange(int from, int to) {
+        String s = snapshot;
+        return s.substring(Math.max(0, Math.min(from, s.length())), Math.max(0, Math.min(to, s.length())));
+    }
+    /** How many edits have landed. A listener that jumps from 7 to 9 knows it missed one. */
+    long version() { return version.get(); }
+    /** Greys out the Edit menu. */
+    boolean canUndo() { lock.lock(); try { return history.canUndo(); } finally { lock.unlock(); } }
+    /** Greys out the Edit menu. */
+    boolean canRedo() { lock.lock(); try { return history.canRedo(); } finally { lock.unlock(); } }
+    /** How many undo steps are waiting. */
+    int undoDepth() { lock.lock(); try { return history.depth(); } finally { lock.unlock(); } }
+    /** How many redo steps are waiting. */
+    int redoDepth() { lock.lock(); try { return history.redoDepth(); } finally { lock.unlock(); } }
+    /** The top n labels for the Edit menu, newest first. */
+    List<String> undoLabels(int n) { lock.lock(); try { return history.labels(n); } finally { lock.unlock(); } }
+    /** True once the cap has thrown a step away, so "unsaved" must not be derived from an empty undo stack. */
+    boolean historyEvicted() { lock.lock(); try { return history.evicted(); } finally { lock.unlock(); } }
+    /** Where the caret and the highlight are. */
+    Selection selection() { lock.lock(); try { return doc.selection(); } finally { lock.unlock(); } }
+    /** What is on the clipboard. */
+    String clipboard() { return clip.get(); }
+}
+
+/** Runs the editor: a demo of every claim on page 02, then the race that proves the lock earns its keep. */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        ConsoleRenderer view = new ConsoleRenderer();
+        Autosave disk = new Autosave();
+        long[] now = { 1_700_000_000_000L };
+        Editor ed = new Editor(new GapBuffer(), 4, new TypingBurstMergePolicy(600, 40));
+        ed.configure(new TypingBurstMergePolicy(600, 40), view, disk);
+        ed.setClock(() -> now[0]);
+
+        // 1. typing collapses into words; the clock says the keystrokes were 40 ms apart
+        for (char c : "hello world".toCharArray()) { ed.type(String.valueOf(c)); now[0] += 40; }
+        System.out.println("1. typing:      \"" + ed.text() + "\"  undo steps=" + ed.undoDepth() + "  menu=" + ed.undoLabels(3));
+
+        // 2. a paste is always its own step, whatever the grouping rule says
+        ed.type("[4 KB of pasted text]");
+        System.out.println("2. paste:       \"" + ed.text() + "\"  undo steps=" + ed.undoDepth() + "  menu=" + ed.undoLabels(3));
+        ed.undo();
+        System.out.println("   one ctrl+Z:  \"" + ed.text() + "\"  the paste came out in one piece");
+
+        // 3. delete puts back exactly what it took, including from the middle
+        ed.deleteRange(5, 6);
+        System.out.println("3. delete:      \"" + ed.text() + "\"");
+        ed.undo();
+        System.out.println("   undo:        \"" + ed.text() + "\"  the characters are the ones that left");
+
+        // 4. a new edit clears the redo branch on purpose
+        ed.undo(); ed.undo();
+        System.out.println("4. two undos:   \"" + ed.text() + "\"  canRedo=" + ed.canRedo());
+        ed.type("!");
+        System.out.println("   then type:   \"" + ed.text() + "\"  canRedo=" + ed.canRedo() + "  (the branch is gone)");
+
+        // 5. the cap evicts the oldest step, so "unsaved" cannot be derived from an empty stack
+        for (int i = 0; i < 6; i++) { ed.type("x"); now[0] += 5000; }        // a pause each time: six separate steps
+        System.out.println("5. cap of 4:    six more steps into a four-step history -> undo steps=" + ed.undoDepth()
+            + "  evicted=" + ed.historyEvicted());
+        while (ed.undo()) { /* wind it all the way back */ }
+        System.out.println("   undo all:    \"" + ed.text() + "\"  not empty: the oldest steps were thrown away");
+
+        // 6. cut, paste and replace-all: one step each
+        Editor doc = new Editor(new GapBuffer(), 200, new NoMergePolicy());
+        doc.type("the cat sat on the cat mat with a cat");
+        doc.select(4, 7);
+        doc.cut();
+        System.out.println("6. cut \"" + doc.clipboard() + "\": \"" + doc.text() + "\"");
+        doc.moveTo(doc.text().length());
+        doc.paste();
+        System.out.println("   paste:       \"" + doc.text() + "\"");
+        int hits = doc.replaceAll("cat", "dog");
+        System.out.println("   replaceAll:  \"" + doc.text() + "\"  hits=" + hits + "  undo steps=" + doc.undoDepth());
+        doc.undo();
+        System.out.println("   one ctrl+Z:  \"" + doc.text() + "\"  " + hits + " replacements, one step");
+        doc.redo();
+        System.out.println("   redo:        \"" + doc.text() + "\"  redo is execute() again, not a re-search");
+
+        // 7. autosave read the published snapshot; it never took the lock
+        disk.save();
+        System.out.println("7. autosave:    version " + disk.savedVersion() + " on disk, dirty=" + disk.isDirty()
+            + ", the view saw " + view.lines().size() + " events");
+
+        // 8. the race, the cheap way: four threads doing length-then-insert on a raw Document
+        Document raw = new Document(new StringBuilderBuffer());
+        runRace(4, 500, i -> { try { raw.insert(raw.length(), "x"); } catch (RuntimeException ignored) { } });
+        System.out.println("8. no lock:     wanted 2000 characters, got " + raw.length()
+            + (raw.length() == 2000 ? "  (lucky this run; run it again)" : "  (read-then-write tears)"));
+
+        // 9. the same load through the Editor: one lock over mutate + record + version + snapshot
+        Editor safe = new Editor(new GapBuffer(4096), 4096, new NoMergePolicy());
+        runRace(8, 250, i -> safe.append("x"));
+        System.out.println("9. one lock:    " + safe.text().length() + " characters, " + safe.undoDepth()
+            + " undo steps, version " + safe.version());
+        while (safe.undo()) { /* wind the whole document back */ }
+        System.out.println("   2000 undos:  length=" + safe.text().length() + "  (right length AND right history)");
+    }
+
+    /** threads x each calls body, all released at the same instant by one latch. */
+    static void runRace(int threads, int each, java.util.function.IntConsumer body) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            fs.add(pool.submit(() -> {
+                go.await();
+                for (int i = 0; i < each; i++) body.accept(i);
+                return null;
+            }));
+        }
+        go.countDown();
+        for (Future<?> f : fs) f.get();
+        pool.shutdown();
+    }
+}

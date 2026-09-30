@@ -1,0 +1,337 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: reach or pass to win -- a third overshoot rule, and the win check does not change
+/**
+ * "You win by reaching OR passing the last cell." One line: clamp the landing to the last cell. The game's
+ * win check is still `to == boardSize`, so nothing in the turn loop is edited -- that is the whole point of
+ * having pulled the rule out in move 3.
+ */
+final class ReachOrPass implements MoveStrategy {
+    @Override public int landingCell(int from, int roll, int boardSize) { return Math.min(from + roll, boardSize); }
+}
+
+// ---- ext: loaded dice, and more of them -- a new Dice class; Game and Board are untouched
+/**
+ * A die with a thumb on the scale: `weights[i]` is how often face i+1 comes up relative to the others. A
+ * casino version, a "kind to beginners" version and a two-dice version are all this class with other numbers.
+ */
+final class WeightedDice implements Dice {
+    private final int[] cumulative;
+    private final int total;
+    private final Random rng;
+    /** @param weights one weight per face, in face order; @param rng injected, so a weighted game still replays. */
+    WeightedDice(int[] weights, Random rng) {
+        if (weights.length < 2) throw new IllegalArgumentException("at least two faces");
+        cumulative = new int[weights.length];
+        int sum = 0;
+        for (int i = 0; i < weights.length; i++) {
+            if (weights[i] < 0) throw new IllegalArgumentException("a weight cannot be negative");
+            sum += weights[i]; cumulative[i] = sum;
+        }
+        if (sum <= 0) throw new IllegalArgumentException("the weights must add up to something");
+        total = sum; this.rng = rng;
+    }
+    @Override public int roll() {
+        int pick = rng.nextInt(total);
+        for (int i = 0; i < cumulative.length; i++) if (pick < cumulative[i]) return i + 1;
+        return cumulative.length;
+    }
+}
+
+// ---- ext: a bot that chooses which dice to throw -- a rule that looks at the board before it rolls
+/**
+ * A player who decides how many dice to throw: one die when a ladder is within six (fine control, better
+ * chance of landing on it), two when the next stretch is full of snakes (jump over them). It reads its own
+ * position back through a supplier; that works because the game's lock is reentrant and the call is on the
+ * same thread, but a rule that calls back into the object it is inside is a smell worth saying out loud --
+ * the cleaner seam, if this grows, is to pass the position into roll().
+ */
+final class BotDice implements Dice {
+    private final IntSupplier where;
+    private final Board board;
+    private final Dice one, two;
+    /** @param where the bot's current cell, @param one a single die, @param two a two-dice throw. */
+    BotDice(IntSupplier where, Board board, Dice one, Dice two) {
+        this.where = where; this.board = board; this.one = one; this.two = two;
+    }
+    @Override public int roll() {
+        int at = where.getAsInt();
+        int ladders = 0, snakes = 0;
+        for (int step = 1; step <= 6; step++) {                       // six lookups, O(1) each
+            Jump j = board.jumpAt(at + step);
+            if (j == null) continue;
+            if (j.kind() == JumpKind.LADDER) ladders++; else snakes++;
+        }
+        return (ladders > 0 || snakes == 0) ? one.roll() : two.roll();
+    }
+}
+
+// ---- ext: special cells -- skip, boost, teleport, without touching the turn loop
+/**
+ * A board whose cells can do more than a fixed jump. Because the game asks the board one question --
+ * "what happens when a token rests here?" -- a new kind of cell is a subclass, not an edit: a teleport cell
+ * answers with a jump to a random cell, a boost cell with a jump a fixed number of steps forward.
+ * The randomness comes from the same injected Random as the dice, or replay would stop working.
+ */
+final class SpecialCellBoard extends Board {
+    private enum Effect { TELEPORT, BOOST }
+    private final Map<Integer, Effect> special = new HashMap<>();
+    private final Map<Integer, Integer> boostBy = new HashMap<>();
+    private final Random rng;
+    SpecialCellBoard(int size, Random rng) { super(size); this.rng = rng; }
+    /** Land here and you are thrown to a random cell. */
+    void teleport(int cell) { special.put(cell, Effect.TELEPORT); }
+    /** Land here and you are carried `steps` further along. */
+    void boost(int cell, int steps) { special.put(cell, Effect.BOOST); boostBy.put(cell, steps); }
+    @Override Jump jumpAt(int cell) {
+        Jump j = super.jumpAt(cell);
+        if (j != null) return j;                                       // a real snake or ladder wins
+        Effect e = special.get(cell);
+        if (e == null) return null;
+        int dest = e == Effect.TELEPORT ? 1 + rng.nextInt(size())
+                                        : Math.min(size(), cell + boostBy.get(cell));
+        return dest == cell ? null : new Jump(cell, dest);
+    }
+}
+// the one special cell that is NOT free is "miss a turn", because it changes the rotation, not the position.
+// It is move 12's third kind of twist -- a new step in a life -- and it costs one field and one line:
+//     private final Set<String> skipNext = new HashSet<>();            // in Game
+//     if (skipNext.remove(playerId)) { rotate(); return forfeited(t); } // at the top of roll(), inside the lock
+//     if (board.skipAt(to)) skipNext.add(playerId);                    // with the other writes
+
+// ---- ext: turn timers -- a player who does not roll in time forfeits, and the game is never blocked
+/**
+ * Thirty seconds to roll. It is wired in as an observer, so every turn tells it who is on the clock now,
+ * and a sweeper thread (or the next request, which is cheaper) calls forfeitIfLate. It reads the injected
+ * Clock and never the wall clock, so a test can make thirty seconds pass instantly.
+ */
+final class TurnTimer {
+    private final Clock clock;
+    private final long limitMs;
+    private volatile String onTheClock;
+    private volatile long since;
+    TurnTimer(Clock clock, long limitMs) { this.clock = clock; this.limitMs = limitMs; }
+    /** Start the clock for whoever is now due. Wire it as an observer: game.addObserver((id, t) -> timer.watch(game.whoseTurn())). */
+    void watch(String playerId) { onTheClock = playerId; since = clock.nowMs(); }
+    /** Forfeit the turn if the clock has run out. Returns true if it did. Safe to call from anywhere. */
+    boolean forfeitIfLate(Game g) {
+        String who = onTheClock;
+        if (who == null || clock.nowMs() - since < limitMs) return false;
+        try { g.forfeitTurn(who); return true; }
+        catch (IllegalStateException e) { return false; }              // somebody already moved: nothing to do
+    }
+}
+
+// ---- ext: online play -- a turn token instead of a lock, and a roll that survives a retry
+/**
+ * The lock-free version of the turn gate, for a server that does not want a thread parked on a lock: whose
+ * turn it is lives in an AtomicReference and a player moves by winning a compare-and-set. A losing CAS means
+ * "not your turn" and returns immediately instead of blocking. The move itself still has to be applied
+ * somewhere -- this replaces the gate, not the write.
+ */
+final class TurnToken {
+    private final AtomicReference<String> current;
+    TurnToken(String first) { current = new AtomicReference<>(first); }
+    /** Whose turn it is right now. */
+    String current() { return current.get(); }
+    /** True for exactly one caller: the one that swapped `playerId` for `next`. */
+    boolean claim(String playerId, String next) { return current.compareAndSet(playerId, next); }
+}
+
+/**
+ * The same phone pressing roll twice, or an at-least-once network retry, must move the token once. The
+ * request id is the key: the first call plays the turn and remembers it, every later call with that id gets
+ * the same Turn back. computeIfAbsent is what makes "at most one roll per id" true even under a race.
+ * The honest caveat: in one process a crash between the roll and the remembering loses the record; the real
+ * fix is the database version below, where the turn row and the request id are written in one transaction.
+ */
+final class IdempotentRolls {
+    private final ConcurrentHashMap<String, Turn> byRequest = new ConcurrentHashMap<>();
+    /** Play this turn once, no matter how many times the request arrives. */
+    Turn roll(Game g, String playerId, String requestId) {
+        return byRequest.computeIfAbsent(requestId, k -> g.roll(playerId));
+    }
+    /** How many distinct requests have been served. */
+    int served() { return byRequest.size(); }
+}
+
+// ---- ext: persistence -- the game becomes a row, and the lock becomes a conditional UPDATE
+/**
+ * Beyond one process the turn number is the version: a turn is accepted only if the stored game is still on
+ * the turn the caller thinks it is on. Two servers applying the same turn means one of them updates zero
+ * rows and retries with fresh state -- the database doing exactly what the ReentrantLock did in one process.
+ *
+ *   UPDATE game SET turn_no = turn_no + 1, current_player = ?, positions = ?
+ *    WHERE game_id = ? AND turn_no = ?           -- 0 rows updated = somebody else moved first
+ *   INSERT INTO turn (game_id, turn_no, request_id, player, roll, from_cell, to_cell) VALUES (...)
+ *                                                -- UNIQUE (game_id, request_id) makes the retry safe
+ */
+interface GameRepository {
+    /** Append a turn only if the game is still at expectedTurnNo. False means: re-read and try again. */
+    boolean applyTurn(String gameId, int expectedTurnNo, Turn t);
+    /** The stored turn number, which is the optimistic-locking version. */
+    int turnNoOf(String gameId);
+    /** Every stored turn, oldest first. */
+    List<Turn> turns(String gameId);
+}
+
+/** A map standing in for the table, with the same compare-and-set semantics so the seam can be tested. */
+final class InMemoryGameRepository implements GameRepository {
+    private final Map<String, List<Turn>> rows = new ConcurrentHashMap<>();
+    @Override public synchronized boolean applyTurn(String gameId, int expectedTurnNo, Turn t) {
+        List<Turn> ts = rows.computeIfAbsent(gameId, k -> new ArrayList<>());
+        if (ts.size() != expectedTurnNo) return false;                 // the WHERE clause failed: 0 rows
+        ts.add(t);
+        return true;
+    }
+    @Override public synchronized int turnNoOf(String gameId) { return rows.getOrDefault(gameId, List.of()).size(); }
+    @Override public synchronized List<Turn> turns(String gameId) { return List.copyOf(rows.getOrDefault(gameId, List.of())); }
+}
+
+// ---- ext: deterministic replay and the audit view -- the log is the whole truth
+/**
+ * Because every random number came out of an injected Dice and the move itself is pure arithmetic, a game is
+ * fully described by its layout plus its roll sequence. Save those two and any game can be replayed exactly,
+ * which is what turns "it crashed once" into a regression test.
+ */
+final class Replay {
+    /** The rolls that were actually thrown, in order. A forfeited turn threw nothing, so it is skipped. */
+    static int[] rolls(Game g) {
+        List<Turn> log = g.history();
+        int n = 0;
+        for (Turn t : log) if (t.roll() > 0) n++;
+        int[] out = new int[n]; int i = 0;
+        for (Turn t : log) if (t.roll() > 0) out[i++] = t.roll();
+        return out;
+    }
+    /** Re-run a recorded roll sequence on a freshly configured builder and play it to the end. */
+    static Game rerun(GameBuilder sameLayout, int[] rolls, int maxTurns) {
+        Game g = sameLayout.dice(new ScriptedDice(rolls)).build();
+        g.start();
+        g.playOut(maxTurns);
+        return g;
+    }
+}
+
+/** The audit view: every turn, and what the board looked like after it. Reads the log, writes nothing. */
+final class AuditView {
+    /** One line per turn plus the running positions, for support to read when a player complains. */
+    static String print(Game g) {
+        Map<String, Integer> at = new LinkedHashMap<>();
+        for (Player p : g.roster()) at.put(p.id(), 0);
+        StringBuilder sb = new StringBuilder();
+        for (Turn t : g.history()) {
+            at.put(t.playerId(), t.to());
+            sb.append("  ").append(t.describe()).append("   board ").append(at).append("\n");
+        }
+        return sb.toString();
+    }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        // reach-or-pass: 97 plus a 5 wins instead of being wasted
+        Game rp = new GameBuilder().id("rp").boardSize(100).moveRule(new ReachOrPass())
+            .dice(new ScriptedDice(6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6))
+            .player("a", "A").player("b", "B").build();
+        rp.start();
+        for (int i = 0; i < 34 && rp.status() != GameStatus.FINISHED; i++) rp.roll(rp.whoseTurn());
+        System.out.println("reach-or-pass: winner " + rp.winner().id() + " resting on " + rp.positionOf(rp.winner().id()));
+
+        // a weighted die: face 6 four times as likely as the rest
+        WeightedDice loaded = new WeightedDice(new int[] { 1, 1, 1, 1, 1, 4 }, new Random(3));
+        int sixes = 0;
+        for (int i = 0; i < 900; i++) if (loaded.roll() == 6) sixes++;
+        System.out.println("weighted dice: " + sixes + " sixes in 900 rolls (a fair die gives about 150)");
+
+        // a bot that throws one die near a ladder and two when snakes are in reach
+        Board bb = new Board(80);
+        bb.addJump(new Jump(10, 45));  bb.addJump(new Jump(20, 5));  bb.addJump(new Jump(22, 4));
+        int[] at = { 8 };
+        BotDice choosy = new BotDice(() -> at[0], bb, new ScriptedDice(true, 2), new ScriptedDice(true, 9));
+        System.out.println("bot on 8, ladder at 10: it throws " + choosy.roll() + " (one die, fine control)");
+        at[0] = 18;
+        System.out.println("bot on 18, snakes at 20 and 22: it throws " + choosy.roll() + " (two dice, jump over)");
+        // and the same object is a perfectly ordinary Dice, so it drops into a game with no other change
+        Game[] holder = new Game[1];
+        holder[0] = new GameBuilder().id("botgame").board(bb)
+            .dice(new BotDice(() -> holder[0].positionOf("bot"), bb, new ScriptedDice(true, 2), new ScriptedDice(true, 9)))
+            .player("bot", "Bot").player("human", "Human").build();
+        holder[0].start();
+        holder[0].roll("bot"); holder[0].roll("human"); holder[0].roll("bot");
+        System.out.println("the bot inside a real game, after two of its own throws, is on " + holder[0].positionOf("bot"));
+
+        // special cells: a boost cell and a teleport cell, on a board the game never knew was unusual
+        SpecialCellBoard sb = new SpecialCellBoard(60, new Random(11));
+        sb.addJump(new Jump(30, 8));
+        sb.boost(5, 10);
+        sb.teleport(9);
+        Game sp = new GameBuilder().id("sp").board(sb).dice(new ScriptedDice(5, 9))
+            .player("a", "A").player("b", "B").build();
+        sp.start();
+        System.out.println("boost cell at 5 (+10): A lands there and rests on " + sp.roll("a").to());
+        System.out.println("teleport cell at 9: B lands there and is thrown to " + sp.roll("b").to());
+
+        // turn timers: thirty seconds on an injected clock, moved by hand
+        long[] now = { 1_700_000_000_000L };
+        Game tt = new GameBuilder().id("tt").boardSize(50).clock(() -> now[0]).dice(new ScriptedDice(true, 3))
+            .player("slow", "Slow").player("quick", "Quick").build();
+        TurnTimer timer = new TurnTimer(() -> now[0], 30_000);
+        tt.addObserver((gid, turn) -> timer.watch(tt.whoseTurn()));      // re-arm after every turn
+        tt.start();
+        timer.watch(tt.whoseTurn());
+        now[0] += 10_000;
+        System.out.println("timer after 10s: forfeited=" + timer.forfeitIfLate(tt) + ", still " + tt.whoseTurn() + "'s turn");
+        now[0] += 25_000;
+        System.out.println("timer after 35s: forfeited=" + timer.forfeitIfLate(tt) + ", now " + tt.whoseTurn() + "'s turn");
+
+        // online play: the turn token, and a retried request that must move the token once
+        TurnToken token = new TurnToken("a");
+        int won = 0;
+        for (int i = 0; i < 5; i++) if (token.claim("a", "b")) won++;
+        System.out.println("turn token: " + won + " of 5 compare-and-sets won (the rest are 'not your turn')");
+        Game idem = new GameBuilder().id("idem").boardSize(50).dice(new ScriptedDice(true, 4))
+            .player("a", "A").player("b", "B").build();
+        idem.start();
+        IdempotentRolls once = new IdempotentRolls();
+        Turn first = once.roll(idem, "a", "req-1");
+        Turn again = once.roll(idem, "a", "req-1");
+        System.out.println("the same request id twice: same turn=" + (first == again)
+            + ", a is on " + idem.positionOf("a") + " and the log has " + idem.turnNumber() + " row");
+
+        // persistence: the conditional update refuses the second writer
+        GameRepository repo = new InMemoryGameRepository();
+        Turn t1 = idem.history().get(0);
+        System.out.println("repository: first write=" + repo.applyTurn("idem", 0, t1)
+            + ", the same write again=" + repo.applyTurn("idem", 0, t1)
+            + ", stored turns=" + repo.turnNoOf("idem"));
+
+        // replay: the same layout plus the same rolls is the same game, cell for cell
+        Game live = new GameBuilder().id("live").boardSize(100).seed(21)
+            .jump(4, 25).jump(21, 42).jump(36, 44).jump(16, 6).jump(47, 19).jump(62, 18)
+            .player("a", "A").player("b", "B").player("c", "C").build();
+        live.start();
+        live.playOut(2000);
+        int[] rolls = Replay.rolls(live);
+        Game copy = Replay.rerun(new GameBuilder().id("copy").boardSize(100)
+            .jump(4, 25).jump(21, 42).jump(36, 44).jump(16, 6).jump(47, 19).jump(62, 18)
+            .player("a", "A").player("b", "B").player("c", "C"), rolls, rolls.length);
+        System.out.println("replay of " + rolls.length + " rolls: same winner="
+            + Objects.equals(copy.winner(), live.winner())
+            + ", same final board=" + copy.positions().equals(live.positions()));
+
+        // the audit view, on a short game
+        Game audit = new GameBuilder().id("audit").boardSize(20).dice(new ScriptedDice(3, 4, 5, 2, 6, 1))
+            .jump(7, 15).jump(12, 2).player("a", "A").player("b", "B").build();
+        audit.start();
+        for (int i = 0; i < 6; i++) audit.roll(audit.whoseTurn());
+        System.out.print("audit view:\n" + AuditView.print(audit));
+    }
+}

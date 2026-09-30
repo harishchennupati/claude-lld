@@ -1,0 +1,182 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Ten claims the design makes, each with the test that proves it. Every one reproduces a bug a bank of lifts
+// really has: a call sent to two cars, a car in maintenance still being fed, a button that does not exist, a
+// sweep that turns early or runs on to the top of the shaft, an emergency stop that swallows the queue, a
+// broken panel taking the building down, a button that queues three stops, a wait time read off the wall
+// clock, a car going up that puts out the down lamp, and doors that close on a rider holding OPEN.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) {
+        System.out.println((ok ? "PASS " : "FAIL ") + what);
+        if (!ok) failures++;
+    }
+    /** A fresh bank: n cars in a twenty-floor tower, all standing at the lobby unless told otherwise. */
+    static ElevatorSystem bank(int cars, int... startFloors) {
+        List<ElevatorCar> list = new ArrayList<>();
+        for (int i = 0; i < cars; i++) list.add(new ElevatorCar(i, 0, 19, i < startFloors.length ? startFloors[i] : 0));
+        ElevatorSystem b = new ElevatorSystem(list, 0, 19);
+        b.configure(new NearestCarStrategy(0, 19), new FixedDwellPolicy(1));
+        return b;
+    }
+    /** Stops owed by the whole bank. One per outstanding call is the invariant we keep checking. */
+    static int totalStops(ElevatorSystem b) {
+        int n = 0;
+        for (CarSnapshot s : b.snapshots()) n += s.pendingStops();
+        return n;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. forty riders press the same button at the same instant: one car, one stop, one index entry
+        ElevatorSystem b1 = bank(3, 0, 9, 18);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Integer>> presses = new ArrayList<>();
+        for (int i = 0; i < 40; i++) presses.add(pool.submit(() -> { go.await(); return b1.requestHall(7, Direction.UP); }));
+        go.countDown();
+        Set<Integer> answered = new HashSet<>();
+        for (Future<Integer> f : presses) answered.add(f.get());
+        check(answered.size() == 1, "forty presses of 7 UP were answered by exactly one car " + answered);
+        check(b1.outstandingCalls() == 1, "the bank owes that call once, not forty times");
+        check(totalStops(b1) == 1, "exactly one car has floor 7 in its sweep");
+
+        // ... and six different buttons at the same instant: each gets exactly one car, none is lost
+        CountDownLatch go2 = new CountDownLatch(1);
+        int[] floors = { 2, 4, 11, 13, 15, 17 };
+        List<Future<Integer>> six = new ArrayList<>();
+        for (int f : floors) six.add(pool.submit(() -> { go2.await(); return b1.requestHall(f, Direction.DOWN); }));
+        go2.countDown();
+        int sent = 0;
+        for (Future<Integer> f : six) if (f.get() >= 0) sent++;
+        pool.shutdown();
+        check(sent == 6 && b1.outstandingCalls() == 7, "six simultaneous calls each got a car, none dropped");
+        check(totalStops(b1) == 7, "seven calls, seven stops across the bank: no call was given to two cars");
+
+        // 2. a car in maintenance is never assigned, and with every car down the call waits instead of vanishing
+        ElevatorSystem b2 = bank(2, 5, 15);
+        b2.takeOutOfService(0);
+        check(b2.requestHall(6, Direction.UP) == 1, "the nearest car is out of service, so car 1 takes the call");
+        check(b2.car(0).pendingStops() == 0, "the car in maintenance was given nothing");
+        b2.takeOutOfService(1);
+        check(b2.requestHall(3, Direction.UP) == -1, "with every car down the call is not dispatched");
+        check(b2.pendingCalls().contains(new HallCall(3, Direction.UP)), "it waits in the queue instead of being lost");
+        b2.returnToService(1);
+        b2.tick();
+        check(b2.assignedCar(new HallCall(3, Direction.UP)) == 1, "a returning car drains the queue on the next tick");
+
+        // 3. a button that does not exist is rejected before anything is touched
+        ElevatorSystem b3 = bank(2);
+        try { b3.requestHall(99, Direction.UP); check(false, "floor 99 must be rejected"); }
+        catch (IllegalArgumentException e) { check(true, "floor 99 is rejected: " + e.getMessage()); }
+        try { b3.requestHall(-1, Direction.DOWN); check(false, "floor -1 must be rejected"); }
+        catch (IllegalArgumentException e) { check(true, "floor -1 is rejected"); }
+        try { b3.requestCar(0, 99); check(false, "a car button for 99 must be rejected"); }
+        catch (IllegalArgumentException e) { check(true, "the car button for floor 99 is rejected"); }
+        try { b3.requestHall(19, Direction.UP); check(false, "UP on the top floor must be rejected"); }
+        catch (IllegalArgumentException e) { check(true, "there is no UP button on the top floor"); }
+        try { b3.requestHall(0, Direction.DOWN); check(false, "DOWN on the ground floor must be rejected"); }
+        catch (IllegalArgumentException e) { check(true, "there is no DOWN button on the ground floor"); }
+        check(b3.outstandingCalls() == 0 && totalStops(b3) == 0, "after five rejections no car owes anything");
+
+        // 4. the sweep: never turns early, never runs past its last stop (LOOK, not SCAN), never shows a
+        //    direction arrow it is not actually travelling, and serves the call behind it within one sweep
+        ElevatorSystem b4 = bank(1);
+        b4.requestHall(8, Direction.UP);
+        b4.tick(); b4.tick();                                   // the car is climbing, now at floor 2
+        b4.requestHall(1, Direction.DOWN);                      // a call behind it: it must be served last
+        int previous = b4.car(0).floor(), highest = previous, ticksToServeBoth = -1;
+        boolean reachedEight = false, turnedEarly = false, servedLobby = false, arrowLied = false;
+        for (int t = 0; t < 40; t++) {
+            b4.tick();
+            int now = b4.car(0).floor();
+            highest = Math.max(highest, now);
+            if (!reachedEight && now < previous) turnedEarly = true;
+            if (now == 8) reachedEight = true;
+            if (reachedEight && now == 1) servedLobby = true;
+            if (ticksToServeBoth < 0 && b4.outstandingCalls() == 0) ticksToServeBoth = t + 1;
+            CarSnapshot s = b4.car(0).snapshot();
+            if (s.state() == CarState.MOVING_UP   && (s.heading() != Direction.UP   || s.doors() != DoorState.CLOSED)) arrowLied = true;
+            if (s.state() == CarState.MOVING_DOWN && (s.heading() != Direction.DOWN || s.doors() != DoorState.CLOSED)) arrowLied = true;
+            previous = now;
+        }
+        check(!turnedEarly, "the car never descended while floor 8 was still ahead of it");
+        check(reachedEight && servedLobby, "it served floor 8 first and only then came back down to floor 1");
+        check(highest == 8, "it turned at its last stop and never ran on to floor 19: LOOK, not SCAN");
+        check(!arrowLied, "whenever the panel showed an arrow the car was really moving that way, doors shut");
+        check(ticksToServeBoth > 0 && ticksToServeBoth <= 2 * 19,
+              "the call behind the car was served inside one sweep of the shaft: " + ticksToServeBoth + " ticks, bound 38");
+        check(b4.outstandingCalls() == 0, "both hall calls left the index once their doors opened");
+
+        // 5. an emergency stop leaves the queue intact for another car to retry
+        ElevatorSystem b5 = bank(2, 16, 2);
+        int owner = b5.requestHall(17, Direction.DOWN);
+        check(owner == 0, "the near car takes the call at floor 17");
+        b5.takeOutOfService(owner);
+        HallCall call = new HallCall(17, Direction.DOWN);
+        check(b5.pendingCalls().contains(call), "the emergency stop put the call back on the queue");
+        check(b5.outstandingCalls() == 1, "the call still exists: it was moved, not dropped");
+        check(b5.car(owner).pendingStops() == 0, "the stopped car owes nothing any more");
+        b5.tick();
+        check(b5.assignedCar(call) == 1, "one tick later the other car owes it");
+
+        // 6. a display panel that throws cannot break dispatch or the tick
+        ElevatorSystem b6 = bank(1);
+        b6.addObserver(s -> { throw new RuntimeException("panel is down"); });
+        int car = b6.requestHall(4, Direction.UP);
+        check(car == 0, "dispatch still answered although the panel threw");
+        for (int t = 0; t < 4; t++) b6.tick();
+        check(b6.car(0).floor() == 4, "the car still climbed to floor 4 although the panel threw on every change");
+
+        // 7. pressing the same button three times is one stop and one door opening
+        ElevatorSystem b7 = bank(1);
+        b7.requestCar(0, 5); b7.requestCar(0, 5); b7.requestCar(0, 5);
+        check(b7.car(0).pendingStops() == 1, "three presses of floor 5 are one stop");
+        int openings = 0; DoorState was = DoorState.CLOSED;
+        for (int t = 0; t < 12; t++) {
+            b7.tick();
+            DoorState now = b7.car(0).doors();
+            if (now == DoorState.OPEN && was == DoorState.CLOSED && b7.car(0).floor() == 5) openings++;
+            was = now;
+        }
+        check(openings == 1, "the doors opened at floor 5 exactly once");
+
+        // 8. waiting time is read from the injected clock, not the wall clock
+        ElevatorSystem b8 = bank(1);
+        long[] now = { 0L };
+        b8.setClock(() -> now[0]);
+        b8.requestHall(3, Direction.UP);                        // pressed at t = 0
+        for (int t = 0; t < 4; t++) { now[0] += 500; b8.tick(); }   // four half-second ticks: climb, climb, climb, open
+        check(b8.averageWaitMs() == 2000.0, "the rider waited 2000 ms by the test's clock, whatever the wall clock says");
+
+        // 9. a car climbing serves the UP crowd on that floor only: the DOWN lamp stays lit for the next leg
+        ElevatorSystem b9 = bank(1);                            // one car, standing at the lobby
+        b9.requestHall(6, Direction.UP);                        // two people on floor 6, wanting opposite ways
+        b9.requestHall(6, Direction.DOWN);
+        check(b9.outstandingCalls() == 2, "UP and DOWN on floor 6 are two different calls, not one");
+        for (int t = 0; t < 20 && !(b9.car(0).floor() == 6 && b9.car(0).doors() == DoorState.OPEN); t++) b9.tick();
+        check(b9.assignedCar(new HallCall(6, Direction.UP)) < 0, "the UP lamp on 6 went out when the doors opened");
+        check(b9.assignedCar(new HallCall(6, Direction.DOWN)) >= 0, "the DOWN lamp on 6 is still lit: nobody served it yet");
+        check(b9.car(0).pendingStops() == 1, "floor 6 is still on that car's DOWN leg");
+        b9.tick(); b9.tick();                                   // shut the doors, turn, open again going down
+        check(b9.outstandingCalls() == 0, "one door cycle later the same car serves the DOWN call at floor 6");
+
+        // 10. the door buttons: OPEN holds, CLOSE lets go, and neither can touch a car that is moving
+        ElevatorSystem b10 = bank(1);
+        CarPanelButtons inside = new CarPanelButtons(b10, 0);
+        b10.requestCar(0, 4);
+        check(!inside.holdDoor(3), "the OPEN button does nothing while the car is moving with its doors shut");
+        for (int t = 0; t < 6 && b10.car(0).doors() != DoorState.OPEN; t++) b10.tick();
+        check(b10.car(0).floor() == 4 && b10.car(0).doors() == DoorState.OPEN, "the doors opened at floor 4");
+        check(inside.holdDoor(3), "the OPEN button holds the doors there");
+        b10.tick(); b10.tick();
+        check(b10.car(0).doors() == DoorState.OPEN && b10.car(0).floor() == 4,
+              "two ticks later the doors are still open and the car has not moved a floor");
+        check(inside.closeDoor(), "the CLOSE button ends the wait");
+        b10.tick();
+        check(b10.car(0).doors() == DoorState.CLOSED, "the next tick shuts the doors and the sweep goes on");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

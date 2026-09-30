@@ -1,0 +1,392 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.util.function.*;
+
+// ---- ext: the bug, reproduced. Read, check, write on a shared counter, and call it atomic.
+/**
+ * What everybody writes first: a counter per key, no lock. Two threads read "one left", both decide yes,
+ * both write zero, and two requests go through a budget of one. The demo runs it so the number is real.
+ */
+class UnsafeLimiter implements Limiter {
+    private final Map<String, long[]> spent = new ConcurrentHashMap<>();
+    private final long permits;
+    UnsafeLimiter(long permits) { this.permits = permits; }
+    /** Deliberately wrong: the read, the check and the write are three steps with a gap between them. */
+    public Decision allow(String key, long cost) {
+        long[] c = spent.computeIfAbsent(key, k -> new long[1]);
+        long seen = c[0];                    // read ...
+        if (seen + cost <= permits) {        // ... check ...
+            Thread.onSpinWait();             // ... the gap, widened here so the bug shows on every run
+            c[0] = seen + cost;              // ... write, over whatever another thread wrote in between
+            return Decision.allow(permits - c[0]);
+        }
+        return Decision.deny(0, 1, "window full");
+    }
+}
+
+// ---- ext: rung one of the ladder: the same bucket with no lock at all, using compare-and-set
+/**
+ * The whole bucket as one immutable value in an AtomicReference. Refill-and-deduct becomes "compute the new
+ * value from the old one and swap it in if nobody else did first"; a loser recomputes against the winner's
+ * value and tries again. No context switch, no lock, and it cannot livelock: somebody wins every round.
+ */
+class CasBucket implements Limiter {
+    /** The pair that must move together: permits, and the instant they were measured at. */
+    record Snap(double tokens, long atMs) { }
+    private final ConcurrentHashMap<String, AtomicReference<Snap>> keys = new ConcurrentHashMap<>();
+    private final AtomicLong retries = new AtomicLong();
+    private final Rule rule;
+    private final Clock clock;
+    CasBucket(Rule rule, Clock clock) { this.rule = rule; this.clock = clock; }
+    public Decision allow(String key, long cost) {
+        AtomicReference<Snap> ref = keys.computeIfAbsent(key,
+                k -> new AtomicReference<>(new Snap(rule.burst(), clock.nowMs())));
+        while (true) {
+            long now = clock.nowMs();
+            Snap cur = ref.get();
+            long elapsed = Math.max(0, now - cur.atMs());
+            double tokens = Math.min(rule.burst(), cur.tokens() + elapsed * rule.perMs());
+            if (tokens < cost) return Decision.deny(0, (long) Math.ceil((cost - tokens) / rule.perMs()), "no permits");
+            if (ref.compareAndSet(cur, new Snap(tokens - cost, now)))            // the whole critical section
+                return Decision.allow((long) Math.floor(tokens - cost));
+            retries.incrementAndGet();                                            // somebody else won; redo the sums
+        }
+    }
+    /** How often a thread lost the swap and recomputed. The real cost of contention, measurable. */
+    long retries() { return retries.get(); }
+}
+
+// ---- ext: shadow mode, so a new limit can be measured for a week before it blocks anyone
+/**
+ * Wraps any limiter, runs the real algorithm, charges the real permits - and then admits everything anyway,
+ * counting what it would have blocked. The answer to "we ship to a live tenant tomorrow and I cannot reject
+ * real traffic on day one": turn the count into a dashboard, and flip one wiring line when it looks right.
+ */
+class ShadowLimiter implements Limiter {
+    private final Limiter delegate;
+    private final AtomicLong observed = new AtomicLong(), wouldHaveBlocked = new AtomicLong();
+    ShadowLimiter(Limiter delegate) { this.delegate = delegate; }
+    public Decision allow(String key, long cost) {
+        Decision d = delegate.allow(key, cost);
+        observed.incrementAndGet();
+        if (!d.allowed()) wouldHaveBlocked.incrementAndGet();
+        return Decision.allow(d.remaining());                 // shadow mode: nobody is actually refused
+    }
+    /** How many calls went through the limiter. */
+    long observed() { return observed.get(); }
+    /** How many of them the real limit would have refused. The number that decides whether to switch it on. */
+    long wouldHaveBlocked() { return wouldHaveBlocked.get(); }
+}
+
+// ---- ext: layered limits: per key AND a global budget, with a refund when a later layer refuses
+/**
+ * Two invariants at once: this tenant may spend 600 a minute, and the whole service may spend 10,000 a minute.
+ * Every layer is charged in order, and if a later layer refuses, the earlier ones are refunded - otherwise a
+ * tenant loses permits for a request that never happened. That refund is the compensating step of this design.
+ */
+class LayeredLimiter implements Limiter {
+    /** One budget: its name for the error, the limiter that holds it, and how the key maps into it. */
+    record Layer(String name, RateLimiter limiter, Function<String, String> keyOf) { }
+    private final List<Layer> layers;
+    LayeredLimiter(List<Layer> layers) { this.layers = List.copyOf(layers); }
+    public Decision allow(String key, long cost) {
+        List<Layer> charged = new ArrayList<>();
+        for (Layer l : layers) {
+            Decision d = l.limiter().allow(l.keyOf().apply(key), cost);
+            if (!d.allowed()) {
+                for (Layer c : charged) c.limiter().refund(c.keyOf().apply(key), cost);   // give back, in full
+                return Decision.deny(0, d.retryAfterMs(), l.name() + " limit");
+            }
+            charged.add(l);
+        }
+        return Decision.allow(layers.get(0).limiter().remaining(layers.get(0).keyOf().apply(key)));
+    }
+}
+
+// ---- ext: back-pressure: wait for a permit until a deadline instead of failing fast
+/**
+ * Some callers - a batch job, a queue consumer - would rather wait than fail. Retry-After already says how
+ * long the wait is, so waiting is a loop around the same decision, bounded by a deadline the caller sets.
+ * Never offer this to a web request: a held thread under load is how a service falls over.
+ */
+class WaitingLimiter {
+    private final Limiter delegate;
+    WaitingLimiter(Limiter delegate) { this.delegate = delegate; }
+    /**
+     * Try until the permit arrives or the deadline passes. Returns true if it was admitted. Sleeps exactly
+     * the retry-after the limiter reported, never a fixed poll interval.
+     */
+    boolean acquireBefore(String key, long cost, long deadlineMs) throws InterruptedException {
+        while (true) {
+            Decision d = delegate.allow(key, cost);
+            if (d.allowed()) return true;
+            long left = deadlineMs - System.currentTimeMillis();
+            if (left <= 0) return false;
+            Thread.sleep(Math.min(d.retryAfterMs(), left));
+        }
+    }
+}
+
+// ---- ext: twelve pods, one budget: the distributed limiter
+/**
+ * A stand-in for Redis: a map plus one lock, because a single-threaded server IS a lock every client shares.
+ * The method below is the Lua script; running it server-side is what makes refill-and-deduct atomic across
+ * twelve pods, exactly as the per-key lock makes it atomic across threads inside one pod.
+ *
+ * <pre>
+ * -- KEYS[1]=key  ARGV: burst, perMs, cost, now
+ * local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+ * local tokens = tonumber(b[1]) or tonumber(ARGV[1])
+ * local ts     = tonumber(b[2]) or tonumber(ARGV[4])
+ * local now    = tonumber(ARGV[4])
+ * tokens = math.min(tonumber(ARGV[1]), tokens + math.max(0, now - ts) * tonumber(ARGV[2]))
+ * if tokens &gt;= tonumber(ARGV[3]) then
+ *   redis.call('HMSET', KEYS[1], 'tokens', tokens - tonumber(ARGV[3]), 'ts', now)
+ *   redis.call('PEXPIRE', KEYS[1], 120000)      -- eviction for free: the TTL is the sweeper
+ *   return 1
+ * end
+ * redis.call('HMSET', KEYS[1], 'tokens', tokens, 'ts', now)
+ * return 0
+ * </pre>
+ */
+class RedisLike {
+    private final Map<String, double[]> store = new HashMap<>();     // key -> { tokens, measuredAtMs }
+    private final ReentrantLock singleThread = new ReentrantLock();  // Redis's one thread, modelled
+    /**
+     * The script above, in Java: refill from elapsed time and deduct, as one indivisible server-side step.
+     * Returns the permits left after the deduct, or -1 when there were not enough.
+     */
+    double takeToken(String key, double burst, double perMs, long cost, long nowMs) {
+        singleThread.lock();
+        try {
+            double[] st = store.computeIfAbsent(key, k -> new double[] { burst, nowMs });
+            long elapsed = (long) (nowMs - st[1]);
+            if (elapsed > 0) { st[0] = Math.min(burst, st[0] + elapsed * perMs); st[1] = nowMs; }
+            if (st[0] >= cost) { st[0] -= cost; return st[0]; }
+            return -1;
+        } finally { singleThread.unlock(); }
+    }
+}
+
+/**
+ * The same interface, backed by the shared server, so twelve pods enforce one budget instead of twelve. The
+ * price is a network hop on every request - so keep the local bucket in front of it as a cheap first filter,
+ * and decide out loud what happens when Redis is down: fail open (serve) or fail closed (refuse).
+ */
+class RedisTokenBucket implements Limiter {
+    private final RedisLike redis;
+    private final Rule rule;
+    private final Clock clock;
+    RedisTokenBucket(RedisLike redis, Rule rule, Clock clock) { this.redis = redis; this.rule = rule; this.clock = clock; }
+    public Decision allow(String key, long cost) {
+        long now = clock.nowMs();
+        double left = redis.takeToken(key, rule.burst(), rule.perMs(), cost, now);
+        return left >= 0 ? Decision.allow((long) Math.floor(left))
+                         : Decision.deny(0, (long) Math.ceil(cost / rule.perMs()), "global limit");
+    }
+}
+
+// ---- ext: a limit per endpoint, and a heavy endpoint that costs more than one permit
+/**
+ * Two questions that look big and are not. "Different limits per endpoint" is a different key - tenant plus
+ * route - so the map grows by the number of routes and nothing else changes. "A search costs more than a
+ * ping" is the cost argument that has been on allow() all along, read from a table.
+ */
+class Endpoints {
+    private final Map<String, Long> cost = new ConcurrentHashMap<>();
+    /** Say what one call to this route is worth in permits. */
+    void price(String route, long permits) { cost.put(route, permits); }
+    /** What this route costs; anything unpriced costs one. */
+    long costOf(String route) { return cost.getOrDefault(route, 1L); }
+    /** The key a decision is made against: one budget per tenant per route. */
+    static String key(String tenant, String route) { return tenant + ":" + route; }
+}
+
+// ---- ext: warm-up, for the cold cache behind you
+/**
+ * Wraps any rule source and scales the permits up from a tenth to the full limit over the warm-up period,
+ * measured from the first time each key was seen. Wraps rather than replaces: the tier rules underneath are
+ * untouched, which is the same Decorator move as surge pricing on a parking lot.
+ */
+class WarmUpRules implements RuleResolver {
+    private final RuleResolver base;
+    private final long warmUpMs;
+    private final Clock clock;
+    private final Map<String, Long> firstSeen = new ConcurrentHashMap<>();
+    WarmUpRules(RuleResolver base, long warmUpMs, Clock clock) { this.base = base; this.warmUpMs = warmUpMs; this.clock = clock; }
+    public Rule ruleFor(String key) {
+        Rule r = base.ruleFor(key);
+        long now = clock.nowMs();
+        long since = now - firstSeen.computeIfAbsent(key, k -> now);
+        if (since >= warmUpMs) return r;
+        double f = Math.max(0.1, (double) since / warmUpMs);            // a tenth, rising to the whole limit
+        return new Rule(Math.max(1, (long) (r.permits() * f)), r.windowMs(), Math.max(1, (long) (r.burst() * f)));
+    }
+}
+
+// ---- ext: the leaky bucket, properly: GCRA keeps one number where the token bucket keeps two
+/**
+ * A leaky bucket that meters (rather than queues) is the token bucket with the arithmetic turned upside
+ * down: instead of counting tokens up, count the theoretical arrival time of the next allowed call forward.
+ * Each permit pushes that time on by one emission interval, and a call is admitted if now is within the
+ * burst tolerance of it. GCRA - the generic cell rate algorithm, what Redis's own limiter runs - is that
+ * idea in one long per key instead of two doubles: no floating point drift, and FailureTests proves it
+ * admits exactly the same calls as TokenBucket. The other reading of "leaky bucket", the one that queues
+ * and drains at a fixed rate, is not an algorithm here at all: it is WaitingLimiter above.
+ */
+class Gcra implements RateLimitAlgorithm {
+    public Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs) {
+        double T = rule.windowMs() / (double) rule.permits();       // emission interval, ms per permit
+        double tau = rule.burst() * T;                              // how far ahead of now we may run
+        double tat = Math.max(s.lastRefillMs, nowMs);               // theoretical arrival time lives here
+        double next = tat + cost * T;
+        if (next - tau <= nowMs + 1e-9) {
+            s.lastRefillMs = (long) Math.ceil(next);
+            return Decision.allow(remainingAt(s, rule, nowMs, T, tau));
+        }
+        return Decision.deny(0, (long) Math.ceil(next - tau - nowMs), "no permits");
+    }
+    public void refund(KeyState s, Rule rule, long cost, long nowMs) {
+        double T = rule.windowMs() / (double) rule.permits();
+        s.lastRefillMs = (long) Math.max(nowMs, s.lastRefillMs - cost * T);
+    }
+    public long remaining(KeyState s, Rule rule, long nowMs) {
+        double T = rule.windowMs() / (double) rule.permits();
+        return remainingAt(s, rule, nowMs, T, rule.burst() * T);
+    }
+    /** How many more permits fit before the arrival time runs past the tolerance. */
+    private long remainingAt(KeyState s, Rule rule, long nowMs, double T, double tau) {
+        double tat = Math.max(s.lastRefillMs, nowMs);
+        long n = (long) Math.floor((nowMs + tau - tat) / T + 1e-9);
+        return Math.max(0, Math.min(rule.burst(), n));
+    }
+    public String name() { return "gcra"; }
+}
+
+// ---- ext: persistence seam: the bucket behind a repository, and the deduct as one conditional update
+/**
+ * The seam for "it must survive a restart" or "two servers share it". The limiter keeps talking to an
+ * interface; the in-memory map is one implementation and a row in a table is another. The important line is
+ * the comment: the deduct becomes a conditional UPDATE, which is the database's compare-and-set.
+ *
+ * <pre>
+ * UPDATE bucket SET tokens = tokens - ?, ts = ?
+ *  WHERE key = ? AND tokens &gt;= ?;      -- 0 rows updated = refused, no read-then-write gap at all
+ * </pre>
+ */
+interface BucketRepository {
+    /** The saved pair for a key, or null if this key has never been seen. */
+    double[] load(String key);
+    /** Save the pair. In SQL this is the conditional UPDATE above, not a read followed by a write. */
+    void save(String key, double tokens, long atMs);
+}
+
+/** The implementation a single process ships with: a map. Swapping it for SQL changes no other class. */
+class InMemoryBuckets implements BucketRepository {
+    private final Map<String, double[]> rows = new ConcurrentHashMap<>();
+    public double[] load(String key) { double[] r = rows.get(key); return r == null ? null : r.clone(); }
+    public void save(String key, double tokens, long atMs) { rows.put(key, new double[] { tokens, atMs }); }
+}
+
+/** Runs every extension above, so each block on page 05 is code that has actually executed. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        // the bug, reproduced: no lock, a budget of 50, 200 threads
+        UnsafeLimiter buggy = new UnsafeLimiter(50);
+        System.out.println("unsafe read-check-write, 200 threads -> admitted " + hammer(buggy, 200) + " on a budget of 50");
+
+        // rung one: the same bucket with compare-and-set instead of a lock
+        CasBucket cas = new CasBucket(new Rule(50, 1_000L, 50), new ManualClock(0));
+        System.out.println("compare-and-set bucket, 200 threads -> admitted " + hammer(cas, 200)
+                         + ", lost swaps and recomputed " + cas.retries() + " times");
+
+        // shadow mode: the real algorithm, nothing refused
+        ManualClock clock = new ManualClock(0);
+        RateLimiter real = new RateLimiter();
+        real.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), clock);
+        ShadowLimiter shadow = new ShadowLimiter(real);
+        int refused = 0;
+        for (int i = 0; i < 20; i++) if (!shadow.allow("acme", 1).allowed()) refused++;
+        System.out.println("shadow mode: saw " + shadow.observed() + ", would have blocked "
+                         + shadow.wouldHaveBlocked() + ", actually refused " + refused);
+
+        // layered: per tenant AND a global budget, with the refund when the global one refuses
+        RateLimiter perTenant = new RateLimiter(), global = new RateLimiter();
+        perTenant.configure(new TokenBucket(), new FlatRules(new Rule(10, 1_000L, 10)), clock);
+        global.configure(new TokenBucket(), new FlatRules(new Rule(3, 1_000L, 3)), clock);
+        LayeredLimiter layered = new LayeredLimiter(List.of(
+                new LayeredLimiter.Layer("tenant", perTenant, k -> k),
+                new LayeredLimiter.Layer("global", global, k -> "ALL")));
+        int ok = 0;
+        for (int i = 0; i < 6; i++) if (layered.allow("acme", 1).allowed()) ok++;
+        System.out.println("layered (tenant 10, global 3)     -> admitted " + ok
+                         + ", tenant permits left " + perTenant.remaining("acme") + " (7 only if the refunds happened)");
+
+        // back-pressure: wait for the permit instead of failing
+        RateLimiter slow = new RateLimiter();
+        slow.configure(new TokenBucket(), new FlatRules(new Rule(20, 1_000L, 1)), new SystemClock());
+        WaitingLimiter waiting = new WaitingLimiter(slow);
+        slow.allow("batch");                                            // spend the only permit
+        long t0 = System.currentTimeMillis();
+        boolean got = waiting.acquireBefore("batch", 1, System.currentTimeMillis() + 500);
+        System.out.println("back-pressure: waited " + (System.currentTimeMillis() - t0) + "ms, admitted " + got);
+
+        // twelve pods, one budget
+        RedisLike redis = new RedisLike();
+        ManualClock shared = new ManualClock(0);
+        Rule fleetRule = new Rule(50, 1_000L, 50);
+        Limiter pod1 = new RedisTokenBucket(redis, fleetRule, shared), pod2 = new RedisTokenBucket(redis, fleetRule, shared);
+        int fleet = 0;
+        for (int i = 0; i < 40; i++) { if (pod1.allow("acme", 1).allowed()) fleet++; if (pod2.allow("acme", 1).allowed()) fleet++; }
+        System.out.println("two pods, one Redis budget of 50  -> admitted " + fleet + " (per-process would be 100)");
+
+        // per-endpoint keys and weighted cost
+        Endpoints ep = new Endpoints();
+        ep.price("/search", 5);
+        RateLimiter routed = new RateLimiter();
+        routed.configure(new TokenBucket(), new FlatRules(new Rule(10, 1_000L, 10)), clock);
+        routed.allow(Endpoints.key("acme", "/search"), ep.costOf("/search"));
+        System.out.println("per route: /search costs " + ep.costOf("/search") + " -> key "
+                         + Endpoints.key("acme", "/search") + " has " + routed.remaining(Endpoints.key("acme", "/search"))
+                         + " left, /ping has " + routed.remaining(Endpoints.key("acme", "/ping")));
+
+        // warm-up: a new key starts at a tenth of its limit
+        ManualClock warmClock = new ManualClock(0);
+        WarmUpRules warm = new WarmUpRules(new FlatRules(Rule.perMinute(600, 100)), 30_000L, warmClock);
+        long atStart = warm.ruleFor("fresh").permits();
+        warmClock.advance(30_000);
+        System.out.println("warm-up over 30s: permits at t=0 " + atStart + ", at t=30s " + warm.ruleFor("fresh").permits());
+
+        // the leaky bucket as a meter: GCRA must agree with the token bucket on the burst
+        RateLimiter g = new RateLimiter();
+        ManualClock gc = new ManualClock(0);
+        g.configure(new Gcra(), new FlatRules(new Rule(10, 1_000L, 5)), gc);
+        int burst = 0;
+        while (g.allow("k").allowed()) burst++;
+        gc.advance(100);
+        System.out.println("gcra: burst admitted " + burst + ", one more after 100ms -> " + g.allow("k").allowed());
+
+        // persistence seam
+        BucketRepository repo = new InMemoryBuckets();
+        repo.save("acme", 7.5, 1_000L);
+        System.out.println("repository round trip: tokens " + repo.load("acme")[0] + " measured at " + (long) repo.load("acme")[1]);
+    }
+
+    /** Fire n threads at one key at the same instant and count how many were admitted. */
+    static int hammer(Limiter limiter, int n) throws Exception {
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(n);
+        AtomicInteger admitted = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(32);
+        for (int i = 0; i < n; i++) pool.submit(() -> {
+            try { start.await(); if (limiter.allow("hot", 1).allowed()) admitted.incrementAndGet(); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            finally { done.countDown(); }
+        });
+        start.countDown();
+        done.await();
+        pool.shutdown();
+        return admitted.get();
+    }
+}

@@ -1,0 +1,457 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/**
+ * The kinds of atom this barrier knows about. Identity and nothing else -- no state, no behaviour --
+ * so it is an enum, and every per-element array in the design is indexed by its ordinal.
+ */
+enum Element {
+    HYDROGEN("H"), OXYGEN("O");
+
+    private final String symbol;
+
+    /** One constant per element, carrying the letter the release callbacks print. */
+    Element(String symbol) { this.symbol = symbol; }
+
+    /** The one-letter symbol, used only for printing and for the tests that read the output. */
+    public String symbol() { return symbol; }
+}
+
+/** Where time comes from. Injected, so a test decides what "now" is instead of waiting for it. */
+interface Clock {
+    /** The current instant in milliseconds. The only clock anything in this design is allowed to read. */
+    long nowMs();
+}
+
+/**
+ * How many atoms of each element one molecule takes: the stoichiometry, and the only water-specific
+ * fact in the whole design. One method, so a lambda is a valid implementation.
+ */
+interface Recipe {
+    /** How many atoms of this element one molecule needs. Zero means the element is not in this molecule. */
+    int needed(Element e);
+
+    /** Water: two hydrogen, one oxygen. The default the barrier is built with. */
+    Recipe WATER = e -> e == Element.HYDROGEN ? 2 : 1;
+    /** Hydrogen peroxide: two hydrogen, two oxygen. Proof that the 2:1 rule is data, not code. */
+    Recipe PEROXIDE = e -> 2;
+}
+
+/**
+ * Somebody who wants to know that a molecule completed, without the barrier knowing what a dashboard is.
+ * Called after the lock is released, so a slow or broken listener can never stall an atom.
+ */
+interface MoleculeObserver {
+    /** Called once per completed molecule, with its 1-based index and the millisecond it completed. */
+    void onMolecule(long index, long atMs);
+}
+
+/**
+ * The contract every implementation on this page satisfies: two named doors, and a count of what came out.
+ * Callers depend on this and never on permits, locks or barriers.
+ */
+interface MoleculeBarrier {
+    /** Offer one hydrogen atom. Returns only after a full molecule formed and this atom's release has run. */
+    void hydrogen(Runnable releaseHydrogen) throws InterruptedException;
+
+    /** Offer one oxygen atom. Returns only after a full molecule formed and this atom's release has run. */
+    void oxygen(Runnable releaseOxygen) throws InterruptedException;
+
+    /** How many complete molecules have been emitted so far. Never counts a molecule that is still forming. */
+    long moleculesFormed();
+}
+
+/**
+ * The reference implementation: one ReentrantLock, one waiting room per element, and one more for
+ * "the molecule is full". Guarantees that the released atoms come out in groups of exactly the recipe --
+ * two hydrogen and one oxygen for water -- with no group ever mixed into the next.
+ */
+final class H2OBarrier implements MoleculeBarrier {
+
+    private final ReentrantLock lock = new ReentrantLock();
+    /** One waiting room per element: hydrogen atoms that found both H seats taken sleep here. */
+    private final EnumMap<Element, Condition> seatFree = new EnumMap<>(Element.class);
+    /** The waiting room for seated atoms: they sleep here until the last seat of their molecule is taken. */
+    private final Condition full;
+
+    /** How many atoms of each element one molecule takes. Fixed at construction. */
+    private final int[] needed = new int[Element.values().length];
+    /** How many seats of each element are taken in the molecule now forming. */
+    private final int[] seated = new int[Element.values().length];
+    /** Atoms in one complete molecule: the sum of the recipe. */
+    private final int size;
+
+    /** Seats taken in the molecule now forming, across all elements. */
+    private int filled;
+    /** Release callbacks that have finished in the molecule now forming. */
+    private int emitted;
+    /** How many molecules have been completely emitted. Also the generation number of the molecule now forming. */
+    private long molecules;
+    /** How many times a thread actually went to sleep here. Never a spin count: this design never spins. */
+    private long waits;
+
+    private Clock clock = System::currentTimeMillis;
+    private final List<MoleculeObserver> observers = new CopyOnWriteArrayList<>();
+
+    /** A water barrier: two hydrogen and one oxygen per molecule. */
+    H2OBarrier() { this(Recipe.WATER); }
+
+    /**
+     * A barrier for any recipe. The recipe is a constructor argument and not a configure() one because
+     * the number of waiting rooms and the size of a molecule are decided by it.
+     */
+    H2OBarrier(Recipe recipe) {
+        full = lock.newCondition();
+        int total = 0;
+        for (Element e : Element.values()) {
+            int n = recipe.needed(e);
+            if (n < 0) throw new IllegalArgumentException("a recipe cannot need " + n + " atoms of " + e);
+            needed[e.ordinal()] = n;
+            seatFree.put(e, lock.newCondition());
+            total += n;
+        }
+        if (total == 0) throw new IllegalArgumentException("a molecule with no atoms would never complete");
+        size = total;
+    }
+
+    /** Hand in the rules the barrier does not build for itself. Today that is only the clock. */
+    void configure(Clock clock) { this.clock = Objects.requireNonNull(clock, "clock"); }
+
+    /** Add a listener. It is called after the lock is released, never inside it. */
+    void addObserver(MoleculeObserver o) { observers.add(Objects.requireNonNull(o, "observer")); }
+
+    /** Offer one hydrogen atom. Blocks until two hydrogen and one oxygen have gathered. */
+    public void hydrogen(Runnable releaseHydrogen) throws InterruptedException {
+        atom(Element.HYDROGEN, releaseHydrogen);
+    }
+
+    /** Offer one oxygen atom. Blocks until two hydrogen and one oxygen have gathered. */
+    public void oxygen(Runnable releaseOxygen) throws InterruptedException {
+        atom(Element.OXYGEN, releaseOxygen);
+    }
+
+    /**
+     * One atom's whole life, in the order that makes the design correct: take a seat under the lock and
+     * wait for the molecule to fill; run the caller's release OUTSIDE the lock; then count that emit.
+     * The atom that counts the last emit resets the seats, which is what stops molecule N+1 leaking into N.
+     */
+    void atom(Element e, Runnable release) throws InterruptedException {
+        Objects.requireNonNull(release, "release");
+        sitDown(e);                        // returns only when this atom's molecule is complete
+        try {
+            release.run();                 // outside the lock: a slow or throwing callback must not hold the barrier
+        } finally {
+            long done = closeMyEmit();     // non-zero only for the atom that finished the molecule
+            if (done > 0) publish(done, clock.nowMs());
+        }
+    }
+
+    /**
+     * Take one of this element's seats in the molecule now forming, then sleep until every seat is taken.
+     * Both waits are while loops: a wake means "look again", never "the molecule is yours".
+     */
+    private void sitDown(Element e) throws InterruptedException {
+        lock.lockInterruptibly();          // interruptibly, so an atom that ends up parked can still be cancelled
+        try {
+            int want = needed[e.ordinal()];
+            if (want == 0) throw new IllegalArgumentException(e + " is not part of this molecule");
+
+            // 1. wait for a seat of MY element. This is the cap that makes H,H,H impossible.
+            while (seated[e.ordinal()] == want) {
+                waits++;
+                try {
+                    seatFree.get(e).await();
+                } catch (InterruptedException ie) {
+                    seatFree.get(e).signal();                    // a signal spent on me must not die with me
+                    throw ie;
+                }
+            }
+            seated[e.ordinal()]++;
+            filled++;
+            long mine = molecules;         // the molecule I have just joined
+
+            // 2. the atom that takes the last seat completes the molecule and wakes the others.
+            if (filled == size) { full.signalAll(); return; }
+
+            // 3. everybody else sleeps until it is complete -- and gives the seat back if cancelled first.
+            try {
+                while (molecules == mine && filled < size) { waits++; full.await(); }
+            } catch (InterruptedException ie) {
+                if (molecules == mine && filled < size) {        // still incomplete: leaving is safe
+                    seated[e.ordinal()]--;
+                    filled--;
+                    seatFree.get(e).signal();                    // my seat is free again: wake somebody for it
+                    throw ie;
+                }
+                Thread.currentThread().interrupt();              // committed: the molecule formed as I was cancelled
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Count one finished release callback. The last one of a molecule clears the seats and wakes everybody
+     * waiting for one; it returns that molecule's index so the caller can tell the observers after unlocking.
+     */
+    private long closeMyEmit() {
+        lock.lock();                       // uninterruptible on purpose: this atom is committed and must be counted
+        try {
+            emitted++;
+            if (emitted < size) return 0;
+            long done = ++molecules;
+            emitted = 0;
+            filled = 0;
+            for (Element e : Element.values()) {
+                seated[e.ordinal()] = 0;
+                // exactly as many signals as seats that just opened: signalAll here would wake every waiting
+                // hydrogen in the process so that two of them could sit down -- a thundering herd, every molecule
+                for (int k = 0; k < needed[e.ordinal()]; k++) seatFree.get(e).signal();
+            }
+            return done;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Tell the listeners, outside the lock, and never let a broken one break a molecule. */
+    private void publish(long index, long atMs) {
+        for (MoleculeObserver o : observers) {
+            try { o.onMolecule(index, atMs); } catch (RuntimeException ignored) { /* a broken meter is not our problem */ }
+        }
+    }
+
+    /** How many complete molecules have been emitted. Read under the lock, so it is never seen half-updated. */
+    public long moleculesFormed() { lock.lock(); try { return molecules; } finally { lock.unlock(); } }
+
+    /** How many seats of this element are taken in the molecule now forming. For the demo and the tests. */
+    public int seatedCount(Element e) { lock.lock(); try { return seated[e.ordinal()]; } finally { lock.unlock(); } }
+
+    /** How many times a thread parked here. Zero would mean nothing ever had to wait. */
+    public long waitCount() { lock.lock(); try { return waits; } finally { lock.unlock(); } }
+}
+
+/**
+ * The same contract from two library pieces instead of one lock: a counting semaphore per element caps
+ * how many atoms of that element may enter the molecule now forming, and a CyclicBarrier of three is the
+ * rendezvous that releases them together. Ladder rung two, and the version most people write first.
+ */
+final class SemaphoreBarrier implements MoleculeBarrier {
+
+    /** One counting semaphore per element: two permits for hydrogen, one for oxygen. */
+    private final EnumMap<Element, Semaphore> seats = new EnumMap<>(Element.class);
+    /** The rendezvous. It auto-resets every generation, which is the whole reason it is not a latch. */
+    private final CyclicBarrier bond;
+    private final AtomicLong molecules = new AtomicLong();
+
+    /** A water barrier: two hydrogen permits, one oxygen permit, a barrier of three. */
+    SemaphoreBarrier() { this(Recipe.WATER); }
+
+    /** A barrier for any recipe: one semaphore per element, and a rendezvous the size of the whole molecule. */
+    SemaphoreBarrier(Recipe recipe) {
+        int total = 0;
+        for (Element e : Element.values()) {
+            int n = recipe.needed(e);
+            seats.put(e, new Semaphore(n));
+            total += n;
+        }
+        // the barrier action runs on the last arriving thread, before any of the three is released
+        bond = new CyclicBarrier(total, molecules::incrementAndGet);
+    }
+
+    /** Offer one hydrogen atom. Waits for a hydrogen permit, then for the other two atoms. */
+    public void hydrogen(Runnable releaseHydrogen) throws InterruptedException {
+        atom(Element.HYDROGEN, releaseHydrogen);
+    }
+
+    /** Offer one oxygen atom. Waits for the oxygen permit, then for the two hydrogen. */
+    public void oxygen(Runnable releaseOxygen) throws InterruptedException {
+        atom(Element.OXYGEN, releaseOxygen);
+    }
+
+    /**
+     * Acquire a seat, meet the others, emit, and only then hand the seat back. Releasing the permit after
+     * the emit -- not before the rendezvous -- is what keeps molecule N finished before N+1 can trip.
+     */
+    void atom(Element e, Runnable release) throws InterruptedException {
+        Objects.requireNonNull(release, "release");
+        Semaphore seat = seats.get(e);
+        seat.acquire();                               // at most needed(e) atoms of this element are inside
+        try {
+            bond.await();                             // nobody moves until the whole molecule is here
+            release.run();
+        } catch (BrokenBarrierException broken) {
+            // a CyclicBarrier that saw one cancelled party is broken for everybody, for good, until reset()
+            throw new IllegalStateException("the bond broke: another atom of this molecule was cancelled", broken);
+        } finally {
+            seat.release();                           // AFTER the emit, never before the rendezvous
+        }
+    }
+
+    /** How many molecules the rendezvous has completed. Counted by the barrier action, so it cannot drift. */
+    public long moleculesFormed() { return molecules.get(); }
+}
+
+/** A listener that just counts, to show that the barrier tells somebody without knowing who. */
+final class MoleculeCounter implements MoleculeObserver {
+    private final AtomicLong seen = new AtomicLong();
+    private volatile long lastAtMs;
+
+    /** Remember that one more molecule formed, and when. Cheap, and called outside the barrier's lock. */
+    public void onMolecule(long index, long atMs) { seen.incrementAndGet(); lastAtMs = atMs; }
+
+    /** How many molecules this listener was told about. */
+    public long seen() { return seen.get(); }
+
+    /** The instant the last molecule completed, from the injected clock. */
+    public long lastAtMs() { return lastAtMs; }
+}
+
+/** A demo that proves the three claims: groups of HHO, nobody leaves early, and nothing malforms under load. */
+public class Main {
+
+    /** Runs the four demos in order; the last one is the race the whole design exists for. */
+    public static void main(String[] args) throws Exception {
+        moleculesComeOutInThrees();
+        nobodyLeavesEarly();
+        theSameContractTwoWays();
+        theRace();
+    }
+
+    /** Claim 1: five molecules, thirty threads, and the output is five clean groups of two H and one O. */
+    static void moleculesComeOutInThrees() throws Exception {
+        H2OBarrier barrier = new H2OBarrier();
+        MoleculeCounter counter = new MoleculeCounter();
+        barrier.addObserver(counter);
+        StringBuilder out = new StringBuilder();
+        List<Thread> threads = feed(barrier, out, 5);
+        for (Thread t : threads) t.join(5_000);
+        System.out.println("five molecules, released as: " + group(out.toString(), 3)
+            + "  (the listener was told " + counter.seen() + " times)");
+    }
+
+    /** Claim 2: two hydrogen with no oxygen in sight go to sleep, and the oxygen is what wakes them. */
+    static void nobodyLeavesEarly() throws Exception {
+        H2OBarrier barrier = new H2OBarrier();
+        StringBuilder out = new StringBuilder();
+        AtomicInteger released = new AtomicInteger();
+        Thread h1 = atomThread(barrier, Element.HYDROGEN, out, released);
+        Thread h2 = atomThread(barrier, Element.HYDROGEN, out, released);
+        h1.start(); h2.start();
+        Thread.sleep(200);                            // both are parked on "the molecule is full" for all of this
+        System.out.println("two hydrogen, no oxygen: released so far = " + released.get()
+            + ", still waiting = " + (h1.isAlive() && h2.isAlive()) + ", seats taken = "
+            + barrier.seatedCount(Element.HYDROGEN) + " of 2");
+        long t0 = System.nanoTime();
+        Thread o1 = atomThread(barrier, Element.OXYGEN, out, released);
+        o1.start();
+        h1.join(5_000); h2.join(5_000); o1.join(5_000);
+        System.out.println("the oxygen arrived and all three left together after "
+            + (System.nanoTime() - t0) / 1_000_000 + " ms: " + out + ", molecules = " + barrier.moleculesFormed()
+            + ", threads parked " + barrier.waitCount() + " times and never spun");
+    }
+
+    /** Claim 3: the semaphore-and-CyclicBarrier build satisfies exactly the same contract. */
+    static void theSameContractTwoWays() throws Exception {
+        for (MoleculeBarrier barrier : List.of(new H2OBarrier(), new SemaphoreBarrier())) {
+            StringBuilder out = new StringBuilder();
+            List<Thread> threads = feed(barrier, out, 4);
+            for (Thread t : threads) t.join(5_000);
+            System.out.println(String.format("%-16s", barrier.getClass().getSimpleName()) + " -> "
+                + group(out.toString(), 3) + "  wellFormed=" + wellFormed(out.toString(), 2, 1));
+        }
+    }
+
+    /** Claim 4: a thousand molecules under thirty threads, and every window of three is exactly H, H, O. */
+    static void theRace() throws Exception {
+        final int H_THREADS = 20, O_THREADS = 10, MOLECULES = 1000;   // 2000 hydrogen atoms, 1000 oxygen atoms
+        H2OBarrier barrier = new H2OBarrier();
+        MoleculeCounter counter = new MoleculeCounter();
+        barrier.addObserver(counter);
+
+        StringBuffer out = new StringBuffer();            // append is synchronized: the order is the release order
+        CountDownLatch go = new CountDownLatch(1);
+        // the atoms are a shared pool, not a per-thread quota: a thread supplies one seat at a time, so a
+        // quota that leaves the last two hydrogen atoms on ONE thread would wait for a partner that cannot come
+        AtomicInteger hLeft = new AtomicInteger(2 * MOLECULES), oLeft = new AtomicInteger(MOLECULES);
+        List<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < H_THREADS + O_THREADS; i++) {
+            final boolean isHydrogen = i < H_THREADS;
+            Thread t = new Thread(() -> {
+                try {
+                    go.await();
+                    AtomicInteger pool = isHydrogen ? hLeft : oLeft;
+                    while (pool.getAndDecrement() > 0) {
+                        if (isHydrogen) barrier.hydrogen(() -> out.append("H"));
+                        else barrier.oxygen(() -> out.append("O"));
+                    }
+                } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }, (isHydrogen ? "H" : "O") + "-" + i);
+            threads.add(t);
+        }
+        threads.forEach(Thread::start);
+        long t0 = System.nanoTime();
+        go.countDown();
+        for (Thread t : threads) t.join(60_000);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+
+        String released = out.toString();
+        System.out.println("race: " + released.length() + " atoms released in " + ms + " ms ("
+            + (ms == 0 ? "instant" : MOLECULES * 1000L / ms + " molecules/second")
+            + "), threads parked " + barrier.waitCount() + " times");
+        System.out.println("every window of three is exactly two H and one O: " + wellFormed(released, 2, 1)
+            + ", molecules = " + barrier.moleculesFormed() + ", the listener saw " + counter.seen());
+        if (!wellFormed(released, 2, 1) || barrier.moleculesFormed() != MOLECULES || counter.seen() != MOLECULES)
+            throw new AssertionError("a molecule was malformed, lost or double counted");
+    }
+
+    /** Start the threads for n molecules of water: 2n hydrogen and n oxygen, all appending to one buffer. */
+    static List<Thread> feed(MoleculeBarrier barrier, StringBuilder out, int molecules) {
+        List<Thread> threads = new ArrayList<>();
+        AtomicInteger released = new AtomicInteger();
+        for (int i = 0; i < molecules; i++) {
+            threads.add(atomThread(barrier, Element.HYDROGEN, out, released));
+            threads.add(atomThread(barrier, Element.HYDROGEN, out, released));
+            threads.add(atomThread(barrier, Element.OXYGEN, out, released));
+        }
+        Collections.shuffle(threads);                 // arrive in any order: that is the point
+        threads.forEach(Thread::start);
+        return threads;
+    }
+
+    /** One thread offering one atom, whose release appends its symbol to the shared buffer. */
+    static Thread atomThread(MoleculeBarrier barrier, Element e, StringBuilder out, AtomicInteger released) {
+        return new Thread(() -> {
+            try {
+                Runnable emit = () -> { synchronized (out) { out.append(e.symbol()); } released.incrementAndGet(); };
+                if (e == Element.HYDROGEN) barrier.hydrogen(emit); else barrier.oxygen(emit);
+            } catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
+        }, e.symbol() + "-atom");
+    }
+
+    /** True when every window of `h + o` released atoms holds exactly h hydrogen and o oxygen. */
+    static boolean wellFormed(String released, int h, int o) {
+        int size = h + o;
+        if (released.length() % size != 0) return false;
+        for (int i = 0; i < released.length(); i += size) {
+            int gotH = 0, gotO = 0;
+            for (int k = 0; k < size; k++) {
+                if (released.charAt(i + k) == 'H') gotH++; else gotO++;
+            }
+            if (gotH != h || gotO != o) return false;
+        }
+        return true;
+    }
+
+    /** Split a release string into readable groups, for printing: HHOHOH -> "HHO HOH". */
+    static String group(String released, int size) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < released.length(); i += size) {
+            if (i > 0) sb.append(' ');
+            sb.append(released, i, Math.min(i + size, released.length()));
+        }
+        return sb.toString();
+    }
+}

@@ -1,0 +1,708 @@
+# In-memory Database LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"inmem-db/Main.java").read_text()
+ext   = (H/"inmem-db/Extensions.java").read_text()
+tests = (H/"inmem-db/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("insert", 30, [("a row, typed, from a client", "four values in column order"),
+                        ("check what needs no table", "types, NOT NULL, CHECK: no lock yet"),
+                        ("take the table, check the key", "is this primary key still free?"),
+                        ("write the row AND every index", "one method, so they cannot drift")]),
+        ("commit",  165, [("unlock the tables first", "held since the first touch"),
+                          ("then tell the triggers", "audit, a count, a write-ahead log"),
+                          ("a rollback tells them nothing", "the undo log puts the rows back"),
+                          ("the indexes were never told", "state: rolled back with the row")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 155 + k*260
+        pf += _bx(x, y, 245, 54, b[0], b[1], acc=(k == 2 if lab == "insert" else k == 0))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+245, y+27, x+260), True)
+pf += _ar("M797 84 V95", dash=True) + _bx(642, 95, 310, 40, "refused: nothing written, no lock taken", "", dash=True)
+pf += _tx(88, 266, "query", "var(--acc)", 13) + _tx(155, 266, "the row with id 41?  everyone in Pune?  everyone aged 30 to 40?  and which of those was a scan?", "var(--text)", 12, "start")
+pf += _tx(615, 305, "many clients at once: one primary key names exactly one row, ever, and no index may ever disagree with the rows", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 320, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("14:02  insert user 41", ["one hash put, two index inserts", "about 2 microseconds of lock",
+                                "the trigger hears after the unlock"], True),
+      ("14:05  two clients, id 41", ["both check, one writes", "the other: duplicate primary key",
+                                     "one row, not two, and no lost row"], True),
+      ("14:06  age between 30 and 40", ["a subMap on the age index", "6 rows examined of 100,000",
+                                        "the same query on name: a scan"], False),
+      ("14:07  a client disappears", ["3 orders deleted in a transaction", "rollback puts all three back,",
+                                      "and their index entries with them"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+137) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+137)
+    pe += _card(x, 60, 275, 110, t, lines, acc=acc)
+P_EX = _mv(1230, 185, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Create a table: typed columns, one primary key, NOT NULL, and a CHECK the caller hands in.</li>
+<li>Insert, update, delete and read rows, with the where-clause as an object rather than a string.</li>
+<li>Secondary indexes for equality and for ranges, buildable at any time over rows that already exist.</li>
+<li>Transactions: BEGIN, COMMIT, ROLLBACK, SAVEPOINT; a single statement runs in its own transaction.</li>
+<li>A write is refused by a duplicate key, a wrong type, a null, a broken CHECK or a foreign key.</li>
+<li>Triggers hear about every committed change exactly once, as one batch per transaction.</li>
+<li>Say which access path a query used, so "is this a scan?" has an answer.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many clients at once: one primary key names exactly one row, and no index may disagree with the rows.</li>
+<li>By primary key O(1); by an indexed value O(log n) plus one step per hit; a scan called a scan.</li>
+<li>Rules, triggers and the locking policy swappable without opening the table or the transaction.</li>
+<li>One source of truth: rows and indexes move together, through one method, or not at all.</li>
+<li>Nothing half-done: a refused write and an abandoned transaction leave the database exactly as it was.</li>
+<li>Rollback costs what the transaction touched, never what the table holds.</li>
+<li>In memory, one process, no durability (say it; a write-ahead log is a follow-up).</li></ul></div></div>
+'''
+
+PROMPT = ('"Build me a small in-memory database. Tables with typed columns and a primary key, indexes so lookups '
+          'and range queries are fast, constraints, and transactions that can be rolled back &mdash; and several '
+          'clients hitting it at once. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A database here is a box of tables. A table has a fixed '
+ 'shape &mdash; a list of columns, each with a type, one of them the primary key &mdash; and a pile of rows. '
+ 'Clients insert rows, change them, delete them and ask for them back, and the asking is the interesting part: by '
+ 'primary key ("give me row 41"), by another column ("everyone in Pune"), or by a range ("everyone aged thirty to '
+ 'forty"). None of those may turn into reading every row, so the table keeps indexes, which are just other maps '
+ 'pointing at the same rows. Writes can be grouped into a transaction that either all happens or none of it does, '
+ 'so there has to be a way to put things back. And several clients do all this at the same moment, which is where '
+ 'the two invariants live: a primary key names exactly one row, ever, and no index may ever point at a row that is '
+ 'not there or miss one that is.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that creates a table, inserts, queries three ways and rolls a transaction back. The '
+ 'interviewer is watching for, in this order: the questions you ask before typing (what makes a row valid, and '
+ 'what two clients are promised, are the first two); which classes exist and which one owns the rows; an insert '
+ 'end to end; what happens when two clients insert the same key at the same instant; where the rules that will '
+ 'change live &mdash; a new constraint, a new index, a new listener &mdash; so each is a new class and not an edit; '
+ 'and what the database looks like after a write is refused half way. Then the twists: a foreign key, savepoints, '
+ 'a query planner, joins, MVCC, a write-ahead log, sharding.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Key-value, or tables with typed columns and a primary key?</td><td>Tables, fixed schema, one primary key</td><td>A Schema, a type check, and a row as cells in column order (moves 1, 5)</td></tr>'
+ '<tr><td>Which reads must be fast: by key, by a column, by range?</td><td>All three</td><td>A hash map on the key and TreeMap secondary indexes (move 5)</td></tr>'
+ '<tr><td>Transactions? Savepoints? Or one statement at a time?</td><td>Transactions with savepoints; a lone statement auto-commits</td><td>An undo log per transaction, and the order at the write (move 6)</td></tr>'
+ '<tr><td>What do two clients at the same instant get to assume?</td><td>Serialisable, by locking, and say what it costs</td><td>Strict two-phase locking, one lock per table (moves 4, 7)</td></tr>'
+ '<tr><td>Lock the table or the row?</td><td>The table first; row locks are the named upgrade</td><td>One lock per table, held first touch to end (moves 4, 8)</td></tr>'
+ '<tr><td>When do indexes and listeners learn about a change?</td><td>Indexes with the row; listeners only after a commit</td><td>Index maintenance inside apply(); triggers after the unlock (move 6)</td></tr>'
+ '<tr><td>Does it have to survive a restart?</td><td>No: in memory, one process</td><td>No log yet; a write-ahead log is one more trigger (move 12)</td></tr>'
+ '<tr><td>Joins, a planner, MVCC, sharding?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One afternoon, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> tables have a fixed schema and one primary key; values are long, '
+ 'String and boolean, and a wrong type is refused before anything is locked; reads are by key, by an indexed '
+ 'value or by range, and anything else is a scan I will admit to; one lock per table, taken at the first touch '
+ 'and held to the end of the transaction, which makes it serialisable and makes deadlock possible; in memory, one '
+ 'process. Named as out of scope: durability, MVCC, joins, a cost-based planner, sharding &mdash; each is a '
+ 'follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a DATABASE holds TABLES; a TABLE has a SCHEMA of COLUMNS, ROWS and INDEXES; a TRANSACTION collects UNDO ENTRIES; a RULE checks; a TRIGGER is told", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(25, 150, "Database", "tables, triggers", 1), (190, 150, "Table", "rows, indexes, lock", 1),
+                          (355, 145, "Schema", "columns, the key", 1), (515, 120, "Row", "the cells", 1),
+                          (650, 130, "Index", "value to keys", 1), (795, 155, "Transaction", "undo log, locks", 1),
+                          (965, 115, "Rule", "no state", 0), (1095, 115, "Predicate", "a question", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a check, a question, a lambda", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("is this row allowed?", "RowRule / TableRule  (no state: pure)", "rule.check(schema, row)"),
+                                       ("find the rows that match", "Table  (owns the rows and the indexes)", "table.select(predicate)"),
+                                       ("write the row and its indexes", "Table  (the one door for every write)", "table.apply(before, after)"),
+                                       ("remember how to undo it", "Txn  (owns the undo log and the locks)", "txn.insert / update / delete"),
+                                       ("tell whoever is listening", "Database  (owns the triggers)", "db.publish(batch)")]):
+    y = 20 + k*52
+    m2 += _bx(25, y, 320, 42, verb, "the verb") + _ar("M345 %s H415" % (y+21), True)
+    m2 += _bx(415, y, 420, 42, cls, "the class whose state it touches", acc=True) + _ar("M835 %s H905" % (y+21), True)
+    m2 += _bx(905, y, 300, 42, meth, "the method")
+m2 += _tx(615, 300, "a verb that touches two classes goes to the one that owns both: the transaction owns the undo log and the locks, so it orchestrates", "var(--muted)", 11)
+m2 += _tx(615, 319, "and a delete is not a special verb: it is apply(row, null), which is why an undo is apply(after, before) and nothing else", "var(--muted)", 11)
+MV[2] = _mv(1230, 332, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(25, 95, 250, 90, "Database / Table", "configure, addRule, addTrigger", acc=True)
+for k, (t, sub, impl) in enumerate([("RowRule", "judged from the row alone", "TypeRule / NotNullRule / CheckRule"),
+                                    ("TableRule", "has to read a table", "PrimaryKeyRule / ForeignKeyRule"),
+                                    ("Trigger", "who is told, after the commit", "AuditTrigger / CityCount / WalTrigger"),
+                                    ("LockPolicy", "who may touch a table", "StrictTableLocking / NoLocking"),
+                                    ("Clock", "where time comes from", "System::currentTimeMillis / a test's long[]")]):
+    y = 16 + k*52
+    m3 += _ar("M275 140 H330 V%s H390" % (y+21), True, True) + _bx(390, y, 290, 42, t, sub, dash=True)
+    m3 += _bx(740, y, 465, 42, impl, "the classes that can be handed in") + _ar("M740 %s H680" % (y+21))
+m3 += _tx(615, 300, "dashed lavender = handed in. The table never builds a rule, so a foreign key is a new class and one addRule line", "var(--muted)", 11)
+m3 += _tx(615, 319, "and one wrapper sits over the others: SafeTrigger(t) wraps EVERY trigger, so a listener written next year cannot break a commit", "var(--acc)", 11)
+MV[3] = _mv(1230, 332, m3)
+
+# move 4: the gap, and one owner with one lock
+m4 = _D + _bx(25, 30, 200, 44, "client A: INSERT id 41", "id 41 free? yes") + _bx(25, 112, 200, 44, "client B: INSERT id 41", "id 41 free? yes")
+m4 += _bx(350, 71, 190, 44, "users.byPk", "no row 41 yet", acc=True)
+m4 += _ar("M225 52 H350 V71") + _ar("M225 134 H350 V115") + _tx(288, 42, "read", "var(--muted)", 10.5) + _tx(288, 162, "read", "var(--muted)", 10.5)
+m4 += '<rect x="575" y="20" width="300" height="145" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(725, 45, "the gap", RED, 12) + _tx(725, 70, "both were told the key was free", RED, 11) + _tx(725, 90, "both write: one row is silently lost,", RED, 11) + _tx(725, 110, "and two clients were told they wrote it", RED, 11)
+m4 += _tx(725, 145, "fix: check and write as ONE step", "var(--text)", 11)
+m4 += _bx(905, 45, 300, 95, "Table.lock", "check the key, write the row and every index", acc=True)
+m4 += _tx(1055, 178, "the lock lives where the shared state lives:", "var(--muted)", 10.5)
+m4 += _tx(1055, 196, "one lock per TABLE, so two tables never wait", "var(--muted)", 10.5)
+MV[4] = _mv(1230, 212, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("give me row 41", "HashMap&lt;pk, Row&gt;", "O(1)"),
+                                      ("everyone in Pune", "TreeMap&lt;value, LinkedHashSet&lt;pk&gt;&gt;", "O(log n) + 1 per hit"),
+                                      ("everyone aged 30 to 40", "the same TreeMap, subMap(lo, hi)", "O(log n) + 1 per hit"),
+                                      ("how do I put this transaction back?", "ArrayList&lt;UndoEntry&gt;, appended", "O(1) add, O(k) undo"),
+                                      ("what must the triggers be told?", "ArrayList&lt;Change&gt;, one per row change", "O(1) append"),
+                                      ("which table is called users?", "ConcurrentHashMap&lt;name, Table&gt;", "O(1)")]):
+    y = 18 + k*44
+    m5 += _bx(25, y, 350, 36, q, "the question") + _ar("M375 %s H430" % (y+18), True)
+    m5 += _bx(430, y, 470, 36, shape, "the shape", acc=True) + _ar("M900 %s H955" % (y+18), True) + _bx(955, y, 250, 36, cost, "")
+m5 += _tx(615, 300, "the index holds primary keys, not rows, so a row moves without the index having to be rebuilt: one map is the truth, the rest are pointers", "var(--muted)", 11)
+m5 += _tx(615, 319, "and a row with null in an indexed column is simply not in that index, so a query for it falls back to a scan -- say that out loud", "var(--muted)", 11)
+MV[5] = _mv(1230, 332, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D + _bx(25, 30, 190, 44, "ACTIVE", "holding its tables", acc=True)
+m6 += _bx(300, 20, 190, 40, "COMMITTED", "unlock, then publish") + _bx(300, 88, 190, 40, "ROLLED_BACK", "undo, then unlock")
+m6 += _ar("M215 45 H300", True) + _ar("M215 62 H300 V88", True)
+m6 += _tx(258, 148, "any operation after the end throws", "var(--muted)", 10.5)
+m6 += '<rect x="545" y="14" width="665" height="200" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(877, 38, "the order at an insert, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1 build the row and check types, NOT NULL, CHECK -- no lock held, nothing written",
+                       "2 take the table's lock, and keep it until the transaction ends",
+                       "3 now the checks that must READ the table: is this primary key free? does the parent row exist?",
+                       "4 only now apply: the row and every index, in one method that cannot fail half way",
+                       "5 keep the before-image; commit unlocks first and tells the triggers after",
+                       "a refused write leaves every row and every index exactly as they were;",
+                       "an abandoned transaction is put back from its own undo log, newest change first"]):
+    m6 += _tx(560, 62 + k*22, l, "var(--muted)" if k > 4 else "var(--text)", 11, "start")
+m6 += _tx(615, 234, "an update is the same order with one honest difference: the new row can only be built after the read, so its checks happen inside the lock -- still before any write", "var(--muted)", 11)
+MV[6] = _mv(1230, 248, m6)
+
+# move 7: what is inside the lock, and ten clients at the same instant
+m7 = _D + _card(25, 20, 555, 150, "inside the lock: about 2 microseconds a statement",
+                ["one hash lookup: is this primary key taken?", "one hash put: the row",
+                 "two red-black tree inserts, about 17 compares each", "a five-statement transaction: about 10 microseconds",
+                 "and it is held from the first touch to COMMIT"], acc=True)
+m7 += _ar("M580 95 H650", True) + _tx(615, 85, "unlock", "var(--acc)", 10.5)
+m7 += _card(650, 20, 555, 150, "outside the lock: milliseconds",
+            ["building and type-checking the row: before the lock", "the write-ahead log's fsync: about 1 ms, after commit",
+             "the trigger that rebuilds a search index: 5 ms, after", "the client thinking between two statements: seconds",
+             "-- which is the only reason the lock is ever hot"])
+m7 += _tx(615, 200, "ten clients commit a five-statement transaction on the same table at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 25 + k*119
+    m7 += _bx(x, 215, 107, 40, "client %d" % (k+1), "waits %d us" % (k*10), acc=(k == 9))
+m7 += _tx(615, 283, "the tenth client waits ninety microseconds for the table and then a millisecond for its own log flush, which happens after the unlock:", "var(--muted)", 11)
+m7 += _tx(615, 301, "one at a time is true, and nobody can tell, as long as nothing slow is allowed inside the lock -- so never hold a transaction open across a network round trip", "var(--muted)", 11)
+MV[7] = _mv(1230, 315, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one lock per table: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["a statement holds the lock about 2 us; a five-statement transaction, 10 us",
+                       "one table, one writer at a time: 100,000 write transactions a second",
+                       "a chatty client that keeps a transaction open across two round trips",
+                       "holds it 200 us instead, and the same table drops to 5,000 a second",
+                       "reads take the lock too, so a read-heavy table is what hurts first"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 keep the lock short, hold nothing slow", "already done: validate before it, publish after it"),
+                              ("2 one lock per row, taken in sorted order", "two writers on different rows never meet -- but phantoms come back"),
+                              ("3 versions per row (MVCC): readers never block", "a reader takes a snapshot; the price is garbage and write skew")]):
+    m8 += _bx(600, 58 + k*50, 605, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two clients insert the same primary key", "the key check and the write inside one lock; test 1: 50 threads, one winner"),
+                                ("a wrong type, a null, a CHECK that fails", "refuse before the lock is taken; test 3: four refusals, nothing written"),
+                                ("an update changes an indexed column", "one door removes the old key and adds the new; test 4: the old key finds nothing"),
+                                ("a client disappears mid-transaction", "replay the undo log backwards; test 7: every row and index as before"),
+                                ("the search-index listener is down", "every trigger is wrapped, and it runs after the commit; test 8"),
+                                ("two transactions, two tables, opposite orders", "tryLock with a timeout; the loser rolls back; test 9: nobody hangs")]):
+    y = 18 + k*42
+    m9 += _bx(25, y, 375, 38, bad, "") + _ar("M400 %s H445" % (y+19), True) + _bx(445, y, 760, 38, fix, "", acc=True)
+m9 += _tx(615, 292, "every claim this design makes has a test: FailureTests.java runs nine of them, forty-three checks, and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 305, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 200), ("the line in the code", 290), ("what it buys", 840)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface LockPolicy / RowRule / TableRule / Trigger, handed in", None), ("a new constraint is a class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("addTrigger wraps EVERY trigger in SafeTrigger", None), ("no listener can break a commit", None)],
+          [("Observer", "var(--text)"), ("move 6", None), ("db.publish(batch) after the unlock, at commit only", None), ("a rolled-back row reaches nobody", None)],
+          [("Memento", "var(--text)"), ("move 6", None), ("the old Row object IS the before-image; undo = apply(after, before)", None), ("rollback costs nothing to prepare", None)],
+          [("Command", "var(--text)"), ("move 6", None), ("an UndoEntry is one reversible change; a WAL line is the same thing as text", None), ("undo, replay and a replica feed are one idea", None)],
+          [("Interpreter", "var(--text)"), ("move 5", None), ("Eq / Between / And as objects the planner can READ", None), ("a where-clause can choose an index", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the Database is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh database", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("ColType's EnumMap is already the registry of types", "var(--muted)"), ("it earns the name when schemas arrive as DDL text", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("not yet", None), ("createTable(name, pk, columns...) is three required things", "var(--muted)"), ("it earns a place when columns gain defaults", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 335, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 350, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 430), ("the line that shows it", 540)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Index answers one question. Table owns rows and the lock. Txn owns the undo log.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("ForeignKeyRule is a new file plus one addRule line", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("the same race runs against StrictTableLocking and NoLocking, byte for byte", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("Predicate, RowRule, TableRule, Trigger, Clock: one method. LockPolicy: two -- a lock is given back", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 12", None), ("db.configure(policy, timeout);  db.setClock(() -&gt; now[0]);  table.addRule(...)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "a foreign key, a CHECK, unique", "a new class behind RowRule or TableRule plus one addRule line", "", "move 3"),
+        ("someone new wants to know", "a log, a replica, a count", "one more trigger; the table and the lock do not change", "", "move 6"),
+        ("a new step in a life", "PREPARED, for two-phase commit", "one more transaction state and one more checked transition", "", "move 6"),
+        ("a new invariant across rows", "a foreign key, a balance floor", "the check and the writes inside the SAME lock: all or nothing", "", "move 4"),
+        ("state that must outlive the process", "persist it; two servers", "one more trigger appends the committed batch to a log, and the row update becomes", "UPDATE users SET city = ?, version = version + 1 WHERE id = ? AND version = ?", "moves 3 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(25, y, 330, 44, t, sub) + _ar("M355 %s H415" % (y+22), True) + _bx(415, y, 665, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the table, the transaction and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>database</b> holds <b>tables</b>; a table has a <b>schema</b> of "
+ "<b>columns</b>, a pile of <b>rows</b> and some <b>indexes</b>; a <b>transaction</b> groups writes and collects "
+ "<b>undo entries</b>; a <b>rule</b> decides whether a row is allowed; a <b>trigger</b> is told what changed. A "
+ "table has rows, indexes and a lock, all of which change: a class. A row is cells that never change once "
+ "written &mdash; an update builds a new row rather than editing one, and that single decision is what makes "
+ "undo free later. A schema is fixed at create time, so one instance is shared by every row of the table. An "
+ "index has its own map: a class. A transaction has an undo log and a set of held tables: a class. A rule and a "
+ "where-clause have no state at all &mdash; they are questions &mdash; so they are interfaces, and a lambda is a "
+ "valid implementation of either.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Is this row allowed?\" touches nothing: it reads a row and either throws or returns, so it belongs to a pure "
+ "rule. \"Find the rows that match\" touches the rows and the indexes, so it belongs to the table: "
+ "<code>table.select(predicate)</code>. \"Write the row and its indexes\" touches the same state, so it is the "
+ "table again &mdash; and deliberately one method, <code>table.apply(before, after)</code>, so that there is "
+ "exactly one place in the system where a row and its indexes can get out of step. \"Remember how to undo it\" "
+ "touches the undo log and the locks, which the transaction owns, so the transaction orchestrates. \"Tell "
+ "whoever is listening\" touches the trigger list, which the database owns. Notice what is not a separate verb: "
+ "a delete is <code>apply(row, null)</code> and an undo is <code>apply(after, before)</code> &mdash; the same "
+ "door, with the arguments swapped.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "What makes a row valid will change: a CHECK today, a foreign key in five minutes, a unique second column after "
+ "that. Who is told will change: an audit log today, a materialised count, a write-ahead log, a replica feed. How "
+ "clients are kept out of each other's way will change: a table lock today, row locks or MVCC later. Each becomes "
+ "a small interface the table or the database is <i>given</i> and never builds. There are two rule interfaces, not "
+ "one, and the split is the interesting part: a <code>RowRule</code> can be judged by looking at the row alone, so "
+ "it runs before any lock is taken; a <code>TableRule</code> has to read a table &mdash; is this key free, does "
+ "the parent row exist &mdash; so it can only run inside the lock. This is where the patterns come from: a "
+ "swappable rule behind an interface is <b>Strategy</b>; something that announces a change without knowing who is "
+ "listening is <b>Observer</b>; and the wrapper the database puts around every trigger it is handed, so a broken "
+ "listener cannot break a commit, is <b>Decorator</b>. I do them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two clients insert the same primary key at the same instant. Both ask \"is 41 free?\", both are told yes, both "
+ "write, and one row is simply gone &mdash; while both clients were told their insert succeeded, which is worse "
+ "than an error. So the check and the write have to be one step, in the class that owns the rows: the table. The "
+ "same gap eats an update: two clients read a counter as 100, both write 101, and one increment vanishes. The lock "
+ "is per <i>table</i>, not per database, which is the whole trick &mdash; a thousand tables take writes in "
+ "parallel and never wait for each other. And it is held from the first touch until the transaction ends, not just "
+ "for one statement: that is what makes the undo log sound, because nobody else can change a row between the "
+ "moment this transaction saved its before-image and the moment it decides to put it back.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"Give me row 41\" is a hash map from primary key to row: one lookup at any table size. \"Everyone in Pune\" is "
+ "a secondary index &mdash; a map from a column value to the primary keys that hold it &mdash; and it is a TreeMap "
+ "rather than a HashMap for one reason: \"everyone aged thirty to forty\" is then a <code>subMap</code> instead of "
+ "a scan. The index holds keys, not rows, so a row can be replaced without the index being rebuilt. \"How do I put "
+ "this transaction back?\" is a list of before-images, appended, replayed backwards. \"What must the triggers be "
+ "told?\" is a second list, one entry per row change, published only if the transaction commits. The where-clause "
+ "is a shape too: <code>Eq</code>, <code>Between</code> and <code>And</code> are objects rather than lambdas "
+ "precisely so the planner can <i>read</i> them and reach for an index; a lambda predicate is always a scan, and "
+ "the code says so.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "A transaction is ACTIVE, then COMMITTED or ROLLED_BACK, and anything asked of it afterwards throws rather than "
+ "quietly doing nothing. Writing that down forces the question the interviewer will ask: what is the state of the "
+ "database when a write is refused half way? The answer is an order. Build the row and check what can be checked "
+ "without a table &mdash; types, NOT NULL, CHECK &mdash; with no lock held and nothing written. Take the lock. Run "
+ "the checks that must read the table: is this primary key free, does the parent row exist. Only then apply, and "
+ "apply is one method that moves the row and every index together. Keep the before-image. At commit, release the "
+ "locks first and publish to the triggers after, because a listener must never run while a table is held, and must "
+ "never hear about a row that was later rolled back &mdash; which is exactly why an index (state, rolled back with "
+ "the row) and a trigger (an announcement, only ever about committed rows) are told at different moments. An "
+ "update has one honest difference: its new row can only be built after reading the old one, so its checks run "
+ "inside the lock, still before any write.", 6),
+("Move 7: yes, the lock makes one table's transactions happen one at a time. Ask for how long, and what is inside it.",
+ "Inside the lock for one statement there is a hash lookup, a hash put and one red-black tree insert per secondary "
+ "index &mdash; about forty operations, call it two microseconds &mdash; so a five-statement transaction holds the "
+ "table for about ten. Everything expensive is outside: the row is built and type-checked before the lock is "
+ "taken, and the write-ahead log's flush and the search-index rebuild happen after the commit released it, each "
+ "wrapped so it cannot throw into the caller. Ten clients committing on the same table at the same instant means "
+ "the tenth waits about ninety microseconds. The number that actually hurts is not in this list: it is the client "
+ "that runs <code>BEGIN</code>, goes away for two network round trips, and comes back to commit. That holds the "
+ "table for two hundred microseconds or two seconds, and it is why real databases tell you to keep transactions "
+ "short rather than to buy a faster disk.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "Two microseconds a statement, ten for a transaction, one table at a time: a hundred thousand write transactions "
+ "a second on a single table, and tables do not wait for each other. A chatty client that holds the transaction "
+ "open across two round trips turns ten microseconds into two hundred and drops the same table to five thousand a "
+ "second &mdash; so the first rung of the ladder is not a data structure, it is keeping the lock short: validate "
+ "before it, publish after it, never wait for a human inside it. The second rung is a lock per row instead of per "
+ "table, taken in sorted order so two transactions wanting the same pair cannot deadlock; the honest cost is that "
+ "a table lock also stopped rows from <i>appearing</i>, so with row locks a repeated range query can return a new "
+ "row, and preventing that needs the range itself locked. The third rung is versions per row: a reader takes a "
+ "snapshot and never blocks at all, which is what every real database ended up doing, and it costs a garbage "
+ "collector for old versions and gives up serialisability for snapshot isolation. Say the arithmetic first: "
+ "climbing to rung three without it is complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Two clients insert the same primary key (the check and the write are one step under one lock; fifty threads, one "
+ "winner, one row). A wrong type, a null in a NOT NULL column, a CHECK that fails, the wrong number of values "
+ "(refused before the lock is even taken, and the table is left unlocked). An update that changes an indexed "
+ "column (one door removes the old key and adds the new, so the old value finds nothing afterwards). A client that "
+ "disappears half way through a transaction (the undo log, replayed newest first, restores every row and every "
+ "index entry). The listener that rebuilds a search index being down (it is wrapped, and it runs after the commit, "
+ "so the commit is already safe and the failure is counted rather than swallowed). Two transactions that want two "
+ "tables in opposite orders (a wait with a timeout, and the loser rolls back and can retry &mdash; nobody hangs). "
+ "Each of those is a few lines in FailureTests.java; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Strategy is move 3: what makes a row valid, who is told, and who may touch a table are all rules that change, so "
+ "each sits behind a small interface the database is handed. Decorator is the same move's wrapper &mdash; "
+ "<code>addTrigger</code> puts every trigger inside a <code>SafeTrigger</code>, so the guarantee \"a listener "
+ "cannot break a commit\" is written once instead of copied into each listener. Observer is move 6's rule that a "
+ "listener hears about committed changes only, and only after the locks are gone. Memento is the one this problem "
+ "really earns: the before-image is the old <code>Row</code> object itself, so a rollback costs nothing to prepare "
+ "&mdash; it is free precisely because rows are immutable. Command sits next to it: an undo entry is one "
+ "reversible change, which is why the same list serialises into a write-ahead log and, later, into a replica "
+ "feed. Interpreter is move 5: the where-clause is a little tree the planner reads rather than a lambda it cannot "
+ "see into. Singleton earned nothing &mdash; the database is handed to its callers, so a test builds a fresh one "
+ "per case. Factory has not earned it yet: the map from column type to Java class is already the registry, and it "
+ "becomes a factory the day schemas arrive as DDL text. Builder is tempting for a table with many columns, and the "
+ "honest answer is \"not yet\": create takes a name, a key and the columns, all required. A pattern without a move "
+ "behind it is decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "S: each class has one reason to change, which move 2 gave you &mdash; an index changes when the answer to one "
+ "question changes, the table when storage does, the transaction when transaction rules do, and nobody does two of "
+ "those. O: a foreign key is a new file and one <code>addRule</code> line; nothing in Table or Txn is opened. L: "
+ "the same fifty-thread race runs byte-identically against <code>StrictTableLocking</code> and "
+ "<code>NoLocking</code> and nothing asks which policy it got &mdash; which is how the demo can print the lost "
+ "update appearing and then not appearing. I: five interfaces, four of them one method, so a fake in a test is a "
+ "lambda; <code>LockPolicy</code> has two because a lock has to be given back. D: the database is handed its lock "
+ "policy, its clock and its triggers, which is exactly why a test can hand it a clock that says last Tuesday and a "
+ "trigger that throws on purpose.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (a foreign key, a CHECK, a second unique column) is a new class behind <code>RowRule</code> or "
+ "<code>TableRule</code> plus one line &mdash; and which of the two it is tells you whether it runs before or "
+ "inside the lock. Someone new who wants to know (a write-ahead log, a replica feed, a materialised count, a "
+ "search index) is one more trigger; the table and the lock do not change. A new step in a life (PREPARED, so two "
+ "databases can commit together) is one more transaction state and one more checked transition. A new invariant "
+ "across rows or tables (a foreign key, a balance that must not go negative) is the check and the writes inside "
+ "the <i>same</i> lock, all or nothing. And state that must outlive the process is the fifth: a trigger appends "
+ "every committed batch to a log before commit returns, replay rebuilds the map, and on a real database the "
+ "in-memory read-modify-write becomes <code>UPDATE users SET city = ?, version = version + 1 WHERE id = ? AND "
+ "version = ?</code> &mdash; zero rows updated means somebody got there first, which is the database doing the "
+ "same atomic step the lock did. For all five the table, the transaction and the tests do not change; that is the "
+ "test that the derivation was right. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, BookMyShow) and the class diagram, the lock, the "
+ "tests, the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and "
+ "nothing is named before the move that produced it. On this problem two moves carry most of the weight: move 5, "
+ "because a database is nothing but the right collection behind each question, and move 6, because the order of "
+ "operations is what a transaction actually is.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the transaction, what it records, and the policies handed in
+put("txn", 25, 20, 245, "Txn",
+    ["db: Database", "id: long", "undo: List&lt;UndoEntry&gt;", "pending: List&lt;Change&gt;",
+     "held: LinkedHashSet&lt;Table&gt;", "state: TxnState"],
+    ["insert(table, values...)", "update(table, where, set)", "delete(table, where)", "select(table, where)",
+     "savepoint() / rollbackTo(n)", "commit() / rollback()", "explain(table, where)"])
+put("undo", 25, 322, 245, "UndoEntry", ["table: Table", "before: Row", "after: Row"], [])
+put("change", 25, 424, 245, "Change", ["table: String", "schema: Schema", "kind: ChangeKind", "before / after: Row"], [])
+put("plan", 25, 550, 245, "Plan", ["how: String", "candidates: List&lt;Row&gt;"], [])
+put("lockp", 25, 640, 245, "LockPolicy", [], ["acquire(table, timeoutMs)", "release(table)"], "interface")
+put("locki", 25, 734, 245, "StrictTableLocking", [], ["tryLock(table, timeout)", "NoLocking: does nothing"])
+put("clock", 25, 818, 245, "Clock", [], ["nowMs(): long"], "interface")
+# centre column: the root and what it owns
+put("db", 320, 20, 340, "Database",
+    ["tables: Map&lt;name, Table&gt;", "triggers: List&lt;SafeTrigger&gt;", "locks: LockPolicy", "clock: Clock",
+     "lockTimeoutMs: long"],
+    ["createTable(name, pk, cols...)", "configure(policy, timeoutMs)", "addTrigger(t) / setClock(c)",
+     "begin(): Txn", "insert / update / delete / select", "publish(batch)"])
+put("table", 320, 268, 340, "Table",
+    ["name: String", "schema: Schema", "byPk: Map&lt;pk, Row&gt;", "indexes: Map&lt;col, Index&gt;",
+     "rowRules / tableRules", "lock: ReentrantLock"],
+    ["createIndex(column): Index", "checkRow(row) / checkTable(...)", "apply(before, after)",
+     "plan(where): Plan", "select(where): List&lt;Row&gt;", "row(pk) / allRows()"])
+put("index", 320, 560, 340, "Index",
+    ["column: String", "tree: TreeMap&lt;value, Set&lt;pk&gt;&gt;"],
+    ["add(row, pk) / remove(row, pk)", "eq(value): Set&lt;pk&gt;", "range(lo, hi): List&lt;pk&gt;", "keyCount(): int"])
+# third column: the data types and the enums
+put("schema", 700, 20, 230, "Schema", ["cols: List&lt;Column&gt;", "pos: Map&lt;name, int&gt;", "pk: int"],
+    ["pos(name): int", "pkIndex() / pkName()", "col(i): Column"])
+put("column", 700, 200, 230, "Column", ["name: String", "type: ColType", "notNull: boolean"], [])
+put("row", 700, 308, 230, "Row", ["cells: Object[]", "version: long", "atMs: long"],
+    ["get(schema, col)", "pk(schema): Object", "with(schema, set, ...)", "show(schema): String"])
+put("coltype", 700, 488, 230, "ColType", ["INT, TEXT, BOOL"], ["accepts(v): boolean"], "enum")
+put("ckind", 700, 588, 230, "ChangeKind", ["INSERT, UPDATE, DELETE"], [], "enum")
+put("tstate", 700, 664, 230, "TxnState", ["ACTIVE, COMMITTED,", "ROLLED_BACK"], [], "enum")
+# fourth column: the rules and the listeners, handed in
+put("pred", 950, 20, 250, "Predicate", [], ["test(schema, row): boolean"], "interface")
+put("predi", 950, 94, 250, "Eq | Between | And | All", [], ["test(...)", "read by the planner"])
+put("rowrule", 950, 194, 250, "RowRule", [], ["check(schema, row)"], "interface")
+put("rowrulei", 950, 268, 250, "TypeRule | NotNull | Check", [], ["throws ConstraintViolation"])
+put("tablerule", 950, 348, 250, "TableRule", [], ["check(txn, table, b, a)"], "interface")
+put("tablerulei", 950, 422, 250, "PrimaryKey | ForeignKey", [], ["reads the table, in the lock"])
+put("trigger", 950, 502, 250, "Trigger", [], ["afterCommit(batch)"], "interface")
+put("safet", 950, 576, 250, "SafeTrigger", ["inner: Trigger (wrapped)", "failures: AtomicInteger"], ["afterCommit in try/catch"])
+put("trigi", 950, 690, 250, "Audit | CityCount | Wal", [], ["afterCommit(batch)"])
+
+EDGES = [
+ # the root owns the tables, a table owns its indexes
+ ln(B["db"]["b"], B["table"]["t"], "compose", "tables"),
+ ln(B["table"]["b"], B["index"]["t"], "compose", "indexes"),
+ # the transaction: what it records, and what it locks
+ ln(B["txn"]["b"], B["undo"]["t"], "compose", "undo log"),
+ ln((25, 200), (25, 466), "compose", "", [(12, 200), (12, 466)]),
+ ln(B["txn"]["r"], (320, 380), "assoc", "locks, reads, writes"),
+ ln((270, 600), (320, 470), "assoc", "returns"),
+ ln(B["locki"]["t"], B["lockp"]["b"], "inherit"),
+ # the rules and the listeners are handed in
+ ln((660, 430), (950, 219), "inject", "", [(940, 430), (940, 219)]),
+ ln((660, 450), (950, 373), "inject", "", [(932, 450), (932, 373)]),
+ ln((660, 120), (950, 527), "notify", "", [(924, 120), (924, 527)]),
+ ln((320, 140), (270, 665), "inject", "", [(290, 140), (290, 665)]),
+ ln((320, 170), (270, 845), "inject", "", [(282, 170), (282, 845)]),
+ # the table reads the predicate to plan
+ ln((660, 350), (950, 47), "assoc", "", [(916, 350), (916, 47)]),
+ # the implementations
+ ln(B["predi"]["t"], B["pred"]["b"], "inherit"),
+ ln(B["rowrulei"]["t"], B["rowrule"]["b"], "inherit"),
+ ln(B["tablerulei"]["t"], B["tablerule"]["b"], "inherit"),
+ ln(B["safet"]["t"], B["trigger"]["b"], "inherit"),
+ ln(B["trigi"]["t"], (1215, 560), "inherit", "", [(1075, 672), (1215, 672), (1215, 560)]),
+ # the data types
+ ln(B["schema"]["b"], B["column"]["t"], "compose", "columns"),
+ ln((930, 241), (930, 512), "assoc", "", [(942, 241), (942, 512)]),
+ ln(B["table"]["r"], (700, 90), "assoc", ""),
+ ln((660, 300), (700, 350), "assoc", ""),
+ ln((660, 640), (700, 400), "assoc", "", [(680, 640), (680, 400)]),
+ _tx(900, 800, "the index points at primary keys, never at rows", "var(--muted)", 11),
+ _tx(900, 822, "everything in the fourth column is handed in: nothing here builds a rule", "var(--muted)", 11),
+ ln(B["txn"]["r"], (700, 700), "assoc", "", [(286, 153), (286, 890), (690, 890), (690, 700)]),
+]
+UMLSVG = uml_svg(1230, 930, EDGES, legend_y=908)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a '
+ 'fixed list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow '
+ 'triangle = implements. Filled diamond = owns: the database owns the tables, a table owns its indexes, a '
+ 'transaction owns its undo log. Plain arrow = references. Dashed lavender = handed in and never built here: the '
+ 'rules, the lock policy, the clock. Dotted blue = notifies. <b>Where state lives:</b> the table has the rows, the '
+ 'indexes, the rules and the one lock &mdash; everything that can change; the schema and every row are immutable, '
+ 'which is why one schema is shared by a million rows and why the old row object can be kept as the undo image for '
+ 'free; the transaction has the undo log, the tables it is holding and the batch it will publish if it commits; '
+ 'the database has the tables, the triggers, the lock policy and the clock, and no row state at all, which is '
+ 'exactly why a table can be locked without locking the database. Notice what is <i>not</i> here: no Query class, '
+ 'because a query is a predicate plus a table; and no Transaction Manager, because a transaction manages itself.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above '
+ 'each class and method says what it does; read only those first for the shape, then the bodies for the mechanics. '
+ 'Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s '
+ 'reference code, with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (nine claims, '
+ 'forty-three checks; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> '
+ 'prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (what makes a row valid, and what two clients are '
+ 'promised, come first); then type in the order of Main.java: the enums and Column, Schema and Row, the Predicate '
+ 'interface with Eq / Between / And, the two rule interfaces with their built-in implementations, Trigger and its '
+ 'SafeTrigger wrapper, Index, then Table with its one apply() and its planner, then LockPolicy, then Txn with the '
+ 'order at insert and the undo log, then Database, then a main with fifty threads on one primary key.</div></div>')
+
+FU = [
+("Mid-round: \"a row in orders must name a real user, and a user with orders cannot be deleted.\"", "functional", 8,
+ "A foreign key is a new class behind the TableRule interface plus one addRule line; nothing in Table or Txn is "
+ "opened. It is a TableRule and not a RowRule because it has to read another table, which is also why it runs "
+ "inside the lock rather than before it. The rule is handed the transaction rather than the database, so its read "
+ "of the parent table takes that table's lock like any other read and is held to the end &mdash; a parent row "
+ "cannot be deleted out from under a child insert. The other direction is a second rule on the parent that counts "
+ "the children before allowing a delete. Both refusals throw before anything is written, so the database is "
+ "exactly as it was.",
+ X("a foreign key", "an index added at run time")),
+("Two clients insert the same primary key at the same instant. Prove you cannot end up with two rows, or none.", "non-functional", 10,
+ "The race lives between \"is this key free?\" and the write. Both checks happen inside the table's lock, held by "
+ "the transaction from the first touch, so no other writer can run in that gap. The proof is a count rather than "
+ "an argument: fifty threads wait on one latch and all insert the same key, and exactly one is told it succeeded "
+ "while exactly one row exists. Fifty more threads insert fifty distinct keys at the same moment, and all fifty "
+ "land &mdash; so the lock is not hiding a lost write. The last check is the one people forget: every secondary "
+ "index must hold exactly those fifty keys, because a row and its index entries move together in one method or "
+ "the database is quietly corrupt.",
+ T("        // 1. fifty threads insert the SAME primary key", "        // 2. a duplicate primary key is refused")),
+("One lock per table. Have you serialised the database? And my readers are queueing behind one writer.", "non-functional", 8,
+ "Per table, not per database, so a thousand tables take writes in parallel. Inside the lock one statement is a "
+ "hash lookup, a hash put and one tree insert per index &mdash; about two microseconds &mdash; so a five-statement "
+ "transaction holds the table for ten, which is a hundred thousand write transactions a second on one table. The "
+ "number that hurts is the client that runs BEGIN and then waits for two network round trips before COMMIT: that "
+ "holds the table for two hundred microseconds and drops it to five thousand a second. So rung one of the ladder "
+ "is keeping the lock short &mdash; validate before it, publish after it, never wait for a human inside it. Rung "
+ "two is a lock per row taken in sorted order, and its honest cost is that a table lock also stopped rows from "
+ "appearing, so phantoms come back unless the range itself is locked. Rung three is the answer to the readers: "
+ "stop making them take a lock at all. Under MVCC every row keeps a chain of versions stamped with the commit that "
+ "wrote it, and a reader takes a snapshot &mdash; the commit number at its start &mdash; and reads the newest "
+ "version older than that, so it never waits and never sees a half-finished transaction; deletes are versions too, "
+ "which is how an old snapshot still sees a dropped row. What it costs: dead versions have to be collected, and "
+ "two transactions can commit against the same snapshot, so snapshot isolation is not serialisable &mdash; the "
+ "write-skew case is the one to name out loud. Beyond one process the same idea is sharding by primary key: more "
+ "locks by having more databases, and a transaction across two of them needs two-phase commit.",
+ X("row-level locks", "sharding by primary key") + "\n" + X("MVCC", "row-level locks")),
+("A constraint fails half way through an insert. What is the state of the database?", "functional", 8,
+ "Exactly what it was. The row is built and checked against the type, NOT NULL and CHECK rules before the lock is "
+ "taken and before anything is written, so most refusals never reach the table at all. The checks that must read "
+ "the table &mdash; is the key free, does the parent exist &mdash; happen inside the lock but still before any "
+ "write, and what follows them is a single method that puts the row and every index entry in together. So there is "
+ "no partial row, no index entry pointing at nothing, and nothing to roll back: the client fixes the values and "
+ "retries. The failure tests make the same point four ways &mdash; a wrong type, a null, a failed CHECK and the "
+ "wrong number of values &mdash; and then check that the table was not even left locked.",
+ sect(src, "Row insert(String table, Object... values)", "int update(String table")),
+("\"Give me everyone aged thirty to forty\" over a hundred thousand rows, without a scan.", "functional", 5,
+ "The secondary index is a TreeMap from column value to the primary keys that hold it, so a range is a subMap: one "
+ "descent to find the start, then one step per row you actually return. Equality on an indexed column is a single "
+ "tree lookup, and equality on the primary key is a hash lookup that never touches an index at all. The planner is "
+ "three ifs over the where-clause: the primary key first, then an index probe, then an index range, and only then "
+ "a scan &mdash; which it names, so \"is this a scan?\" is a question the code answers rather than a thing you "
+ "guess. That is the payoff for making Eq and Between objects instead of lambdas: a lambda cannot be read, so a "
+ "lambda predicate is always a full scan.",
+ sect(src, "Plan plan(Predicate p)", "List<Row> select(Predicate p)") + "\n"
+ + sect(src, "final class Index", "record Plan")),
+("An update changes a column that is indexed. What has to happen, and what usually goes wrong?", "twist", 8,
+ "The old index entry has to go and a new one has to arrive, and the usual bug is that some code path writes the "
+ "row without doing it. That is why there is exactly one method that ever changes a row: apply(before, after) "
+ "removes the before-image from every index, writes the row, then adds the after-image to every index. An insert "
+ "is apply(null, row), a delete is apply(row, null), and an undo is apply(after, before) &mdash; the same door in "
+ "reverse. With one door there is exactly one place a row and its indexes could get out of step, and the tests "
+ "check the old value finds nothing afterwards while the new one finds the row.",
+ sect(src, "void apply(Row before, Row after)", "Row build(Database db")),
+("The client ran three statements and disappeared. And: I want SAVEPOINT.", "twist", 10,
+ "Every write appends a before-image to the transaction's undo log, so a rollback is that log replayed backwards "
+ "through the same apply() &mdash; rows and index entries land back exactly where they were. It costs what the "
+ "transaction touched, never what the table holds, and it is free to prepare because rows are immutable: the old "
+ "row object IS the before-image, so nothing is copied. A savepoint is then almost nothing: it is the length of "
+ "the undo log at that moment, and ROLLBACK TO undoes entries back to that mark and stops, keeping the "
+ "transaction open and, importantly, keeping its locks &mdash; releasing them early is what would reopen the "
+ "lost update. The pending batch for the triggers is trimmed the same way, so a rolled-back statement is never "
+ "published.",
+ sect(src, "int savepoint()", "void commit()") + "\n" + sect(src, "void commit()", "private void releaseAll()")),
+("Two transactions, two tables, opposite order. Show me the deadlock and what you do about it.", "non-functional", 8,
+ "Strict two-phase locking makes deadlock possible by construction: T1 holds users and wants orders while T2 holds "
+ "orders and wants users, and neither will ever let go. The code does not pretend otherwise &mdash; every "
+ "acquisition is a tryLock with a timeout, so the transaction that runs out of patience is the victim: it rolls "
+ "back, which releases everything it held, and throws a LockTimeout the client can retry. The alternative, a "
+ "waits-for graph with victim selection, catches the cycle immediately and never aborts an innocent transaction, "
+ "at the cost of bookkeeping on every acquisition; a timeout is the honest one-line answer, and you say which you "
+ "chose and why. The test proves both halves: somebody gave up, and every row still present belongs to a "
+ "transaction that committed.",
+ T("        // 9. a deadlock", "        System.out.println(failures == 0")),
+("Make it survive a restart.", "twist", 5,
+ "Durability is one more trigger. Every committed batch is appended to a log before commit returns, which on a "
+ "real disk is an fsync and is the entire meaning of the word durable; replaying that log against an empty "
+ "database rebuilds the committed state exactly, because a rolled-back transaction never reached the trigger. "
+ "That is also why the log, not the map, is the thing you ship to a replica. On a real database the same design "
+ "becomes SQL: the in-memory read-modify-write turns into UPDATE ... SET version = version + 1 WHERE id = ? AND "
+ "version = ?, where zero rows updated means somebody got there first, and inserts carry ON CONFLICT DO NOTHING "
+ "so a retried request lands once.",
+ X("persistence", "MVCC")),
+("Join users to orders. Which algorithm, and when does the other one win?", "twist", 8,
+ "Nested loop walks the left table and probes the right table's index once per row: cheap when the left side is "
+ "small and the right side is indexed, terrible when it is neither, because it is one probe per left row. Hash "
+ "join builds a map from the smaller table, then streams the larger one past it: one pass over each, no index "
+ "needed, but the build side has to fit in memory. So the rule of thumb is: an index on the join column and a "
+ "small left side means nested loop; two big unindexed tables mean hash join; already-sorted inputs mean a merge "
+ "join, which is the third one worth naming. Both implementations here return the same rows, which the demo "
+ "asserts &mdash; a join is a choice of algorithm, never a choice of answer.",
+ X("joins", "persistence")),
+("Which index did that query use, and what if two are usable? And add an index at run time.", "design", 8,
+ "Main's planner takes the first usable path in a fixed order: primary key, index probe, index range, scan. The "
+ "cost-based version prices every usable path by how many rows it would examine and takes the cheapest, so "
+ "city = 'Pune' AND name = 'Bela' uses the name index rather than the city one. It can price exactly because "
+ "probing an index is cheap at this size; a real planner keeps histograms, because probing millions of rows to "
+ "plan a query would cost more than running it. Adding an index later is one call: it is backfilled from the rows "
+ "already there, so it is complete the moment it exists, and from then on the table's single apply() maintains it "
+ "like any other. Do it while nothing else is running &mdash; DDL here is not transactional, and saying so is "
+ "better than pretending.",
+ X("EXPLAIN", "joins") + "\n" + X("an index added at run time", "EXPLAIN")),
+("Where does time come from, and how do you test something that expires?", "design", 3,
+ "The database is handed a Clock, and it stamps every row it writes; nothing else reads the wall clock. So a TTL "
+ "sweeper is a few lines: everything stamped longer ago than the TTL is deleted, and the deletes are ordinary "
+ "transactions, which means the indexes, the undo log and the triggers all behave exactly as they do for a "
+ "hand-typed DELETE. A test moves the clock instead of sleeping: insert a row, advance the long by a minute, "
+ "insert another, sweep with a thirty-second TTL, and exactly one row goes.",
+ X("TTL rows", "Runs every extension")),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or a Builder earn its place?", "design", 8,
+ "None of the patterns was chosen up front; each is what a move produced. Strategy is move 3: the rules, the "
+ "triggers and the lock policy are all things that change, so each is a small interface the database is handed. "
+ "Decorator is the same move's wrapper, SafeTrigger, which gives every listener the same guarantee instead of "
+ "copying a try/catch into each. Observer is move 6's rule that a listener hears about committed changes only, and "
+ "only after the locks are gone. Memento is the one this problem earns outright: the before-image is the old Row "
+ "object, free because rows are immutable. Command is its neighbour &mdash; an undo entry is one reversible "
+ "change, which is why the same list serialises into a write-ahead log. Interpreter is move 5, the where-clause "
+ "the planner can read. For SOLID: S is move 2 (an index answers one question, a table stores, a transaction "
+ "undoes); O is the foreign key, a new file and one line; L is the same race running against two lock policies; I "
+ "is five interfaces, four with one method; D is configure() and setClock(). Factory earns its place the day "
+ "schemas arrive as DDL text, because the column-type map is already the registry. Builder earns its place the day "
+ "a column gains defaults, collations and comments &mdash; today createTable takes a name, a key and the columns, "
+ "and all three are required.",
+ "// Strategy: what makes a row valid, who is told, who may touch a table -- all handed in\n"
+ "interface RowRule   { void check(Schema s, Row row); }                 // judged from the row alone: before the lock\n"
+ "interface TableRule { void check(Txn txn, Table t, Row before, Row after); }  // has to read a table: inside the lock\n"
+ "interface LockPolicy { boolean acquire(Table t, long timeoutMs); void release(Table t); }\n\n"
+ "// Decorator: every trigger handed in gets the same guarantee, written once\n"
+ "SafeTrigger addTrigger(Trigger t) { SafeTrigger s = new SafeTrigger(t); triggers.add(s); return s; }\n\n"
+ "// Observer: committed batches only, after every lock is released\n"
+ "void commit() { state = COMMITTED; List<Change> batch = List.copyOf(pending); releaseAll(); db.publish(batch); }\n\n"
+ "// Memento + Command: the old row IS the before-image, and undo is the same door in reverse\n"
+ "record UndoEntry(Table table, Row before, Row after) {}\n"
+ "e.table().apply(e.after(), e.before());                 // rollback, newest change first\n\n"
+ "// Interpreter: a where-clause the planner can READ (a lambda would always be a scan)\n"
+ "record Eq(String col, Object val) implements Predicate { ... }\n"
+ "if (q instanceof Eq e && e.col().equals(schema.pkName())) return new Plan(\"primary key lookup\", ...);\n\n"
+ "// Factory: not yet. ColType's EnumMap is already the registry; DDL text would make it a factory\n"
+ "static { JAVA.put(INT, Long.class); JAVA.put(TEXT, String.class); JAVA.put(BOOL, Boolean.class); }\n\n"
+ "// Builder: not yet. Three required things; defaults and collations per column would change that\n"
+ "db.createTable(\"users\", \"id\", Column.intCol(\"id\", true), Column.text(\"name\", true));\n"),
+]
+
+build(dict(
+    slug="inmem-db", title="In-memory Database",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 9 failure tests and a 50-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

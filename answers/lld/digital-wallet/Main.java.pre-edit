@@ -1,0 +1,613 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/** The currencies the wallet knows. v1 moves money only inside one currency; FX is a follow-up, not a special case. */
+enum Currency { INR, USD }
+
+/** Exact money, in paise. There is no double anywhere in this file; these two helpers are the only boundary. */
+final class Money {
+    /** Parse "1234.50" into 123450 paise, exactly. Used at the edge (a form, a file), never in the arithmetic. */
+    static long rupees(String amount) { return new java.math.BigDecimal(amount).movePointRight(2).longValueExact(); }
+    /** Print 123450 paise as "1234.50". Presentation only. */
+    static String fmt(long paise) {
+        String sign = paise < 0 ? "-" : ""; long a = Math.abs(paise);
+        return sign + (a / 100) + "." + String.format("%02d", a % 100);
+    }
+}
+
+/**
+ * What an account is for. The move worth saying out loud: the outside world is modelled as accounts too, so
+ * every movement is a two-sided posting. A top-up is money out of BANK_SETTLEMENT; a fee is money into
+ * FEE_REVENUE. Nothing appears from nowhere.
+ */
+enum AccountType {
+    USER, MERCHANT, BANK_SETTLEMENT, FEE_REVENUE;
+    /** House accounts mirror the world outside the wallet: they may go negative, and policy rules skip them. */
+    boolean house() { return this == BANK_SETTLEMENT || this == FEE_REVENUE; }
+}
+
+/** An account's life. ACTIVE may send and receive; FROZEN may do neither; CLOSED is the end of the line. */
+enum AccountStatus { ACTIVE, FROZEN, CLOSED }
+
+/**
+ * A transaction's life. PENDING is claimed but not yet settled; COMPLETED means both legs are in the journal;
+ * FAILED means a rule or an invariant refused it and nothing was written; REVERSED means a later, opposite
+ * posting undid it. A transaction is never edited, only moved along this list.
+ */
+enum TxnStatus { PENDING, COMPLETED, FAILED, REVERSED }
+
+/** CREDIT = money INTO this account. DEBIT = money OUT of it. Every posting's signed legs must sum to zero. */
+enum Direction { DEBIT, CREDIT }
+
+/**
+ * One immutable line of the journal: this much money moved in or out of this account, as part of this
+ * transaction, at this instant. Entries are appended and never edited; a mistake is corrected by an opposite
+ * entry, which is what makes the history auditable.
+ */
+record LedgerEntry(String entryId, String txnId, String accountId, Direction dir, long paise, long atMs, String memo) {
+    /** The signed effect on the account's balance: a credit adds, a debit subtracts. */
+    long signed() { return dir == Direction.CREDIT ? paise : -paise; }
+    @Override public String toString() { return entryId + " " + accountId + " " + dir + " " + Money.fmt(paise) + " (" + txnId + ")"; }
+}
+
+/** Where time comes from. Injected, so a test can pick the instant and then move it. */
+interface Clock { long nowMs(); }
+
+/**
+ * The journal: every movement, append only, never edited. This is the source of truth. An account's balance is
+ * a cache of the fold over this journal, and reconcile() proves the two agree. post() is synchronized on the
+ * ledger and is always called while the account locks are already held, so the order is always
+ * accounts then ledger and there is no second lock order to deadlock against.
+ */
+class Ledger {
+    private final List<LedgerEntry> journal = new ArrayList<>();
+    private final Map<String, List<LedgerEntry>> byAccount = new HashMap<>();
+    private final AtomicLong nextId = new AtomicLong(1);
+
+    /** A fresh entry id. An atomic counter, so two threads building postings never collide. */
+    String nextEntryId() { return "E" + nextId.getAndIncrement(); }
+
+    /**
+     * Append one posting. Refuses any posting whose signed legs do not sum to zero, so a bug upstream cannot
+     * create or destroy money. Append first, then index by account: the journal is never missing a line that
+     * the index has.
+     */
+    synchronized void post(List<LedgerEntry> legs) {
+        long sum = 0;
+        for (LedgerEntry e : legs) sum += e.signed();
+        if (sum != 0) throw new IllegalStateException("posting does not balance: " + sum + " paise");
+        journal.addAll(legs);
+        for (LedgerEntry e : legs) byAccount.computeIfAbsent(e.accountId(), k -> new ArrayList<>()).add(e);
+    }
+    /** The last n entries for one account, oldest first. O(n) off the per-account index, never a journal scan. */
+    synchronized List<LedgerEntry> statement(String accountId, int n) {
+        List<LedgerEntry> all = byAccount.getOrDefault(accountId, List.of());
+        return List.copyOf(all.subList(Math.max(0, all.size() - n), all.size()));
+    }
+    /** Every entry for one account, oldest first. The per-account index, which the fraud rule also reads. */
+    synchronized List<LedgerEntry> entriesFor(String accountId) {
+        return List.copyOf(byAccount.getOrDefault(accountId, List.of()));
+    }
+    /** Fold every entry for one account: what the balance MUST be if the cache is honest. */
+    synchronized long replay(String accountId) {
+        long sum = 0;
+        for (LedgerEntry e : byAccount.getOrDefault(accountId, List.of())) sum += e.signed();
+        return sum;
+    }
+    /** Every entry ever written, for an audit screen or a reconciliation job. */
+    synchronized List<LedgerEntry> journal() { return List.copyOf(journal); }
+    /** Every account the journal has ever touched. */
+    synchronized Set<String> accountsSeen() { return new TreeSet<>(byAccount.keySet()); }
+}
+
+/**
+ * Where money sits. The account owns its balance, its status, its spend-so-far-today and its OWN lock: Alice
+ * paying Bob must not block Carol paying Dan. It holds state and does arithmetic; it decides no policy.
+ */
+class Account {
+    private final String id;
+    private final AccountType type;
+    private final Currency currency;
+    private final ReentrantLock lock = new ReentrantLock();
+    private long balancePaise;                 // guarded by lock: a cache of the ledger fold
+    private AccountStatus status = AccountStatus.ACTIVE;   // guarded by lock
+    private long spentTodayPaise;              // guarded by lock
+    private long dayNumber = Long.MIN_VALUE;   // guarded by lock
+
+    Account(String id, AccountType type, Currency currency) { this.id = id; this.type = type; this.currency = currency; }
+    String id() { return id; }
+    AccountType type() { return type; }
+    Currency currency() { return currency; }
+    /** The lock the service takes. Exposed because the SERVICE decides the order: every account, sorted by id. */
+    ReentrantLock lock() { return lock; }
+
+    /** True if this account can fund `paise`. House accounts mirror the outside world, so they may go negative. */
+    boolean canCover(long paise) { return type.house() || balancePaise >= paise; }
+    /** Move the cached balance. Called only with this lock held, and only after the journal append succeeded. */
+    void applyDelta(long delta) { balancePaise += delta; }
+    /** The balance while the caller already holds this lock. */
+    long balanceHeld() { return balancePaise; }
+    /** The balance, taken under the lock so nobody reads it half-written. O(1). */
+    long balance() { lock.lock(); try { return balancePaise; } finally { lock.unlock(); } }
+    /** The status while the caller already holds this lock. */
+    AccountStatus statusHeld() { return status; }
+    /** The status, taken under the lock. */
+    AccountStatus status() { lock.lock(); try { return status; } finally { lock.unlock(); } }
+    /** Freeze, unfreeze or close. Closing an account with money in it is refused; the money must leave first. */
+    void setStatus(AccountStatus s) {
+        lock.lock();
+        try {
+            if (s == AccountStatus.CLOSED && balancePaise != 0)
+                throw new IllegalStateException(id + " still holds " + Money.fmt(balancePaise));
+            if (status == AccountStatus.CLOSED) throw new IllegalStateException(id + " is closed");
+            status = s;
+        } finally { lock.unlock(); }
+    }
+    /** Paise sent today, with the day taken from the injected clock. Caller holds the lock. */
+    long spentToday(long nowMs) { return dayOf(nowMs) == dayNumber ? spentTodayPaise : 0; }
+    /** Count a completed spend against today. Caller holds the lock; a new day resets the counter. */
+    void addSpent(long paise, long nowMs) {
+        long d = dayOf(nowMs);
+        if (d != dayNumber) { dayNumber = d; spentTodayPaise = 0; }
+        spentTodayPaise += paise;
+    }
+    private static long dayOf(long ms) { return Math.floorDiv(ms, 86_400_000L); }
+    @Override public String toString() { return id + "[" + Money.fmt(balance()) + "]"; }
+}
+
+/** A transfer was refused. The reason is stored on the transaction, so a retry of the key replays the same answer. */
+class TransferRejected extends RuntimeException {
+    TransferRejected(String reason) { super(reason); }
+}
+
+/**
+ * One request to move money, and the record of what happened to it. The idempotency key is the caller's; the
+ * transaction id is ours. Status and the entry ids are written once, under the account locks, and read by
+ * anyone, so they are volatile.
+ */
+class Transaction {
+    private final String id, idemKey, fromId, toId, memo;
+    private final long amountPaise, feePaise, createdMs;
+    private volatile TxnStatus status = TxnStatus.PENDING;
+    private volatile String failureReason = "";
+    private volatile List<String> entryIds = List.of();
+    private volatile String reversedBy = "";
+
+    Transaction(String id, String idemKey, String fromId, String toId, long amountPaise, long feePaise, long createdMs, String memo) {
+        this.id = id; this.idemKey = idemKey; this.fromId = fromId; this.toId = toId;
+        this.amountPaise = amountPaise; this.feePaise = feePaise; this.createdMs = createdMs; this.memo = memo;
+    }
+    String id() { return id; }
+    String idemKey() { return idemKey; }
+    String fromId() { return fromId; }
+    String toId() { return toId; }
+    String memo() { return memo; }
+    long amountPaise() { return amountPaise; }
+    long feePaise() { return feePaise; }
+    long createdMs() { return createdMs; }
+    TxnStatus status() { return status; }
+    String failureReason() { return failureReason; }
+    /** The journal lines this transaction wrote. Empty until it completes; proof of what it did afterwards. */
+    List<String> entryIds() { return entryIds; }
+    String reversedBy() { return reversedBy; }
+    /** Mark it settled and remember its journal lines. Called under the locks, after the append succeeded. */
+    void complete(List<String> ids) { this.entryIds = List.copyOf(ids); this.status = TxnStatus.COMPLETED; }
+    /** Mark it refused. Nothing was written, and this reason is what a retry of the same key is told. */
+    void fail(String reason) { this.failureReason = reason; this.status = TxnStatus.FAILED; }
+    /** Mark it undone by a later, opposite posting. The original entries are never touched. */
+    void markReversed(String byTxnId) { this.reversedBy = byTxnId; this.status = TxnStatus.REVERSED; }
+    @Override public String toString() {
+        return id + " " + fromId + "->" + toId + " " + Money.fmt(amountPaise)
+             + (feePaise > 0 ? " +fee " + Money.fmt(feePaise) : "") + " " + status
+             + (failureReason.isEmpty() ? "" : " (" + failureReason + ")");
+    }
+}
+
+// "they will change the fee on a Friday afternoon" -> pricing goes behind an interface -> Strategy
+/**
+ * What this transfer costs the sender. One method, because pricing is the rule most likely to change mid-round.
+ * The service never builds a policy; it is handed one.
+ */
+interface FeePolicy {
+    /** The fee in paise, on top of the amount. Zero means free. */
+    long feeFor(long amountPaise, Account from, Account to);
+}
+
+/** Free. The default for person-to-person money, which is how wallets get used in the first place. */
+class NoFee implements FeePolicy {
+    public long feeFor(long amountPaise, Account from, Account to) { return 0; }
+}
+
+/** A flat fee on merchant payments only; person-to-person stays free. */
+class MerchantFlatFee implements FeePolicy {
+    private final long feePaise;
+    MerchantFlatFee(long feePaise) { this.feePaise = feePaise; }
+    public long feeFor(long amountPaise, Account from, Account to) {
+        return to.type() == AccountType.MERCHANT ? feePaise : 0;
+    }
+}
+
+/**
+ * One policy check on a transfer. It runs under the account locks, before anything is written, and it may READ
+ * state but must never write any. A rule refuses by throwing TransferRejected. An invariant (is the sender
+ * active, does he have the money) is not a rule: invariants are not negotiable, rules are.
+ */
+interface TransferRule {
+    /** Throw TransferRejected to refuse. Called with every account of the posting already locked. */
+    void check(Transaction t, Account from, Account to, long nowMs);
+}
+
+/** Both sides must be in the same currency. FX is a follow-up that replaces this rule, not a patch inside it. */
+class SameCurrencyRule implements TransferRule {
+    public void check(Transaction t, Account from, Account to, long nowMs) {
+        if (from.currency() != to.currency())
+            throw new TransferRejected("currency mismatch: " + from.currency() + " -> " + to.currency());
+    }
+}
+
+/** A cap on what one account may send in a calendar day. The day comes from the injected clock, so it is testable. */
+class DailyLimitRule implements TransferRule {
+    private final long capPaise;
+    DailyLimitRule(long capPaise) { this.capPaise = capPaise; }
+    public void check(Transaction t, Account from, Account to, long nowMs) {
+        if (from.type().house()) return;                       // policy applies to people, not to the house
+        long after = from.spentToday(nowMs) + t.amountPaise() + t.feePaise();
+        if (after > capPaise)
+            throw new TransferRejected("daily limit: " + Money.fmt(from.spentToday(nowMs)) + " already sent today, cap is " + Money.fmt(capPaise));
+    }
+}
+
+/**
+ * The fraud check, in its simplest honest form: too many debits from one account inside a short window is
+ * refused. It reads the ledger's per-account index, so it costs nothing extra to keep.
+ */
+class VelocityRule implements TransferRule {
+    private final Ledger ledger; private final int maxDebits; private final long windowMs;
+    VelocityRule(Ledger ledger, int maxDebits, long windowMs) { this.ledger = ledger; this.maxDebits = maxDebits; this.windowMs = windowMs; }
+    public void check(Transaction t, Account from, Account to, long nowMs) {
+        if (from.type().house()) return;
+        int recent = 0;
+        List<LedgerEntry> mine = ledger.entriesFor(from.id());
+        for (int i = mine.size() - 1; i >= 0; i--) {
+            LedgerEntry e = mine.get(i);
+            if (nowMs - e.atMs() > windowMs) break;            // the index is in time order: stop at the window
+            if (e.dir() == Direction.DEBIT) recent++;
+        }
+        if (recent >= maxDebits)
+            throw new TransferRejected("velocity: " + recent + " debits in the last " + (windowMs / 1000) + "s");
+    }
+}
+
+/** Someone who wants to know a transaction landed or was refused. Called AFTER the locks, never inside them. */
+interface TxnListener {
+    /** Told about every transaction, completed, failed or reversed. Must not throw; if it does, it is swallowed. */
+    void onTxn(Transaction t);
+}
+
+/** A receipt on the user's phone. Stands in for a push notification, an SMS, an email. */
+class ReceiptPrinter implements TxnListener {
+    public void onTxn(Transaction t) { System.out.println("  [receipt] " + t); }
+}
+
+/** The fraud desk: it only cares about refusals, and it counts them. */
+class FraudMonitor implements TxnListener {
+    private final AtomicInteger refusals = new AtomicInteger();
+    public void onTxn(Transaction t) { if (t.status() == TxnStatus.FAILED) refusals.incrementAndGet(); }
+    /** How many refusals this monitor has seen. */
+    int refusals() { return refusals.get(); }
+}
+
+/**
+ * The wallet: it owns the accounts, the journal and the idempotency map, and it orchestrates one movement of
+ * money. It holds NO lock of its own — the locks live on the accounts — and it decides no policy: the fee
+ * policy, the rules, the listeners and the clock are all handed in.
+ *
+ * The order at a transfer is the design, and it is this: validate the arguments; claim the idempotency key with
+ * one putIfAbsent, which is the compare-and-set that makes a retry safe; compute the fee; lock every account the
+ * posting touches IN ID ORDER, so A-pays-B and B-pays-A cannot deadlock; check statuses, rules and balance with
+ * nothing written yet; append both legs to the journal, which is the irreversible write; only then move the
+ * cached balances and mark the transaction COMPLETED; unlock; tell the listeners.
+ */
+class WalletService {
+    private final Map<String, Account> accounts = new ConcurrentHashMap<>();
+    private final Map<String, Transaction> byKey = new ConcurrentHashMap<>();   // idempotency key -> the one attempt
+    private final Map<String, Transaction> byId = new ConcurrentHashMap<>();
+    private final Ledger ledger = new Ledger();
+    private final AtomicLong nextTxn = new AtomicLong(1);
+    private final List<TxnListener> listeners = new CopyOnWriteArrayList<>();
+    private volatile List<TransferRule> rules = List.of();
+    private volatile FeePolicy feePolicy = new NoFee();
+    private volatile Clock clock = System::currentTimeMillis;
+    private final String bankId, feeId;
+
+    /**
+     * Build a wallet with its two house accounts: the bank settlement account money enters and leaves through,
+     * and the revenue account fees land in. They exist from the first line so no movement is ever one-sided.
+     */
+    WalletService(String bankId, String feeId, Currency currency) {
+        this.bankId = bankId; this.feeId = feeId;
+        accounts.put(bankId, new Account(bankId, AccountType.BANK_SETTLEMENT, currency));
+        accounts.put(feeId, new Account(feeId, AccountType.FEE_REVENUE, currency));
+    }
+
+    /** Hand in the policy. The wallet never builds a rule or a fee policy, which is why a test can hand in a broken one. */
+    void configure(List<TransferRule> rules, FeePolicy feePolicy) {
+        this.rules = List.copyOf(rules); this.feePolicy = feePolicy;
+    }
+    /** Tests hand in a fixed clock, so "today" and "the last sixty seconds" are whatever the test says. */
+    void setClock(Clock c) { clock = c; }
+    /** Subscribe a listener. Setup only; listeners are called after the locks are released. */
+    void addListener(TxnListener l) { listeners.add(l); }
+    /** The journal, for an audit screen or a reconciliation job. */
+    Ledger ledger() { return ledger; }
+
+    /** Open an account. O(1). The id is what every journal entry stores, so a rename can never move money. */
+    Account open(String id, AccountType type, Currency currency) {
+        Account a = new Account(id, type, currency);
+        if (accounts.putIfAbsent(id, a) != null) throw new IllegalStateException("account exists: " + id);
+        return a;
+    }
+    /** The account, or an error. O(1). */
+    Account account(String id) {
+        Account a = accounts.get(id);
+        if (a == null) throw new NoSuchElementException("no such account: " + id);
+        return a;
+    }
+    /** What this account holds right now. O(1): the cached balance, not a fold of the journal. */
+    long balanceOf(String id) { return account(id).balance(); }
+    /** The last n journal lines for this account. O(n) off the per-account index. */
+    List<LedgerEntry> statement(String id, int n) { return ledger.statement(id, n); }
+    /** One transaction by our id, for a support screen. O(1). */
+    Transaction txn(String id) {
+        Transaction t = byId.get(id);
+        if (t == null) throw new NoSuchElementException("no such transaction: " + id);
+        return t;
+    }
+    /** The one attempt behind an idempotency key, if there is one. */
+    Transaction byKey(String idemKey) { return byKey.get(idemKey); }
+
+    /**
+     * Move money from one account to another. Idempotent by key: the same key always yields the same outcome,
+     * whether that outcome was a completed transfer or a refusal. Throws TransferRejected if a rule or an
+     * invariant refuses, and in that case nothing at all was written.
+     */
+    Transaction transfer(String idemKey, String fromId, String toId, long paise, String memo) {
+        if (paise <= 0) throw new IllegalArgumentException("amount must be positive: " + paise);
+        if (fromId.equals(toId)) throw new IllegalArgumentException("cannot transfer to the same account");
+        Transaction seen = byKey.get(idemKey);                        // fast path: an obvious retry, no id burned
+        if (seen != null) return replay(seen);
+        Account from = account(fromId), to = account(toId);
+        long fee = feePolicy.feeFor(paise, from, to);                 // pure, outside every lock
+        long now = clock.nowMs();
+
+        Transaction fresh = new Transaction("T" + nextTxn.getAndIncrement(), idemKey, fromId, toId, paise, fee, now, memo);
+        Transaction prior = byKey.putIfAbsent(idemKey, fresh);        // THE compare-and-set: one key, one attempt
+        if (prior != null) return replay(prior);
+        byId.put(fresh.id(), fresh);
+
+        Account feeAcct = fee > 0 ? account(feeId) : null;
+        List<Account> locked = sorted(from, to, feeAcct);             // sorted by id: the deadlock is designed out
+        boolean ok = false;
+        lockAll(locked);
+        try {
+            requireUsable(from, "sender"); requireUsable(to, "receiver");
+            for (TransferRule r : rules) r.check(fresh, from, to, now);
+            if (!from.canCover(paise + fee))
+                throw new TransferRejected("insufficient balance: " + Money.fmt(from.balanceHeld()) + " < " + Money.fmt(paise + fee));
+
+            List<LedgerEntry> legs = new ArrayList<>(3);
+            legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), fromId, Direction.DEBIT, paise + fee, now, memo));
+            legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), toId, Direction.CREDIT, paise, now, memo));
+            if (fee > 0) legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), feeId, Direction.CREDIT, fee, now, "fee " + memo));
+            ledger.post(legs);                                        // the irreversible write happens FIRST
+            from.applyDelta(-(paise + fee));                          // from here nothing can throw
+            to.applyDelta(paise);
+            if (feeAcct != null) feeAcct.applyDelta(fee);
+            from.addSpent(paise + fee, now);
+            fresh.complete(legs.stream().map(LedgerEntry::entryId).toList());
+            ok = true;
+        } catch (TransferRejected r) {
+            fresh.fail(r.getMessage());                               // nothing was written: the journal is untouched
+        } finally { unlockAll(locked); }
+
+        publish(fresh);                                               // after the locks: a slow phone stalls nobody
+        if (!ok) throw new TransferRejected(fresh.failureReason());
+        return fresh;
+    }
+
+    /**
+     * Money in from the outside world: the bank settlement account pays the user. Not a new verb — the same
+     * posting, the same locks, the same idempotency — which is why a top-up can be reversed like anything else.
+     */
+    Transaction topUp(String idemKey, String toId, long paise) {
+        return transfer(idemKey, bankId, toId, paise, "top-up");
+    }
+    /** Money out to the outside world: the user pays the bank settlement account. The mirror of a top-up. */
+    Transaction withdraw(String idemKey, String fromId, long paise) {
+        return transfer(idemKey, fromId, bankId, paise, "withdrawal");
+    }
+
+    /**
+     * Undo a completed transaction by writing the OPPOSITE posting. No entry is ever edited and no balance is
+     * ever set by hand: the reversal is an ordinary movement that happens to point the other way, so the audit
+     * trail shows both the mistake and the correction. Idempotent by key, like every other write.
+     */
+    Transaction reverse(String idemKey, String txnId) {
+        Transaction orig = txn(txnId);
+        long now = clock.nowMs();
+        Transaction fresh = new Transaction("T" + nextTxn.getAndIncrement(), idemKey, orig.toId(), orig.fromId(),
+                                            orig.amountPaise(), orig.feePaise(), now, "reversal of " + orig.id());
+        Transaction prior = byKey.putIfAbsent(idemKey, fresh);
+        if (prior != null) return replay(prior);
+        byId.put(fresh.id(), fresh);
+
+        Account from = account(orig.fromId()), to = account(orig.toId());
+        Account feeAcct = orig.feePaise() > 0 ? account(feeId) : null;
+        List<Account> locked = sorted(from, to, feeAcct);
+        boolean ok = false;
+        lockAll(locked);
+        try {
+            if (orig.status() != TxnStatus.COMPLETED)
+                throw new TransferRejected("only a COMPLETED transaction can be reversed; " + orig.id() + " is " + orig.status());
+            if (!to.canCover(orig.amountPaise()))                     // the receiver may have spent it already
+                throw new TransferRejected("cannot reverse: " + to.id() + " holds " + Money.fmt(to.balanceHeld()));
+            long fee = orig.feePaise();
+            List<LedgerEntry> legs = new ArrayList<>(3);
+            legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), to.id(), Direction.DEBIT, orig.amountPaise(), now, "reversal"));
+            legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), from.id(), Direction.CREDIT, orig.amountPaise() + fee, now, "reversal"));
+            if (fee > 0) legs.add(new LedgerEntry(ledger.nextEntryId(), fresh.id(), feeId, Direction.DEBIT, fee, now, "fee refund"));
+            ledger.post(legs);
+            to.applyDelta(-orig.amountPaise());
+            from.applyDelta(orig.amountPaise() + fee);
+            if (feeAcct != null) feeAcct.applyDelta(-fee);
+            fresh.complete(legs.stream().map(LedgerEntry::entryId).toList());
+            orig.markReversed(fresh.id());
+            ok = true;
+        } catch (TransferRejected r) {
+            fresh.fail(r.getMessage());
+        } finally { unlockAll(locked); }
+
+        publish(fresh);
+        if (!ok) throw new TransferRejected(fresh.failureReason());
+        return fresh;
+    }
+
+    /**
+     * The check that makes the cached balances trustworthy: fold the journal for every account and compare it
+     * with the number we serve. It also adds every balance up, which must be exactly zero, because every paise
+     * in someone's wallet is a paise out of the bank settlement account.
+     */
+    boolean reconcile() {
+        long total = 0;
+        for (String id : ledger.accountsSeen()) {
+            long cached = account(id).balance(), replayed = ledger.replay(id);
+            if (cached != replayed) {
+                System.out.println("  [reconcile] " + id + " cached " + Money.fmt(cached) + " journal " + Money.fmt(replayed));
+                return false;
+            }
+            total += cached;
+        }
+        return total == 0;
+    }
+
+    /** Sorting by id is the whole deadlock story: every thread takes the same locks in the same order. */
+    private static List<Account> sorted(Account... maybe) {
+        List<Account> out = new ArrayList<>(3);
+        for (Account a : maybe) if (a != null && !out.contains(a)) out.add(a);
+        out.sort(Comparator.comparing(Account::id));
+        return out;
+    }
+    private static void lockAll(List<Account> as) { for (Account a : as) a.lock().lock(); }
+    private static void unlockAll(List<Account> as) { for (int i = as.size() - 1; i >= 0; i--) as.get(i).lock().unlock(); }
+    private static void requireUsable(Account a, String side) {
+        if (a.statusHeld() != AccountStatus.ACTIVE) throw new TransferRejected(side + " " + a.id() + " is " + a.statusHeld());
+    }
+    /** The same key, the same answer: a completed transfer comes back, a refusal is refused again for the same reason. */
+    private Transaction replay(Transaction t) {
+        if (t.status() == TxnStatus.FAILED) throw new TransferRejected(t.failureReason());
+        return t;
+    }
+    /** Tell every listener, outside the locks, and survive one that throws. */
+    private void publish(Transaction t) {
+        for (TxnListener l : listeners) {
+            try { l.onTxn(t); } catch (RuntimeException ex) { System.err.println("[listener failed] " + ex.getMessage()); }
+        }
+    }
+}
+
+/**
+ * Proof it works: a top-up, a person-to-person transfer, a merchant payment with a fee, a retried request, a
+ * refusal that writes nothing, a reversal, a statement, a reconciliation — and then fifty threads paying in
+ * both directions at once, with the total conserved and no deadlock.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        WalletService wallet = new WalletService("bank", "fee", Currency.INR);
+        wallet.configure(List.of(new SameCurrencyRule(),
+                                 new DailyLimitRule(Money.rupees("100000.00")),
+                                 new VelocityRule(wallet.ledger(), 200, 60_000)),
+                         new MerchantFlatFee(Money.rupees("2.00")));
+        wallet.addListener(new ReceiptPrinter());
+        FraudMonitor fraud = new FraudMonitor();
+        wallet.addListener(fraud);
+
+        wallet.open("alice", AccountType.USER, Currency.INR);
+        wallet.open("bob", AccountType.USER, Currency.INR);
+        wallet.open("chai-point", AccountType.MERCHANT, Currency.INR);
+
+        // money in: the bank settlement account pays Alice, so its balance goes negative by exactly the float
+        wallet.topUp("tp-1", "alice", Money.rupees("1000.00"));
+        System.out.println("alice " + Money.fmt(wallet.balanceOf("alice")) + ", bank " + Money.fmt(wallet.balanceOf("bank")));
+
+        // person to person: free
+        wallet.transfer("k-1", "alice", "bob", Money.rupees("250.00"), "dinner");
+        // a merchant payment: the sender pays amount + fee, three legs, and the posting still sums to zero
+        Transaction chai = wallet.transfer("k-2", "alice", "chai-point", Money.rupees("120.00"), "two cutting");
+        System.out.println("alice " + Money.fmt(wallet.balanceOf("alice")) + ", chai-point "
+            + Money.fmt(wallet.balanceOf("chai-point")) + ", fee " + Money.fmt(wallet.balanceOf("fee")));
+
+        // the same request twice (a phone on a bad network): applied once, the same transaction comes back
+        Transaction again = wallet.transfer("k-2", "alice", "chai-point", Money.rupees("120.00"), "two cutting");
+        System.out.println("retry of k-2 returned the same txn: " + (again == chai)
+            + ", alice still " + Money.fmt(wallet.balanceOf("alice")));
+
+        // a refusal writes nothing at all
+        long before = wallet.balanceOf("bob");
+        try {
+            wallet.transfer("k-3", "bob", "alice", Money.rupees("9000.00"), "too much");
+        } catch (TransferRejected e) { System.out.println("expected: " + e.getMessage()); }
+        try {                                                            // the same key again: the same answer
+            wallet.transfer("k-3", "bob", "alice", Money.rupees("9000.00"), "too much");
+        } catch (TransferRejected e) { System.out.println("retry of k-3, same reason: " + e.getMessage()); }
+        System.out.println("bob unchanged: " + (wallet.balanceOf("bob") == before));
+
+        // a frozen account can neither send nor receive
+        wallet.account("bob").setStatus(AccountStatus.FROZEN);
+        try { wallet.transfer("k-4", "alice", "bob", Money.rupees("10.00"), "blocked"); }
+        catch (TransferRejected e) { System.out.println("expected: " + e.getMessage()); }
+        wallet.account("bob").setStatus(AccountStatus.ACTIVE);
+
+        // the chai was never served: reverse it. Opposite entries, nothing edited
+        wallet.reverse("rev-1", chai.id());
+        System.out.println("after the reversal alice " + Money.fmt(wallet.balanceOf("alice"))
+            + ", chai-point " + Money.fmt(wallet.balanceOf("chai-point"))
+            + ", fee " + Money.fmt(wallet.balanceOf("fee")) + ", original is " + wallet.txn(chai.id()).status());
+
+        System.out.println("alice's statement:");
+        for (LedgerEntry e : wallet.statement("alice", 10)) System.out.println("  " + e);
+        System.out.println("reconciles (cached balances == journal fold, and everything sums to zero): " + wallet.reconcile());
+        System.out.println("refusals seen by the fraud desk: " + fraud.refusals());
+
+        // fifty threads, both directions at once: the classic deadlock, designed out by locking in id order
+        WalletService busy = new WalletService("bank", "fee", Currency.INR);
+        busy.configure(List.of(new SameCurrencyRule()), new NoFee());
+        busy.open("x", AccountType.USER, Currency.INR);
+        busy.open("y", AccountType.USER, Currency.INR);
+        busy.topUp("f-x", "x", Money.rupees("500.00"));
+        busy.topUp("f-y", "y", Money.rupees("500.00"));
+        long start = busy.balanceOf("x") + busy.balanceOf("y");
+
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> sent = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final int n = i;
+            sent.add(pool.submit(() -> {
+                go.await();
+                String from = n % 2 == 0 ? "x" : "y", to = n % 2 == 0 ? "y" : "x";
+                try { busy.transfer("r-" + n, from, to, Money.rupees("1.00"), "round " + n); return 1; }
+                catch (TransferRejected r) { return 0; }
+            }));
+        }
+        go.countDown();
+        int done = 0;
+        for (Future<?> f : sent) done += (Integer) f.get();
+        pool.shutdown();
+        long end = busy.balanceOf("x") + busy.balanceOf("y");
+        System.out.println("50 two-way transfers: settled=" + done + " total before=" + Money.fmt(start)
+            + " after=" + Money.fmt(end) + " (must match), reconciles=" + busy.reconcile());
+        if (start != end || !busy.reconcile()) throw new AssertionError("money was created or destroyed");
+    }
+}

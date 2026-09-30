@@ -1,0 +1,271 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: a fourth way to split -- by shares, 2:1:1. A NEW class and one registry line; nothing else moves.
+/**
+ * Weights: a couple sharing a room pays two units, a single pays one. The last participant absorbs the rounding
+ * so the shares still sum to the bill to the paise; CheckedSplit would catch it if they did not.
+ */
+class SharesSplit implements SplitStrategy {
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        long units = 0;
+        for (Participant p : parts) {
+            if (p.rawValue() <= 0) throw new IllegalArgumentException("a weight must be positive: " + p.userId());
+            units += p.rawValue();
+        }
+        List<Share> out = new ArrayList<>(parts.size());
+        long allocated = 0;
+        for (int i = 0; i < parts.size(); i++) {
+            long paise = (i == parts.size() - 1) ? total - allocated            // the last one absorbs the drift
+                                                 : total * parts.get(i).rawValue() / units;
+            allocated += paise;
+            out.add(new Share(parts.get(i).userId(), paise));
+        }
+        return out;
+    }
+}
+// the only change at the call site:
+//   group.configure(Map.of(EQUAL, new EqualSplit(), EXACT, new ExactSplit(),
+//                          PERCENT, new PercentSplit(), SHARES, new SharesSplit()), new MinCashFlow());
+// the one seam that is not free: SplitType is an enum, so a new type costs one constant. Key the
+// registry by String and even that disappears.
+
+// ---- ext: fairness -- rotate who absorbs the odd paise, instead of the same person always winning them
+/**
+ * Same equal split, but the extra paise start from a different participant each time, chosen by a counter the
+ * group hands in. Over many expenses everyone absorbs the same number of stray paise.
+ */
+class RotatingRemainderSplit implements SplitStrategy {
+    private final java.util.concurrent.atomic.AtomicLong seq = new java.util.concurrent.atomic.AtomicLong();
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        int n = parts.size();
+        long base = total / n, extra = total - base * n;
+        int start = (int) Math.floorMod(seq.getAndIncrement(), n);              // rotate the starting point
+        Map<String, Long> byUser = new HashMap<>();
+        for (Participant p : parts) byUser.put(p.userId(), base);
+        for (int i = 0; i < extra; i++) byUser.merge(parts.get((start + i) % n).userId(), 1L, Long::sum);
+        List<Share> out = new ArrayList<>(n);
+        for (Participant p : parts) out.add(new Share(p.userId(), byUser.get(p.userId())));
+        return out;
+    }
+}
+
+// ---- ext: multi-currency -- money grows a currency, one ledger per currency, FX only at settle time
+/** An amount with a currency. The minor unit is still an integer: 12345 INR is 123.45 rupees. */
+record Amount(String currency, long minor) {}
+
+/** Today's rate, handed in. Injected so a settlement can be priced at a rate a test controls. */
+interface FxRates { long convert(long minor, String from, String to); }
+
+/**
+ * One ledger per currency, so a euro debt is never silently added to a rupee debt. Balances are never re-priced
+ * when the rate moves: the conversion happens once, at the moment somebody actually settles.
+ */
+class MultiCurrencyLedger {
+    private final Map<String, Ledger> byCurrency = new ConcurrentHashMap<>();
+    /** Apply an expense in its own currency. */
+    void apply(String currency, String payerId, List<Share> shares, int sign) {
+        byCurrency.computeIfAbsent(currency, c -> new Ledger()).apply(payerId, shares, sign);
+    }
+    /** What this person's net is in one currency. */
+    long netOf(String currency, String userId) {
+        Ledger l = byCurrency.get(currency);
+        return l == null ? 0 : l.netOf(userId);
+    }
+    /** A single figure for a screen: every currency converted into one, at today's rate, for display only. */
+    long netIn(String display, String userId, FxRates fx) {
+        long total = 0;
+        for (Map.Entry<String, Ledger> e : byCurrency.entrySet())
+            total += fx.convert(e.getValue().netOf(userId), e.getKey(), display);
+        return total;
+    }
+}
+
+// ---- ext: an expense between two friends with no group -- the pair IS a group of two
+/**
+ * Splitwise has no separate "friend expense" model and neither do we: a pair is a group of two with an id built
+ * from the two user ids in sorted order, so alice-bob and bob-alice are the same group, created once.
+ */
+class Friends {
+    /** The two-person group for this pair, created on first use. Same lock, same ledger, same code path. */
+    static Group between(Splitwise app, String a, String b) {
+        String id = a.compareTo(b) < 0 ? "pair:" + a + ":" + b : "pair:" + b + ":" + a;
+        try { return app.group(id); } catch (NoSuchElementException e) { return app.newGroup(id, a, b); }
+    }
+}
+
+// ---- ext: recurring expenses -- a schedule, and a deterministic id so a replay cannot double-charge
+/**
+ * The rent, every month. due() returns the expense ids that should exist by now; the id contains the period, so
+ * running the job twice, or running it on two servers, posts each month exactly once (addExpense is idempotent).
+ */
+class Recurring {
+    private final String template, payerId; private final long amountPaise, everyMs, startMs;
+    private final List<Participant> parts;
+    Recurring(String template, String payerId, long amountPaise, List<Participant> parts, long startMs, long everyMs) {
+        this.template = template; this.payerId = payerId; this.amountPaise = amountPaise;
+        this.parts = List.copyOf(parts); this.startMs = startMs; this.everyMs = everyMs;
+    }
+    /** Post every period that has arrived by nowMs. Safe to call as often as you like. */
+    List<Expense> post(Group g, long nowMs) {
+        List<Expense> out = new ArrayList<>();
+        for (long period = 0; startMs + period * everyMs <= nowMs; period++)
+            out.add(g.addExpense(template + "#" + period, payerId, amountPaise, SplitType.EQUAL, parts,
+                                 template + " period " + period));      // the id carries the period: replay-safe
+        return out;
+    }
+}
+
+// ---- ext: the audit view -- every version, what it did, and what the balances were after it
+/**
+ * Reads the append-only log the group already keeps. Nothing new is stored: an edit left version 1 marked EDITED
+ * beside version 2, and a delete left the row marked DELETED, which is the whole audit trail.
+ */
+class AuditView {
+    /** Every version of one expense, oldest first. */
+    static List<Expense> historyOf(Group g, String expenseId) {
+        List<Expense> out = new ArrayList<>();
+        for (Expense e : g.history()) if (e.id().equals(expenseId)) out.add(e);
+        return out;
+    }
+    /** One line per version: who paid, how much, what happened to it. */
+    static String print(Group g, String expenseId) {
+        StringBuilder sb = new StringBuilder();
+        for (Expense e : historyOf(g, expenseId))
+            sb.append("  v").append(e.version()).append(" ").append(e.status()).append(" ")
+              .append(e.payerId()).append(" ").append(Money.fmt(e.totalPaise())).append(" ").append(e.note()).append("\n");
+        return sb.toString();
+    }
+}
+
+// ---- ext: persistence -- the two maps behind a repository, and the idempotent write in SQL
+/** The seam: the ledger's maps become rows. The group's code does not change, only what it was handed. */
+interface LedgerRepository {
+    /** Add delta to one person's net, atomically. */
+    void addToNet(String groupId, String userId, long deltaPaise);
+    /** Record that this expense id has been applied; false means it already had been. */
+    boolean claim(String groupId, String expenseId);
+    long netOf(String groupId, String userId);
+}
+/** The in-memory implementation, which is what the group uses today wearing a different coat. */
+class InMemoryLedgerRepository implements LedgerRepository {
+    private final Map<String, Long> net = new ConcurrentHashMap<>();
+    private final Set<String> applied = ConcurrentHashMap.newKeySet();
+    public void addToNet(String groupId, String userId, long delta) { net.merge(groupId + "/" + userId, delta, Long::sum); }
+    public boolean claim(String groupId, String expenseId) { return applied.add(groupId + "/" + expenseId); }
+    public long netOf(String groupId, String userId) { return net.getOrDefault(groupId + "/" + userId, 0L); }
+}
+// the same two operations in SQL, in ONE transaction, and the group is unchanged:
+//   INSERT INTO expense (id, group_id, payer, amount_paise) VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING;
+//     -- 0 rows inserted means a retry: stop here, the ledger was already moved
+//   UPDATE balance SET paise = paise + ? WHERE group_id = ? AND user_id = ?;
+//     -- the database's atomic add: two servers posting at once cannot lose an update, no application lock needed
+//   COMMIT;
+
+// ---- ext: the simplification is a suggestion -- prove the plan is valid, and say why greedy is a heuristic
+/** Checks a plan the way a reviewer would: does paying it clear everyone, and is it not more than n-1 payments. */
+class SimplifyProof {
+    /** True when applying every transfer leaves every single person at zero. */
+    static boolean settlesEveryone(Map<String, Long> net, List<Transfer> plan) {
+        Map<String, Long> after = new TreeMap<>(net);
+        for (Transfer t : plan) { after.merge(t.from(), t.paise(), Long::sum); after.merge(t.to(), -t.paise(), Long::sum); }
+        return after.values().stream().allMatch(v -> v == 0);
+    }
+    /** Greedy never needs more than n-1 payments, because each one zeroes at least one person. */
+    static boolean withinBound(Map<String, Long> net, List<Transfer> plan) {
+        long people = net.values().stream().filter(v -> v != 0).count();
+        return plan.size() <= Math.max(people - 1, 0);
+    }
+    // and the honest caveat: greedy is not always the MINIMUM. If three people owe 100 and three are owed 100,
+    // the minimum is three payments; greedy finds them here, but the exact minimum is a subset-sum problem
+    // (NP-hard), so a production system ships the greedy plan and calls it "simplified", not "minimal".
+}
+
+// ---- ext: auto-simplify -- collapse the pairwise ledger onto the minimal plan, keeping the log for audit
+/**
+ * The Splitwise toggle. It does not delete history: it builds a fresh ledger from the suggested transfers, which
+ * has the same net for every person but far fewer live pairs. The expense log is untouched, so it is reversible.
+ */
+class AutoSimplify {
+    /** A new ledger holding only the simplified transfers. Same nets, fewer pairs. */
+    static Ledger collapse(Map<String, Long> net, SimplifyStrategy strategy) {
+        Ledger collapsed = new Ledger();
+        for (Transfer t : strategy.simplify(net))                         // "to paid t.paise on behalf of from"
+            collapsed.apply(t.to(), List.of(new Share(t.from(), t.paise())), +1);
+        return collapsed;
+    }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) {
+        Splitwise app = new Splitwise();
+
+        // a fourth split rule: one new class, one registry line
+        Group flat = app.newGroup("flat", "ann", "ben", "cal");
+        // SplitType is an enum, so a brand-new SHARES constant would be the one extra edit. To show the drop-in
+        // without it, the weights rule is registered on the PERCENT key: the group, the ledger, the checks and
+        // the tests are all untouched, which is exactly the point.
+        flat.configure(new LinkedHashMap<>(Map.of(SplitType.EQUAL, new EqualSplit(), SplitType.EXACT, new ExactSplit(),
+                                                  SplitType.PERCENT, new SharesSplit())), new MinCashFlow());
+        flat.addExpense("w1", "ann", Money.rupees("400.00"), SplitType.PERCENT,
+            List.of(new Participant("ann", 2), new Participant("ben", 1), new Participant("cal", 1)), "rent 2:1:1");
+        System.out.println("shares 2:1:1 of 400.00 -> " + flat.history().get(0).shares());
+
+        // fairness: the odd paise move around
+        RotatingRemainderSplit rot = new RotatingRemainderSplit();
+        List<Participant> three = List.of(Participant.of("ann"), Participant.of("ben"), Participant.of("cal"));
+        for (int i = 0; i < 3; i++) System.out.println("rotating 100 paise across 3 -> " + rot.split(100, "ann", three));
+
+        // multi-currency: a euro debt and a rupee debt never mix
+        MultiCurrencyLedger mc = new MultiCurrencyLedger();
+        mc.apply("INR", "ann", List.of(new Share("ben", 30000)), +1);
+        mc.apply("EUR", "ben", List.of(new Share("ann", 2000)), +1);
+        FxRates fx = (minor, from, to) -> from.equals(to) ? minor : from.equals("EUR") ? minor * 90 : minor / 90;
+        System.out.println("ann: INR net " + Money.fmt(mc.netOf("INR", "ann")) + ", EUR net " + Money.fmt(mc.netOf("EUR", "ann"))
+            + ", shown in INR " + Money.fmt(mc.netIn("INR", "ann", fx)));
+
+        // two friends, no group
+        Group pair = Friends.between(app, "ben", "ann");
+        pair.addExpense("f1", "ann", Money.rupees("120.00"), SplitType.EQUAL,
+            List.of(Participant.of("ann"), Participant.of("ben")), "coffee");
+        System.out.println("friends " + pair.id() + ": ben owes ann " + Money.fmt(pair.owes("ben", "ann"))
+            + "; the same pair the other way round is " + Friends.between(app, "ann", "ben").id());
+
+        // recurring rent, posted twice on purpose
+        Group house = app.newGroup("house", "ann", "ben");
+        long start = 1_700_000_000_000L, month = 30L * 24 * 3600 * 1000;
+        Recurring rent = new Recurring("rent", "ann", Money.rupees("20000.00"),
+            List.of(Participant.of("ann"), Participant.of("ben")), start, month);
+        rent.post(house, start + 2 * month);
+        rent.post(house, start + 2 * month);                                        // the job ran twice
+        System.out.println("recurring rent: " + house.history().size() + " expenses (3 periods, posted once each)");
+
+        // edit, delete, and the audit view
+        house.edit("rent#0", "ann", Money.rupees("21000.00"), SplitType.EQUAL,
+            List.of(Participant.of("ann"), Participant.of("ben")), "rent period 0 (raised)");
+        System.out.print("audit of rent#0:\n" + AuditView.print(house, "rent#0"));
+
+        // persistence seam
+        LedgerRepository repo = new InMemoryLedgerRepository();
+        if (repo.claim("house", "x1")) { repo.addToNet("house", "ann", 5000); repo.addToNet("house", "ben", -5000); }
+        if (repo.claim("house", "x1")) { repo.addToNet("house", "ann", 5000); repo.addToNet("house", "ben", -5000); }
+        System.out.println("repository after the same write twice: ann " + Money.fmt(repo.netOf("house", "ann")));
+
+        // simplify: the plan is valid, and collapsing keeps every net
+        Group trip = app.newGroup("trip", "a", "b", "c", "d");
+        trip.addExpense("t1", "a", Money.rupees("400.00"), SplitType.EQUAL,
+            List.of(Participant.of("a"), Participant.of("b"), Participant.of("c"), Participant.of("d")), "villa");
+        trip.addExpense("t2", "b", Money.rupees("120.00"), SplitType.EQUAL,
+            List.of(Participant.of("c"), Participant.of("d")), "tickets");
+        Map<String, Long> net = trip.balances();
+        List<Transfer> plan = trip.simplify();
+        System.out.println("plan " + plan + " settles everyone=" + SimplifyProof.settlesEveryone(net, plan)
+            + " within n-1=" + SimplifyProof.withinBound(net, plan));
+        Ledger collapsed = AutoSimplify.collapse(net, new MinCashFlow());
+        System.out.println("auto-simplified ledger has the same nets: " + collapsed.netSnapshot().equals(net));
+    }
+}

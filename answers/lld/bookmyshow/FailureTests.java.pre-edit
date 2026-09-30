@@ -1,0 +1,129 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.time.*;
+
+/**
+ * One test per claim the design makes. Each one is the bug that happens if the claim is dropped, so a
+ * regression shows up as a FAIL line rather than as a customer with two tickets for seat B4.
+ */
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    /** A gateway that counts what it did, so a test can assert "charged exactly once". */
+    static class CountingGateway implements PaymentProcessor {
+        final AtomicInteger charges = new AtomicInteger(), refunds = new AtomicInteger();
+        private final boolean approve;
+        CountingGateway(boolean approve) { this.approve = approve; }
+        public String charge(long paise) { charges.incrementAndGet(); return approve ? "REF-" + charges.get() : null; }
+        public void refund(String ref, long paise) { refunds.incrementAndGet(); }
+    }
+
+    static long[] now = { Instant.parse("2026-09-15T12:00:00Z").toEpochMilli() };
+    static final long HOLD = 5 * 60_000L;
+    static Screen screen() {
+        List<Seat> seats = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) seats.add(new Seat("B", i, SeatClass.GOLD));
+        for (int i = 1; i <= 2; i++) seats.add(new Seat("C", i, SeatClass.PLATINUM));
+        return new Screen("T-1", seats);
+    }
+
+    public static void main(String[] args) throws Exception {
+        Clock clock = () -> now[0];
+        Screen sc = screen();
+        Show six  = new Show("SIX",  "Interstellar", sc, Instant.parse("2026-09-15T18:00:00Z").toEpochMilli(), clock, HOLD);
+        Show nine = new Show("NINE", "Interstellar", sc, Instant.parse("2026-09-15T21:00:00Z").toEpochMilli(), clock, HOLD);
+        BookingService svc = new BookingService();
+        svc.configure(new ClassPricing(), new AdjacentSeats());
+        svc.addShow(six); svc.addShow(nine);
+
+        // 1. fifty phones, one seat, one latch: exactly one hold
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Booking>> tries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            String u = "fan-" + i;
+            tries.add(pool.submit(() -> { go.await(); return svc.hold("SIX", u, List.of("C1")); }));
+        }
+        go.countDown();
+        int wins = 0;
+        for (Future<Booking> f : tries) { try { f.get(); wins++; } catch (ExecutionException e) { /* SeatUnavailable */ } }
+        pool.shutdown();
+        check(wins == 1, "fifty threads on one seat: exactly one hold (" + wins + ")");
+        check(six.statusOf("C1") == SeatStatus.HELD, "the seat is HELD, not sold and not free");
+        check(six.freeCount(SeatClass.PLATINUM) == 1, "one platinum seat left of two");
+
+        // 2. the card is declined: nothing is released, the seat comes back only when the hold lapses
+        Booking b2 = svc.hold("SIX", "raj", List.of("B1"));
+        CountingGateway no = new CountingGateway(false);
+        try { svc.confirm(b2.id, no); check(false, "a declined card must throw"); }
+        catch (PaymentDeclined e) { check(true, "a declined card throws: " + e.getMessage()); }
+        check(six.statusOf("B1") == SeatStatus.HELD && b2.status == BookingStatus.PENDING,
+              "after the decline the seat is still HELD and the booking still PENDING");
+        check(no.refunds.get() == 0, "nothing was refunded: nothing was taken");
+        now[0] += HOLD + 1;
+        check(six.statusOf("B1") == SeatStatus.AVAILABLE, "when the hold lapses the seat is free again, with no sweeper");
+        Booking b2b = svc.hold("SIX", "sara", List.of("B1"));
+        check(b2b.status == BookingStatus.PENDING && b2.status == BookingStatus.EXPIRED,
+              "the next user gets it; the dead booking is EXPIRED");
+        svc.release(b2b.id);
+
+        // 3. the gateway is slower than the hold: confirm is refused and the money is given back
+        Booking b3 = svc.hold("SIX", "asha", List.of("B2"));
+        CountingGateway slow = new CountingGateway(true) {
+            public String charge(long paise) { now[0] += HOLD + 1; return super.charge(paise); }   // the round trip outlived the hold
+        };
+        try { svc.confirm(b3.id, slow); check(false, "confirm after the hold expired must throw"); }
+        catch (HoldLapsed e) { check(true, "confirm after expiry is refused: " + e.getMessage()); }
+        check(slow.charges.get() == 1 && slow.refunds.get() == 1, "the card was charged once and refunded once");
+        check(six.statusOf("B2") == SeatStatus.AVAILABLE && b3.status == BookingStatus.EXPIRED,
+              "the seat is on sale again and the booking is EXPIRED, not SOLD");
+
+        // 4. a second confirm sells nothing twice and charges nothing twice
+        Booking b4 = svc.hold("SIX", "meena", List.of("B3"));
+        CountingGateway once = new CountingGateway(true);
+        svc.confirm(b4.id, once);
+        check(six.statusOf("B3") == SeatStatus.SOLD && b4.status == BookingStatus.CONFIRMED,
+              "the first confirm sells the seat");
+        try { svc.confirm(b4.id, once); check(false, "a second confirm must be refused"); }
+        catch (IllegalStateException e) { check(true, "a second confirm is refused: " + e.getMessage()); }
+        check(once.charges.get() == 1, "the card was charged exactly once");
+        check(six.freeCount(SeatClass.GOLD) == 5, "one gold seat sold, five free");
+
+        // 5. cancelling a confirmed booking gives the seat back and refunds once
+        svc.cancel(b4.id, once);
+        check(six.statusOf("B3") == SeatStatus.AVAILABLE && b4.status == BookingStatus.CANCELLED,
+              "cancel returns the seat to AVAILABLE");
+        check(once.refunds.get() == 1 && six.freeCount(SeatClass.GOLD) == 6, "refunded once and the count is back to six");
+
+        // 6. a listener that throws must not break the booking
+        svc.addObserver((event, b) -> { throw new RuntimeException("sms gateway is down"); });
+        Analytics analytics = new Analytics();
+        svc.addObserver(analytics);
+        Booking b6 = svc.hold("SIX", "vikram", List.of("B4"));
+        svc.confirm(b6.id, new CountingGateway(true));
+        check(b6.status == BookingStatus.CONFIRMED && six.statusOf("B4") == SeatStatus.SOLD,
+              "the booking confirms although the first listener threw");
+        check(analytics.counts.getOrDefault("CONFIRMED", 0) == 1, "the listener after the broken one still heard it");
+
+        // 7. three seats together, when no three are together: nothing is held
+        Booking b7 = svc.hold("NINE", "x", List.of("B2", "B5"));          // gold left free: B1, B3, B4, B6 -- B3+B4 is a run of two
+        svc.confirm(b7.id, new CountingGateway(true));
+        int freeBefore = nine.freeCount(SeatClass.GOLD);
+        try { svc.holdBest("NINE", "family", SeatClass.GOLD, 3); check(false, "an impossible adjacent request must throw"); }
+        catch (SeatUnavailable e) { check(true, "no run of three: " + e.getMessage()); }
+        check(nine.freeCount(SeatClass.GOLD) == freeBefore, "the failed request held nothing (" + freeBefore + " still free)");
+        for (String id : List.of("B1", "B3", "B4", "B6")) check(nine.statusOf(id) == SeatStatus.AVAILABLE, "seat " + id + " untouched by the failed request");
+        Booking b7b = svc.holdBest("NINE", "couple", SeatClass.GOLD, 2);
+        check(b7b.seatIds().equals(List.of("B3", "B4")), "a run of two is found and taken together: " + b7b.seatIds());
+
+        // 8. the headline: a chair sold at 6pm is still free at 9pm
+        svc.release(b7b.id);
+        check(six.statusOf("B4") == SeatStatus.SOLD && nine.statusOf("B4") == SeatStatus.AVAILABLE,
+              "the same chair is SOLD at 6pm and AVAILABLE at 9pm");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

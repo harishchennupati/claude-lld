@@ -1,0 +1,3902 @@
+[
+ {
+  "id": "job-scheduler",
+  "title": "Task / job scheduler (delayed, recurring, prerequisites; ScheduledExecutor-style)",
+  "kind": "concurrency",
+  "prompt": "Build an in-process scheduler: add a task (run at time T / after delay / every N / with priority or prerequisite tasks), get or run the next due task, complete or cancel it. Senior follow-up: run due tasks on a pool of worker threads safely (ScheduledExecutorService from scratch).",
+  "companies": [
+   {
+    "name": "LinkedIn",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5911896/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7619394/",
+     "https://www.fastprep.io/salesforce-interview"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6730864/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7196883/"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4160037/"
+    ]
+   },
+   {
+    "name": "Brex",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6475958/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7135013/",
+     "https://www.fastprep.io/microsoft-interview"
+    ]
+   },
+   {
+    "name": "Netflix",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3953494/"
+    ]
+   },
+   {
+    "name": "Lyft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4549316/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7908132/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4999447/",
+     "https://codezym.com/question/456"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/confluent-interview"
+    ]
+   },
+   {
+    "name": "Instacart",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/instacart-interview"
+    ]
+   }
+  ],
+  "reports": 11,
+  "followups": [
+   "make it thread-safe with N worker threads; sleep until next due time (DelayQueue / condition variable), wake early when an earlier task arrives",
+   "recurring / fixed-rate vs fixed-delay tasks; cancel a scheduled task",
+   "prerequisites -> valid completion order (topological sort), detect cycles (Brex milestone 3, Rippling DAG follow-up)",
+   "priorities + fairness; retry and timeout of a task; exception in a task must not kill the worker (Rubrik thread-pool follow-ups)",
+   "match jobs to machines by required capability (Microsoft)",
+   "batch/flush: run tasks once 10 accumulate or on flush() (Netflix TaskProcessor)"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "Most frequent concurrency-flavoured LLD with no page among the 34 (blocking-queue and producer-consumer are its building blocks). Codezym tags: Design a Job Scheduler (microsoft, salesforce), Cron Job Scheduler (amazon). LC 7646238 claims 'ScheduledThreadPoolExecutor from scratch asked by Uber, GS, Rubrik' but it is a tutorial post (secondary). Also appears as CodeSignal ICF 'Task Management System' (Airbnb, Coinbase on fastprep)."
+ },
+ {
+  "id": "versioned-kv",
+  "title": "Time-based / versioned key-value store (get at timestamp, snapshots, time travel)",
+  "kind": "practical",
+  "prompt": "Key-value store where every set creates a version: get(key) returns latest, get(key, timestamp or version) returns the value as of that point; later levels add snapshots / iterate a consistent snapshot, deletes, TTL, and concurrent readers.",
+  "companies": [
+   {
+    "name": "Snowflake",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6930095/",
+     "https://www.fastprep.io/snowflake-interview"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6302403/"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5047273/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5141523/"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/oracle-interview"
+    ]
+   },
+   {
+    "name": "Lyft",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/lyft-interview"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   },
+   {
+    "name": "Meta",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/meta-interview"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/coinbase-interview"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "global version counter vs per-key timestamps; binary search over versions",
+   "delete as a tombstone version; get-at-time after delete",
+   "snapshot(): return an id; iterate the snapshot while writes continue (Databricks 'Snapshot Set Iterator')",
+   "multi-threaded version (Google follow-up on LC 981)",
+   "historical field lookup inside CodeSignal ICF in-memory DB / banking 'balance at time T'",
+   "memory: compact old versions"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "inmem-db covers transactions, not version history. fastprep: Oracle 'Time-Based Key-Value Store' 3 reports; Ramp 'In-Memory DB with TTL and Historical Lookup' 5; Lyft 'Globally Versioned KV' 1; Databricks 'Snapshot Set Iterator' 2; Meta 'In-Memory DB with Historical Field Lookup' 1; Coinbase 'Banking System with Historical Snapshots' 1. The caller's 'Databricks-like KV with snapshots' lead lands here."
+ },
+ {
+  "id": "hit-counter",
+  "title": "Hit counter / sliding-window request counter (+ thread-safe, + QPS metrics)",
+  "kind": "practical",
+  "prompt": "Record hits (or GET/PUT calls) with timestamps and answer 'how many in the last N seconds/5 minutes' or 'average QPS'; follow-ups: configurable window, millions of hits per second, many threads calling hit() at once.",
+  "companies": [
+   {
+    "name": "Intuit",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5250764/"
+    ]
+   },
+   {
+    "name": "Cloudflare",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6796944/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8509983/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/apple-interview"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2023,
+    "urls": [
+     "https://www.fastprep.io/atlassian-interview"
+    ]
+   },
+   {
+    "name": "Dropbox",
+    "year": 2021,
+    "urls": [
+     "https://github.com/insideofdrop/Dropbox-Interview-Prep"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6525129/",
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "bucketed circular array (O(window) memory) vs queue of timestamps",
+   "thread-safety: per-bucket atomics vs one lock",
+   "measure_put_load()/measure_get_load() = average calls per second over last 5 min on a KV map (Databricks)",
+   "configurable window per query"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "Codezym 'Hit Counter - Multi-Threaded' (q6) tagged amazon, adobe, atlassian, salesforce, microsoft, apple, uber, oracle; 'Configurable Time Window Hit Counter' (q403) similar tags. Apple fastprep 'Implement Hit Counter' 2 reports. Dropbox evidence is old (GitHub prep list)."
+ },
+ {
+  "id": "randomized-store",
+  "title": "O(1) insert / delete / getRandom store (RandomizedSet family, + generics, + concurrency)",
+  "kind": "practical",
+  "prompt": "Registry class with insert, delete, lookup and getRandom all O(1) average (app store, KV store, queue with getRandom). Interviewers then add duplicates, generic key/value types, or thread-safety.",
+  "companies": [
+   {
+    "name": "Bloomberg",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3249478/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8428721/"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6982624/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8243609/",
+     "https://codezym.com/question/212"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8373008/"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "support duplicates (map value -> set of indices)",
+   "make it generic (template class) - Uber LLD round",
+   "enqueue/dequeue + getRandom (Confluent) then make it thread-safe",
+   "getFirst / insertion order (codezym uber q212)"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "LeetCode 380/381-style but asked inside LLD/coding rounds with class-design and concurrency follow-ups."
+ },
+ {
+  "id": "meeting-room-booking",
+  "title": "Meeting-room / slot booking scheduler (rooms, capacity, audit log, concurrency)",
+  "kind": "lld",
+  "prompt": "Given N rooms (with capacity), book a meeting [start,end) into a free room or return INVALID; list bookings; slots with a max booking count; follow-ups on capacity, best-fit room, and concurrent booking of the same slot.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5273112/",
+     "https://leetcode.com/discuss/post/5795502/",
+     "https://codezym.com/question/29",
+     "https://codezym.com/question/44",
+     "https://codezym.com/question/45"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8382886/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6883459/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6924065/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8293408/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "room capacity constraint; choose room that minimises idle 'spillage' (best fit)",
+   "store per-room audit logs and delete them after X days (Uber)",
+   "multithreaded booking of the same slot / held-but-not-paid slots (Amazon slot reservation)",
+   "recurring meetings; list bookings per room/user (codezym variants)",
+   "court booking: assign to first available court or open a new one (Atlassian DS round)"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "bookmyshow covers seat booking, not interval-in-room booking. Codezym tags meeting-room scheduler to salesforce, uber, amazon. Google fastprep 'Restaurant Waitlist' and Pinterest 'restaurant seating windows' (LC 5526021) are adjacent."
+ },
+ {
+  "id": "file-api-practical",
+  "title": "File-API practical tasks: cp, tail -n, chunked read/write, directory size (often multithreaded)",
+  "kind": "practical",
+  "prompt": "Using only a small file interface (open/read(offset,len)/write/append/list), implement cp, tail(file, n), total directory size, delete-tree or a chunked reader; follow-up: parallelise with threads while keeping writes ordered and memory bounded.",
+  "companies": [
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7629615/",
+     "https://leetcode.com/discuss/post/7699062/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8462091/"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7125787/",
+     "https://leetcode.com/discuss/post/4216503/",
+     "https://leetcode.com/discuss/post/5900862/"
+    ]
+   },
+   {
+    "name": "Datadog",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/5154052/",
+     "https://leetcode.com/discuss/post/6375931/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4279643/"
+    ]
+   }
+  ],
+  "reports": 9,
+  "followups": [
+   "read in parallel chunks, merge, and minimise writes (SSD writes are costly) - Rubrik",
+   "files larger than RAM: stream, do not load (Confluent)",
+   "no ExecutorService allowed - raw threads (Rubrik)",
+   "directory size with cached aggregates when files change"
+  ],
+  "maps_to": null,
+  "tier": 1,
+  "notes": "file-system slug is an in-memory tree (mkdir/ls/cat/mv); these rounds test I/O against a given low-level API. Confluent recruiters describe the round as 'a practical problem involving files, low-level file access'."
+ },
+ {
+  "id": "snake-game",
+  "title": "Snake game (Nokia snake: board, food, growth, score)",
+  "kind": "lld",
+  "prompt": "Simulate snake on an R x C board: move(direction) returns score or -1 on self/wall collision; food list consumed in order grows the snake. Clean OOD + runnable code + tests.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6399510/",
+     "https://leetcode.com/discuss/post/6580351/",
+     "https://leetcode.com/discuss/post/6959323/",
+     "https://leetcode.com/discuss/post/6990017/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7565749/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4282670/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7619101/"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "ask about boundary behaviour (wrap vs die)",
+   "print head and tail positions to console (Atlassian)",
+   "extensible: obstacles, multiple food types, speed levels",
+   "O(1) collision check with deque + hash set"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Not snake-ladder. Codezym q202 tags google, microsoft, meta, salesforce, uber, atlassian."
+ },
+ {
+  "id": "popularity-tracker",
+  "title": "Popularity tracker / All-O(1) counter (increase, decrease, most popular, top-K)",
+  "kind": "practical",
+  "prompt": "increasePopularity(id), decreasePopularity(id), getMostPopular() (and least) in O(1); follow-ups: change by x instead of 1, tie-breaking, top-K printing.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5757617/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6850728/",
+     "https://leetcode.com/discuss/post/6907694/",
+     "https://leetcode.com/discuss/post/6922713/",
+     "https://leetcode.com/discuss/post/7057047/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7565749/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4985300/"
+    ]
+   },
+   {
+    "name": "LinkedIn",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7820370/"
+    ]
+   }
+  ],
+  "reports": 8,
+  "followups": [
+   "+x / -x updates break the O(1) bucket list -> ordered map of count -> set",
+   "tie-breaker: most recent vs smallest id",
+   "top-K instead of top-1",
+   "thread-safety"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "At Atlassian this sits in the 'Data Structures' round next to Code Design; it is the coding form of the Tagging/popular-tags HLD question."
+ },
+ {
+  "id": "leaderboard",
+  "title": "Leaderboard with live score updates (top-K, rank of a player)",
+  "kind": "lld",
+  "prompt": "Players/teams get score updates; return top-K and a player's rank; model games, players and scoring rules.",
+  "companies": [
+   {
+    "name": "Apple",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4669922/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5173754/"
+    ]
+   },
+   {
+    "name": "Pinterest",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/pinterest-interview"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/coinbase-interview"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://codezym.com/question/31"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://codezym.com/question/31"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "ties",
+   "sliding time window (escape-room leaderboard)",
+   "fixed-K leaderboard with segment tree (Coinbase)",
+   "rank closest to mine (Amazon 'chess in-memory DB' list item)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep: Pinterest 'Escape Room Leaderboard' 3 reports; Coinbase 'Dynamic Fixed-K Score Leaderboard' 1. Codezym 'Leaderboard for Fantasy Teams' (uber, microsoft)."
+ },
+ {
+  "id": "card-games",
+  "title": "Card games OOD (deck, Blackjack, combos, Camel Cards)",
+  "kind": "lld",
+  "prompt": "Model cards, deck, hands, players and winner rules for a card game (Blackjack or custom 3-card combos); shuffle multiple decks; rank hands.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5014307/",
+     "https://leetcode.com/discuss/post/5054455/"
+    ]
+   },
+   {
+    "name": "Bloomberg",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5533961/"
+    ]
+   },
+   {
+    "name": "Pinterest",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/pinterest-interview"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7649290/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "custom winner-checking rules as pluggable strategies",
+   "multiple decks shuffled together (Bloomberg)",
+   "hand ranking with jokers (Camel Cards)",
+   "interviewer wanted OOD, not a quick set-based check (Amazon phone screen)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Covers the caller's 'Amazon deck of cards' lead: seen as Amazon phone-screen OOD in 2024. fastprep: Rippling 'Camel Cards' 4 reports; Pinterest LLD 'Blackjack Table Game'."
+ },
+ {
+  "id": "delivery-cost-tracker",
+  "title": "Delivery cost tracker / driver payroll (Rippling) and Dasher pay (DoorDash)",
+  "kind": "practical",
+  "prompt": "addDriver(id, hourlyRate), addDelivery(driverId, start, end); total cost of all deliveries; payUpToTime(t) and getTotalUnpaid(); analytics like max simultaneous drivers in last 24h. DoorDash: compute dasher pay from pickup/dropoff events with a multiplier per concurrent order.",
+  "companies": [
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6319848/",
+     "https://leetcode.com/discuss/post/6850291/",
+     "https://leetcode.com/discuss/post/7122128/",
+     "https://leetcode.com/discuss/post/7140667/",
+     "https://leetcode.com/discuss/post/7196226/",
+     "https://leetcode.com/discuss/post/7253712/",
+     "https://leetcode.com/discuss/post/7285077/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7602654/",
+     "https://leetcode.com/discuss/post/7626571/",
+     "https://leetcode.com/discuss/post/7649290/",
+     "https://leetcode.com/discuss/post/7908132/",
+     "https://leetcode.com/discuss/post/8354744/",
+     "https://leetcode.com/discuss/post/8375737/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "DoorDash",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6584680/",
+     "https://leetcode.com/discuss/post/7353783/",
+     "https://www.fastprep.io/doordash-interview"
+    ]
+   }
+  ],
+  "reports": 15,
+  "followups": [
+   "money precision (cents / BigDecimal; rate per second)",
+   "payUpToTime must not double-pay; make it faster than O(n) (binary search / prefix sums)",
+   "max simultaneous drivers in last 24h (sweep line)",
+   "effective-dated rate changes",
+   "DoorDash: store waits and peak-hour multipliers; call an upstream payments API"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep: Rippling 'Delivery Cost Tracker' 13 reports (its most reported question), plus 'with Effective-Dated Rates' 2 and 'Driver Balance Ledger' 1; DoorDash 'Dasher Pay with Store Waits and Peak Hours' 7."
+ },
+ {
+  "id": "access-management",
+  "title": "Employee directory / access management (grant, revoke, inherit through org tree)",
+  "kind": "lld",
+  "prompt": "Model employees, managers, teams; grant(resource, employee), revoke, hasAccess with inheritance through the hierarchy; hierarchical view from any employee.",
+  "companies": [
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7069356/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7494610/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6880181/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3276416/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "cap org-tree height h: anyone deeper reports to the CEO (Rippling)",
+   "closest common group for a set of employees (Atlassian DS round)",
+   "team membership many-to-many"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep: Rippling 'Employee Resource Access Management' 3, 'Limit an Organization Tree's Height' 1. Atlassian's 'employee hierarchy / closest group' is a Data Structures question (LC 7021261, 7246118)."
+ },
+ {
+  "id": "vehicle-rental",
+  "title": "Car / bike rental (inventory + reservations)",
+  "kind": "lld",
+  "prompt": "Search available vehicles by type/location/time, reserve, pick up, return, bill; car inventory service + reservation service.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6550512/",
+     "https://leetcode.com/discuss/post/7302014/",
+     "https://codezym.com/question/21"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6177012/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5794116/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "searchBikes with list of filters + location (Salesforce)",
+   "schema design + 2-3 fully implemented features (Adobe)",
+   "overlapping reservations for the same car",
+   "pricing strategies"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Codezym q21 'Car Rental System' tags amazon, uber."
+ },
+ {
+  "id": "library-management",
+  "title": "Library management / checkout",
+  "kind": "lld",
+  "prompt": "Titles vs physical copies, members, checkout/return/reserve, fines; sometimes plus DB schema and SQL.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4343398/",
+     "https://leetcode.com/discuss/post/4374203/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4937133/",
+     "https://www.fastprep.io/microsoft-interview"
+    ]
+   },
+   {
+    "name": "Bloomberg",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7363661/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "write the SQL for overdue books (Bloomberg)",
+   "class diagram + DB schema only (Walmart)",
+   "holds / waitlist per title"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Microsoft fastprep LLD 'Design a Library Circulation System'."
+ },
+ {
+  "id": "inventory-order-management",
+  "title": "Inventory / order processing with concurrency and idempotency",
+  "kind": "lld",
+  "prompt": "Reserve stock for orders across warehouses, handle concurrent orders for the last unit, process an order exactly once even when the same order arrives twice (retries).",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8512004/",
+     "https://leetcode.com/discuss/post/7622801/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6552739/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2025,
+    "urls": [
+     "https://codezym.com/question/4"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "two buyers, one unit: lock granularity",
+   "idempotency key for duplicate order messages",
+   "multithreaded stock updates"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Codezym q4 'order and inventory management - Multi-Threaded' tags intuit, amazon (and India companies)."
+ },
+ {
+  "id": "auction",
+  "title": "Online auction / bidding system",
+  "kind": "lld",
+  "prompt": "Create auctions, place bids with validation, close at end time, pick winner; extensible rules.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7599188/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6079959/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "concurrent bids at close time",
+   "requirements revealed as follow-ups to test extensibility (Amazon)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Meta asks 'Instagram auction' as a Product Architecture (HLD) question, not LLD."
+ },
+ {
+  "id": "autocomplete",
+  "title": "Autocomplete / search-suggestion engine (LLD)",
+  "kind": "lld",
+  "prompt": "Suggest top-K completions for a prefix from a dictionary or history (IDE keywords/methods/variables); ranking and updates.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7164991/",
+     "https://leetcode.com/discuss/post/6869693/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5653776/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8317368/"
+    ]
+   },
+   {
+    "name": "Pinterest",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/pinterest-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "trie + top-K cache per node",
+   "rank by frequency with LFU",
+   "typed suggestions (keyword/method/class) via facade + strategies"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Often asked as DSA; Microsoft asks it as an LLD round."
+ },
+ {
+  "id": "web-crawler-mt",
+  "title": "Multithreaded web crawler",
+  "kind": "concurrency",
+  "prompt": "Given startUrl and an HtmlParser/fetch API, crawl all pages under the same host (or to max depth); then make it multithreaded without duplicate visits.",
+  "companies": [
+   {
+    "name": "Dropbox",
+    "year": 2021,
+    "urls": [
+     "https://github.com/insideofdrop/Dropbox-Interview-Prep"
+    ]
+   },
+   {
+    "name": "MongoDB",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/mongodb-interview"
+    ]
+   },
+   {
+    "name": "Snowflake",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/snowflake-interview"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4254781/",
+     "https://leetcode.com/discuss/post/4285067/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "thread-safe visited set",
+   "bounded parallelism",
+   "stop condition when all workers idle",
+   "rate-limit per host"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Dropbox evidence is the community prep repo (pre-2023, 'EXTREMELY popular for onsite'). Atlassian's web-scraper questions are HLD rounds, not coding."
+ },
+ {
+  "id": "buffered-writer",
+  "title": "Thread-safe buffered / durable log writer (EventWriter, BufferedFileWriter, WAL batch writer)",
+  "kind": "concurrency",
+  "prompt": "Wrap a slow file API: many threads call append(bytes); batch writes into a buffer, flush on size/time, keep order, and guarantee durability (fsync) without fsync-per-call.",
+  "companies": [
+   {
+    "name": "Datadog",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6376092/"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6889797/"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7736707/",
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7636712/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "producer-consumer between callers and a single writer thread",
+   "ordered writes with multiple writer threads",
+   "flush on close / crash recovery",
+   "three threads: producer, framework, sink exchanging via a buffer (Microsoft logging framework)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "logger slug covers levels/appenders, not the concurrent durable-writer core. fastprep Databricks: 'Concurrent Buffered File Logger', 'Durable Data Writer', LLD 'WAL-Backed Batch Log Writer'."
+ },
+ {
+  "id": "thread-pool",
+  "title": "Thread pool executor from scratch",
+  "kind": "concurrency",
+  "prompt": "Implement a fixed-size thread pool: submit(Runnable/Callable) -> Future, workers take from a bounded queue, shutdown/awaitTermination.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7620235/",
+     "https://codezym.com/question/294"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7629615/",
+     "https://leetcode.com/discuss/post/7947916/"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7614788/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "exception in a task must not kill the worker",
+   "task timeout; reclaim a stuck thread",
+   "build it on your own bounded blocking queue (Rubrik)",
+   "fetch file chunks in parallel through the pool (Databricks CachedFile)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Pairs with mt-blocking-queue (existing)."
+ },
+ {
+  "id": "iterators",
+  "title": "Composable iterators (interleave, range, list of iterators, filter, remove)",
+  "kind": "practical",
+  "prompt": "Part 1 zigzag over 2 arrays; part 2 range iterator(start,end,step); part 3 interleave a list of iterators; part 4 add filter(). Other variants: nested-list iterator with remove, lazy k-way union, snapshot set iterator.",
+  "companies": [
+   {
+    "name": "Coinbase",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5117593/",
+     "https://leetcode.com/discuss/post/5843584/",
+     "https://leetcode.com/discuss/post/5911625/"
+    ]
+   },
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   },
+   {
+    "name": "MongoDB",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/mongodb-interview"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "hasNext without consuming",
+   "exhausted iterators dropped from rotation",
+   "filter wraps any iterator (decorator)",
+   "remove() semantics"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Coinbase's most repeated onsite coding theme in 2024 reports."
+ },
+ {
+  "id": "api-filter-pagination",
+  "title": "Records API: filters + cursor pagination (+ sorting)",
+  "kind": "practical",
+  "prompt": "Given transactions (id, user, currency, amount, time) implement query with multiple filters, limit, and next-cursor pagination; explain offset vs cursor.",
+  "companies": [
+   {
+    "name": "Coinbase",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5117593/",
+     "https://leetcode.com/discuss/post/5911625/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6079959/"
+    ]
+   },
+   {
+    "name": "Nutanix",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7650412/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "stable cursor under inserts",
+   "nextLink format",
+   "add sorting (Intuit craft extension)",
+   "validate page/size inputs (Nutanix FastAPI)"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "currency-conversion",
+  "title": "Currency conversion (direct -> one hop -> best rate / path)",
+  "kind": "practical",
+  "prompt": "Parse 'USD:CAD:DHL:5,...' or rate pairs; convert amount with direct rate, then via at most one intermediate, then best rate / max-rate path with reconstruction.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6006563/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5375106/",
+     "https://leetcode.com/discuss/post/5411057/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/amazon-interview"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5745602/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "min-cost path with shipping method returned (Stripe)",
+   "cycles / arbitrage",
+   "precision"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "More DSA than LLD at Amazon/Uber (graph). fastprep: Amazon 'Currency Conversion Rate' 4, Rippling 'Maximum Currency Conversion Along a Simple Path' 2."
+ },
+ {
+  "id": "rule-engine",
+  "title": "Rules / validation engine over records (fraud rules, KYC checks, expense policy, fees)",
+  "kind": "practical",
+  "prompt": "Multi-part: parse CSV/records, apply a growing list of rules (non-empty fields, amount ranges, behaviour-match %, expense caps), output decisions/reasons; rules should be data-driven.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7497123/",
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/rippling-interview",
+     "https://www.fastprep.io/experience/2020-2026-rippling-senior-swe-phone-screens-onsites-19-experiences-htrceni4sy"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "rules as data (JSON) not if-chains",
+   "precedence and conflicts between rules",
+   "explainable error reporting",
+   "versioning / audit"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep: Rippling 'Corporate Card Expense Rules' 9 reports; Stripe 'Business Account KYC Verification Parts 1-5' 7, 'Transaction Fee Calculator' 3, 'Rule-Driven Transaction Fraud Detection' 2, 'Evaluate Ordered Action Rules' 2; Ramp 'Detect Recurring Transactions' 1."
+ },
+ {
+  "id": "load-balancer",
+  "title": "Load balancer / request router simulation (round-robin, weighted, sticky, consistent hashing)",
+  "kind": "practical",
+  "prompt": "Simulate routing of requests/WebSocket connections to servers with parts that add weights, TTL, sticky sessions, draining; or debug broken round-robin and consistent-hashing routers.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   },
+   {
+    "name": "DoorDash",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/doordash-interview"
+    ]
+   }
+  ],
+  "reports": 0,
+  "followups": [
+   "server removal and rebalancing",
+   "connection stickiness",
+   "weighted choice",
+   "debug an existing implementation"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Aggregator-only evidence: fastprep Stripe OA 'WebSocket Load Balancer Parts 1-5' 9 reports, 'Request Routing System' 8, onsite 'Weighted Server Load Balancer with TTL' 2; DoorDash project 'Debug Two Routing Strategies' (codezym DoorDash 'Debugging: Round Robin Traffic Router')."
+ },
+ {
+  "id": "waitlist-queue",
+  "title": "Priority waitlist queue (Genius Bar VIP queue, restaurant waitlist)",
+  "kind": "lld",
+  "prompt": "Customers join a queue (regular vs VIP / party size); serve by priority rules with fairness; estimate wait.",
+  "companies": [
+   {
+    "name": "Intuit",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7484387/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/google-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "starvation of regular customers",
+   "party size vs table size",
+   "cancel / no-show"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep Google 'Restaurant Waitlist' 2 reports; Intuit fastprep 'VIP-Priority Fixed-Window Rate Limiter' is a sibling."
+ },
+ {
+  "id": "icf-cloud-storage",
+  "title": "CodeSignal ICF: cloud file storage (4 levels)",
+  "kind": "practical",
+  "prompt": "L1 add/copy/get file size; L2 top-N largest files by prefix; L3 users with storage capacity, merge users; L4 backup and restore (or compression).",
+  "companies": [
+   {
+    "name": "Meta",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6951291/",
+     "https://www.fastprep.io/meta-interview"
+    ]
+   },
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "capacity checks on copy",
+   "restore to a timestamp",
+   "sort ties lexicographically",
+   "all state in memory; 90 minutes total"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "fastprep: Airbnb 'Cloud Storage with User Backup and Restore' 3 + 'In-Memory File System' 2; Ramp 'Cloud Storage System Parts 1-4' 2 + 'Compression and Decompression' 3; Meta project 'In-Memory Cloud Storage System'. Different from file-system slug (flat paths, users, quotas, backups)."
+ },
+ {
+  "id": "icf-worker-management",
+  "title": "CodeSignal ICF: worker management (register, top workers, promotions/overtime, merge)",
+  "kind": "practical",
+  "prompt": "L1 register workers and office check-ins/outs; L2 top workers by time; L3 promotions with salary changes or overtime rules; L4 double-pay intervals or merge workers.",
+  "companies": [
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   },
+   {
+    "name": "Instacart",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/instacart-interview"
+    ]
+   }
+  ],
+  "reports": 0,
+  "followups": [
+   "interval arithmetic for paid time",
+   "salary changes effective at a timestamp",
+   "ranking ties"
+  ],
+  "maps_to": null,
+  "tier": 2,
+  "notes": "Aggregator-only: fastprep Airbnb 3 reports per part, Ramp 5, Instacart 1."
+ },
+ {
+  "id": "middleware-router",
+  "title": "Middleware / URL router with wildcards and path params (Atlassian)",
+  "kind": "lld",
+  "prompt": "addRoute(pattern, result); callRoute(path) returns the best match. '*' matches exactly one segment; ':id' captures a param. Variant: KV get/put where get supports wildcards.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4725877/",
+     "https://www.glassdoor.ie/Interview/Coding-rounds-were-for-a-middleware-URL-router-and-a-multi-user-rate-limiter-QTN_7153582.htm"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6766868/",
+     "https://leetcode.com/discuss/post/6763689/",
+     "https://leetcode.com/discuss/post/6941828/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8293408/",
+     "https://codezym.com/question/36"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "trie by path segment (interviewer may insist on a trie)",
+   "specificity order: static > param > wildcard",
+   "'**' multi-segment wildcard",
+   "multithreaded route registration (discussed)",
+   "capture path params in the result"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "agent-rating",
+  "title": "Customer-support agent rating leaderboard (Atlassian 'Customer Satisfaction')",
+  "kind": "lld",
+  "prompt": "giveRating(agent, 1..5); getRatings() returns agents by average rating desc; then best agents per month; export.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6583356/",
+     "https://leetcode.com/discuss/post/6817408/",
+     "https://leetcode.com/discuss/post/6850728/",
+     "https://leetcode.com/discuss/post/6922713/",
+     "https://leetcode.com/discuss/post/6926284/",
+     "https://leetcode.com/discuss/post/6938486/",
+     "https://leetcode.com/discuss/post/6938816/",
+     "https://leetcode.com/discuss/post/7057047/",
+     "https://leetcode.com/discuss/post/7070747/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7575766/",
+     "https://codezym.com/question/35"
+    ]
+   }
+  ],
+  "reports": 10,
+  "followups": [
+   "per-month leaderboards",
+   "tie-breakers (more ratings wins, alphabetical)",
+   "concurrent ratings (thread-safety)",
+   "getRatings called often -> keep sorted structure instead of sorting each call",
+   "integer vs float averages"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Atlassian's most reported Code Design question in 2025-26."
+ },
+ {
+  "id": "file-collections",
+  "title": "File collections size report (total size, top-N collections)",
+  "kind": "practical",
+  "prompt": "addFile(name, size, collections...); report total size of all files and top N collections by size; a file may belong to several collections.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4907972/",
+     "https://leetcode.com/discuss/post/5605423/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6344788/",
+     "https://codezym.com/question/37"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "multiple collections per file",
+   "multithreaded env",
+   "nested collections"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Atlassian Data Structures round / P60 phone screen."
+ },
+ {
+  "id": "subscription-billing",
+  "title": "Product plan / subscription cost explorer (Atlassian)",
+  "kind": "lld",
+  "prompt": "Customers subscribe to products on plans with prices; compute monthly/yearly cost; plan changes mid-period.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5757617/",
+     "https://codezym.com/question/38"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "proration on plan change",
+   "discounts"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Weak: one report ('some question around Subscription for different products'), codezym q38. Codezym also lists 'Last Lap Hero (F1 race tracker)' (q46) for Atlassian - no first-hand report found."
+ },
+ {
+  "id": "unix-find",
+  "title": "Unix find / grep as an API (filter specifications)",
+  "kind": "lld",
+  "prompt": "find(dir, criteria) for size > X, extension, name pattern; extensible criteria; follow-up AND/OR/NOT combinations. grep variant: case-insensitive, invert match, count, context lines.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5186627/",
+     "https://codezym.com/question/14",
+     "https://codezym.com/question/15"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6648100/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "Specification / Composite pattern for boolean predicates",
+   "recursive traversal with symlinks",
+   "new filters without touching old code"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Also in Amazon question lists compiled from LC (LC 4688429 2024, 7060987 2025). Classic AWS 'logical and maintainable' question."
+ },
+ {
+  "id": "amazon-locker",
+  "title": "Amazon Locker (assign locker by package size, OTP pickup, expiry)",
+  "kind": "lld",
+  "prompt": "Lockers of sizes S/M/L at locations; assign smallest fitting free locker to a package, notify with code, customer opens with code, free locker after pickup or return after N days.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5008512/",
+     "https://leetcode.com/discuss/post/5212662/",
+     "https://leetcode.com/discuss/post/5305492/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6585102/",
+     "https://leetcode.com/discuss/post/7228788/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8293814/",
+     "https://codezym.com/question/16"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/google-interview"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "concurrency: two packages grab the same locker",
+   "code generation/expiry",
+   "returns flow",
+   "HLD version with APIs (some rounds)"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Asked as 'logical and maintainable' coding (AWS Seattle 2024 bar raiser) and as LLD/HLD in India. Google fastprep 'Assign Locker' (2 reports) is a smaller cousin."
+ },
+ {
+  "id": "pizza-coffee-pricing",
+  "title": "Pizza pricing / coffee machine (decorator + builder, deals)",
+  "kind": "lld",
+  "prompt": "Price a pizza from base + toppings (+ drinks, deals like BOGO); coffee machine with recipes; requirements arrive as follow-ups to test extensibility.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6222043/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7599188/",
+     "https://codezym.com/question/18",
+     "https://codezym.com/question/19"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "new toppings without code change",
+   "deals as strategy objects",
+   "store-specific prices (factory)"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "LC 6566858 (2025) is a pizza-store LLD write-up attributed to Amazon."
+ },
+ {
+  "id": "music-analytics",
+  "title": "Music player / song-play analytics (Rippling)",
+  "kind": "lld",
+  "prompt": "addSong(title) -> id; playSong(songId, userId); printAnalyticsSummary() by unique listeners; lastThreePlayedSongTitles(userId).",
+  "companies": [
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5590877/",
+     "https://leetcode.com/discuss/post/5868538/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6314198/",
+     "https://leetcode.com/discuss/post/6850291/",
+     "https://leetcode.com/discuss/post/7285077/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7455964/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "top-K with heap",
+   "recent distinct songs per user",
+   "star/unstar favourites + last N favourites played"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "fastprep Rippling 'Song Play Analytics' 8 reports. Salesforce asked an 'LLD of Spotify' (2026). Atlassian asks 'top-k songs by number of users' as DSA (LC 6959323)."
+ },
+ {
+  "id": "stripe-shipping-cost",
+  "title": "Shipping cost calculator (Stripe, tiered pricing parts 1-3)",
+  "kind": "practical",
+  "prompt": "Given an order (country, product, quantity) and a shipping-cost config, compute cost: part 1 fixed per-unit, part 2 volume tiers, part 3 mixed fixed/incremental tiers.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5647506/",
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "tier boundaries inclusive/exclusive",
+   "total across countries"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "fastprep: 12 reports (Stripe's top phone-screen item)."
+ },
+ {
+  "id": "stripe-invoice-reconciliation",
+  "title": "Invoice / payment reconciliation (Stripe)",
+  "kind": "practical",
+  "prompt": "Match payments to invoices from parsed input; report paid, partially paid, unmatched.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 0,
+  "followups": [
+   "partial payments",
+   "currency",
+   "ordering of matching"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Aggregator-only: fastprep 9 reports (phone screen)."
+ },
+ {
+  "id": "stripe-email-scheduler",
+  "title": "Subscription email / invoice notification scheduler (Stripe)",
+  "kind": "practical",
+  "prompt": "Given customers with plans and a schedule of events (welcome, upcoming renewal, expired, invoice due, delinquent), print the emails to send in time order; later parts add plan changes.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 0,
+  "followups": [
+   "plan change mid-period",
+   "delinquency escalation"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Aggregator-only: fastprep 'Email Subscription Scheduler' 12 onsite reports, 'Schedule Invoice Emails and Delinquencies' 2 (2023)."
+ },
+ {
+  "id": "stripe-accept-language",
+  "title": "HTTP Accept-Language matching (Stripe)",
+  "kind": "practical",
+  "prompt": "parse(header, supported) returns supported tags in preference order; parts add language-only prefixes ('en' matches en-US), '*' wildcard, and q-factors.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4742657/",
+     "https://www.glassdoor.com/Interview/Parsing-the-HTTP-Accept-Language-header-QTN_4469893.htm",
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "q=0 excludes",
+   "duplicates",
+   "stable ordering by q then header position"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "fastprep 4 reports."
+ },
+ {
+  "id": "stripe-account-balance",
+  "title": "Account balance manager / rebalance accounts to a minimum (Stripe)",
+  "kind": "practical",
+  "prompt": "Process transfers between accounts, compute totals, reject overdrafts; keep every account above a threshold with minimal transfers.",
+  "companies": [
+   {
+    "name": "Stripe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5647506/",
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "reject overdraft",
+   "platform coverage of negative balances"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "fastprep 'Account Balance Manager Parts 1-3' 4 reports; 'Rebalance Bank Accounts' 1."
+ },
+ {
+  "id": "customer-bootstrap-api",
+  "title": "Aggregate several mocked services into one API response (DoorDash Code Craft)",
+  "kind": "practical",
+  "prompt": "Implement an endpoint that calls 2-3 mocked downstream services (profile, orders, payments), merges fields into one JSON, handles failures/timeouts.",
+  "companies": [
+   {
+    "name": "DoorDash",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5123264/"
+    ]
+   },
+   {
+    "name": "DoorDash",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6347173/",
+     "https://www.fastprep.io/doordash-interview"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "partial failure / defaults",
+   "parallel calls",
+   "retries"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "fastprep 'Customer Bootstrap API' 5 reports; DoorDash AI Code Craft (LC 7401147, 2025) instead gives an existing refund codebase: make the test pass, add partial refunds, then refactor."
+ },
+ {
+  "id": "crypto-price-dashboard",
+  "title": "Crypto price dashboard (averages across exchanges)",
+  "kind": "practical",
+  "prompt": "Token prices arrive every 2s from several exchanges; show per-token average/trend refreshed every 10s.",
+  "companies": [
+   {
+    "name": "Coinbase",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5117593/",
+     "https://leetcode.com/discuss/post/5911625/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "stale exchange data",
+   "windowed average"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "fractional-shares",
+  "title": "Fractional share inventory (Robinhood)",
+  "kind": "practical",
+  "prompt": "Customers buy/sell fractional shares or dollar amounts; firm buys whole shares from the exchange and keeps inventory in [0,1) per symbol.",
+  "companies": [
+   {
+    "name": "Robinhood",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7291508/",
+     "https://www.fastprep.io/robinhood-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "dollar-based orders",
+   "sell side flattening",
+   "precision"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "datadog-circular-buffer-logmatch",
+  "title": "Circular buffer + streamed log/query matcher (Datadog)",
+  "kind": "practical",
+  "prompt": "Implement a fixed-size circular FIFO buffer; separately, stream of 'Q:' queries and 'L:' logs - match each log to earlier queries whose words it contains.",
+  "companies": [
+   {
+    "name": "Datadog",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5154052/",
+     "https://www.glassdoor.com/Interview/Coding-interviews-Determine-the-total-number-of-repetitions-of-words-in-a-paragraph-Implement-a-circular-bu-QTN_6779469.htm"
+    ]
+   },
+   {
+    "name": "Datadog",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7473275/"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "overwrite vs reject when full",
+   "case-insensitive word sets",
+   "query ids assigned incrementally"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Datadog coding rounds run your code against tests."
+ },
+ {
+  "id": "train-platform",
+  "title": "Train platform management (Uber)",
+  "kind": "lld",
+  "prompt": "Assign arriving trains to free platforms, queue when none free, release on departure; strategies (min-heap earliest-free vs random).",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7182332/",
+     "https://codezym.com/question/32"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "waiting queue",
+   "pluggable assignment strategy"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "ev-charging-station",
+  "title": "Multi-level EV charging station (Microsoft)",
+  "kind": "lld",
+  "prompt": "Chargers of different types across levels; assign vehicles, billing strategies.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7253152/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "charging strategies requested live"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "data-access-layer",
+  "title": "Pluggable data-access layer / DB SDK (Microsoft)",
+  "kind": "lld",
+  "prompt": "Data retrieval/update where the source (DB, API, file) can change at runtime; or a client SDK supporting several databases and auth mechanisms.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7321554/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7636712/",
+     "https://codezym.com/question/338"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "concurrency",
+   "new auth types without changes (strategy/adapter)"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "feature-flag-rollout",
+  "title": "Feature flag / rollout evaluator",
+  "kind": "lld",
+  "prompt": "Define flags with targeting rules and percentage rollout; evaluate per user.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7323765/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/google-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "deterministic bucketing",
+   "rule precedence"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Microsoft L60 candidate rejected on it; Google fastprep project 'Docs Mobile Feature Rollout' (repair an evaluator)."
+ },
+ {
+  "id": "salesforce-signatures",
+  "title": "Salesforce signature LLDs: watch party, service-dependency impact analyzer, workflow state history",
+  "kind": "lld",
+  "prompt": "Watch party: host creates room, users join by id, synchronized play/pause/seek. Impact analyzer: given microservice dependency graph, blast radius and depth of a failure, cycles. Workflow: log and query step state transitions.",
+  "companies": [
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8325797/",
+     "https://leetcode.com/discuss/post/7576912/",
+     "https://leetcode.com/discuss/post/7785889/",
+     "https://codezym.com/question/254",
+     "https://codezym.com/question/266",
+     "https://codezym.com/question/257"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "late joiner sync",
+   "cycle detection",
+   "history queries"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "India MTS/SMTS loops, HackerRank working code."
+ },
+ {
+  "id": "nutanix-signatures",
+  "title": "Nutanix LLDs: paint application, bookmarks manager, airport runway",
+  "kind": "lld",
+  "prompt": "Paint app with shapes/tools/undo (running code in 1 hour); manage bookmarks across browsers; runway scheduling for arrivals (fuel limits) and departures.",
+  "companies": [
+   {
+    "name": "Nutanix",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6489221/"
+    ]
+   },
+   {
+    "name": "Nutanix",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4815315/"
+    ]
+   },
+   {
+    "name": "Nutanix",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4224801/"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "undo/redo of drawing commands",
+   "fuel-priority landing"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "rubrik-concurrency-classics",
+  "title": "Rubrik concurrency classics: search-insert-delete list, exclusive team room, page cache",
+  "kind": "concurrency",
+  "prompt": "(1) Linked list shared by searchers (concurrent), inserters (exclusive among inserters) and deleters (exclusive with all). (2) Playground usable by one team at a time, max 10 players. (3) Logical memory unit that fetches pages from physical memory - make thread-safe.",
+  "companies": [
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7596886/",
+     "https://leetcode.com/discuss/post/7699062/"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6730864/",
+     "https://leetcode.com/discuss/post/6794886/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "no starvation of deleters",
+   "fair hand-off between teams",
+   "eviction under concurrency"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Search-insert-delete is the 'Little Book of Semaphores' problem; the playground is the unisex-bathroom pattern (closest existing pages: mt-rwlock, mt-h2o)."
+ },
+ {
+  "id": "tree-lock",
+  "title": "Lock/unlock nodes in a tree (ancestors and descendants must be unlocked)",
+  "kind": "concurrency",
+  "prompt": "lock(node)/unlock(node)/upgrade with parent pointers; optionally thread-safe.",
+  "companies": [
+   {
+    "name": "Adobe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6181134/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "O(depth) checks with counters",
+   "thread-safety"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "connection-pool",
+  "title": "Generic connection / resource pool",
+  "kind": "concurrency",
+  "prompt": "Borrow/return pooled resources of any kind (DB connections, threads) with max size, timeouts, validation.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6146141/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7602654/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "blocking borrow with timeout",
+   "leak detection"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Rippling's is a vaguer 'Resource Manager' (add/remove/manage resources)."
+ },
+ {
+  "id": "circuit-breaker",
+  "title": "Circuit breaker around an RPC",
+  "kind": "practical",
+  "prompt": "Wrap an rpc method: closed -> open after N failures -> half-open probe -> closed.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5049157/",
+     "https://codezym.com/question/227"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4285067/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "per-endpoint breakers",
+   "time source injection for tests",
+   "leader-follower DB failover rules (Databricks)"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "amazon-misc-lld",
+  "title": "Other Amazon LLD prompts seen once (2024-2026)",
+  "kind": "lld",
+  "prompt": "Restaurant, cache system, offline download manager, event logging, device-related LLD, monitoring/alerting from metric streams (L6), storefront search/filter, GoodReads.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5077429/",
+     "https://leetcode.com/discuss/post/5497987/",
+     "https://leetcode.com/discuss/post/5203694/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6856628/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7576550/",
+     "https://leetcode.com/discuss/post/8476269/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "LPs take 20-30 of the 60 minutes",
+   "requirements revealed as follow-ups"
+  ],
+  "maps_to": null,
+  "tier": 3,
+  "notes": "Long tail; no single prompt repeats."
+ },
+ {
+  "id": "x-rate-limiter",
+  "title": "Rate limiter (per user X requests in Y seconds)",
+  "kind": "practical",
+  "prompt": "rateLimit(customerId) -> bool for X requests per Y seconds; choose fixed window / sliding log / sliding window counter / token bucket.",
+  "companies": [
+   {
+    "name": "Atlassian",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3799648/",
+     "https://leetcode.com/discuss/post/3805109/",
+     "https://leetcode.com/discuss/post/4377722/"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5185865/",
+     "https://leetcode.com/discuss/post/6587244/",
+     "https://www.glassdoor.ie/Interview/Coding-rounds-were-for-a-middleware-URL-router-and-a-multi-user-rate-limiter-QTN_7153582.htm"
+    ]
+   },
+   {
+    "name": "Atlassian",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6344788/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4861889/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7728145/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7261128/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7858030/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8317368/",
+     "https://leetcode.com/discuss/post/8483965/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4669922/"
+    ]
+   },
+   {
+    "name": "Cloudflare",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6396271/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/intuit-interview"
+    ]
+   },
+   {
+    "name": "Snowflake",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/snowflake-interview"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/oracle-interview"
+    ]
+   },
+   {
+    "name": "Plaid",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/plaid-interview"
+    ]
+   },
+   {
+    "name": "Stripe",
+    "year": 2023,
+    "urls": [
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   },
+   {
+    "name": "Dropbox",
+    "year": null,
+    "urls": [
+     "https://www.glassdoor.com/Interview/Multi-threaded-token-bucket-algorithm-QTN_1747897.htm"
+    ]
+   }
+  ],
+  "reports": 15,
+  "followups": [
+   "credits: unused requests carry over as credit (Atlassian)",
+   "multithreaded / per-user locks",
+   "multiple rules: global, per path, user+path, user+path+tenant (Cloudflare isRateLimited)",
+   "VIP-priority fixed window (Intuit)",
+   "queue requests instead of rejecting - bounded token-bucket request queue (Plaid)",
+   "count dropped requests from a log (Oracle)",
+   "multi-threaded token bucket get(amount) that blocks (Dropbox)",
+   "memory: evict idle users"
+  ],
+  "maps_to": "rate-limiter",
+  "tier": 1,
+  "notes": "Atlassian repeats it most ('always asks a standard rate limiting LLD in the first round', LC 4377722). Stripe evidence is weaker than expected: only 2 fastprep reports, Nov 2023. Several Amazon/Microsoft/Walmart mentions are HLD rounds, not coding."
+ },
+ {
+  "id": "x-lru-cache",
+  "title": "LRU / LFU cache and its variants",
+  "kind": "practical",
+  "prompt": "get/put O(1) with capacity eviction; variants add TTL, counters, custom eviction by an external rank, or thread-safety.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7728145/",
+     "https://www.fastprep.io/amazon-interview"
+    ]
+   },
+   {
+    "name": "LinkedIn",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7479450/",
+     "https://www.fastprep.io/linkedin-interview"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6155819/"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6974811/",
+     "https://www.fastprep.io/confluent-interview"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7685567/",
+     "https://leetcode.com/discuss/post/8265899/"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7327102/",
+     "https://www.fastprep.io/oracle-interview"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/salesforce-interview"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6352694/",
+     "https://www.fastprep.io/microsoft-interview"
+    ]
+   },
+   {
+    "name": "Bloomberg",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3606527/",
+     "https://www.fastprep.io/bloomberg-interview"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6794886/"
+    ]
+   },
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   }
+  ],
+  "reports": 10,
+  "followups": [
+   "LRU with TTL / expire after 5 min (Google, Confluent, Amazon)",
+   "LRU with hit and miss counters (LinkedIn, fastprep 3)",
+   "evict by rank from a mocked API, LRU among equal rank (LinkedIn)",
+   "LFU where access changes a score field (Google)",
+   "thread-safe LRU/LFU (Confluent 4 + 1, Oracle, LinkedIn)",
+   "refactor working LRU into pluggable eviction policies (Bloomberg LLD)",
+   "blocking keyed cache: readers wait for an in-flight load (Databricks)",
+   "browser-history cache (Bloomberg 2023)"
+  ],
+  "maps_to": "lru",
+  "tier": 1,
+  "notes": "Covers lru + cache-eviction slugs."
+ },
+ {
+  "id": "x-ttl-cache",
+  "title": "TTL cache / expiring counter / windowed map",
+  "kind": "concurrency",
+  "prompt": "put(k) with expiry after t; get count of live elements; windowed average of valid entries; timed cache with background cleanup.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5273112/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7043175/",
+     "https://leetcode.com/discuss/post/7381396/"
+    ]
+   },
+   {
+    "name": "Confluent",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4188001/",
+     "https://www.fastprep.io/confluent-interview"
+    ]
+   },
+   {
+    "name": "Netflix",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/netflix-interview"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/oracle-interview"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/microsoft-interview"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7192540/"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "expiry counter: put_element(k), get_element_count(k), get_total_elements() (Uber L5A)",
+   "keys arrive in increasing timestamp order -> queue not heap (Uber)",
+   "windowed average over unexpired entries (Confluent 'Windowed Key-Value Map', fastprep 6)",
+   "sidecar/background cleanup thread vs lazy expiry (Netflix, fastprep 2)",
+   "capacity limit + TTL together (Netflix)",
+   "authentication manager with token TTL (Microsoft OA 'Authentication System' fastprep 4; Apple, Oracle)",
+   "concurrent requests (Uber)"
+  ],
+  "maps_to": "mt-ttl-cache",
+  "tier": 1,
+  "notes": "Also overlaps cache-eviction."
+ },
+ {
+  "id": "x-parking-lot",
+  "title": "Parking lot",
+  "kind": "lld",
+  "prompt": "Levels, spot types, park/unpark/search, fees; often with a concurrency follow-up.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5305492/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4415863/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6110098/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7354634/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7619101/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5745602/",
+     "https://leetcode.com/discuss/post/6060773/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6770968/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7896720/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5444975/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6454818/",
+     "https://leetcode.com/discuss/post/6787802/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6777577/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6298766/"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7947916/",
+     "https://leetcode.com/discuss/post/8524180/",
+     "https://www.fastprep.io/rubrik-interview"
+    ]
+   },
+   {
+    "name": "Netflix",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/netflix-interview"
+    ]
+   }
+  ],
+  "reports": 16,
+  "followups": [
+   "concurrency: two threads take the same spot; then distributed with a central DB (Salesforce)",
+   "1-D lot: car = 1 unit, truck = 2 consecutive units, thread-safe allocation (Rubrik)",
+   "versioned fee rules over a parking journey (Netflix LLD)",
+   "multi-level, running code in a single Solution.java (Microsoft HackerRank)"
+  ],
+  "maps_to": "parking-lot",
+  "tier": 1,
+  "notes": "Most common classic across Amazon/Microsoft/Uber/Salesforce loops."
+ },
+ {
+  "id": "x-elevator",
+  "title": "Elevator",
+  "kind": "lld",
+  "prompt": "Single or multi-car controller: requests from hall and cabin, scheduling (SCAN/LOOK), states.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6154075/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6350503/",
+     "https://leetcode.com/discuss/post/7357425/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6474852/",
+     "https://leetcode.com/discuss/post/6819770/"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4439820/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/salesforce-interview"
+    ]
+   },
+   {
+    "name": "Pinterest",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/pinterest-interview"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "request feasibility / stops on the way (Microsoft)",
+   "lift operated from outside by choosing a floor (Adobe destination dispatch)",
+   "time- and energy-efficient scheduling (Adobe)",
+   "strategy for movement + command for requests (Microsoft)",
+   "time-ordered dispatch / nearest eligible elevator (Pinterest fastprep 3 + 2)"
+  ],
+  "maps_to": "elevator",
+  "tier": 1,
+  "notes": "Amazon mentions are only in lists (weak)."
+ },
+ {
+  "id": "x-chess",
+  "title": "Chess",
+  "kind": "lld",
+  "prompt": "Board, pieces, moves, turns, check/checkmate.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6399382/",
+     "https://leetcode.com/discuss/post/6699963/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5988484/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6519704/",
+     "https://leetcode.com/discuss/post/7253152/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4469793/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "AI vs human player (Microsoft)",
+   "secondary actor that sets up the board (Amazon feedback)",
+   "only 25-30 min (Amazon)"
+  ],
+  "maps_to": "chess",
+  "tier": 1,
+  "notes": "Meta asks chess as Product Architecture (concurrent games, leaderboard, undo) - HLD."
+ },
+ {
+  "id": "x-snake-ladder",
+  "title": "Snake and ladder",
+  "kind": "lld",
+  "prompt": "Board, players, dice, snakes/ladders, turn loop, winner.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4985300/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7357425/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5494430/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5410592/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "up to 8 players, 100 cells (Walmart)",
+   "working solution run on the platform (Salesforce)"
+  ],
+  "maps_to": "snake-ladder",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-tic-tac-toe",
+  "title": "Tic-tac-toe -> Connect Four / K-in-a-row / Ludo",
+  "kind": "lld",
+  "prompt": "Board game engine with win detection; generalised to N x M board and K in a row, gravity (Connect Four), or Ludo.",
+  "companies": [
+   {
+    "name": "Databricks",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7614788/",
+     "https://www.fastprep.io/databricks-interview"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8508596/",
+     "https://www.fastprep.io/salesforce-interview"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "O(1) win check with counters",
+   "N x M with K",
+   "gravity drop",
+   "Ludo safe cells, captures"
+  ],
+  "maps_to": "tic-tac-toe",
+  "tier": 2,
+  "notes": "fastprep Databricks 'Rectangular K-in-a-Row' 4; Salesforce LLD 'Connect Four' and 'Ludo'."
+ },
+ {
+  "id": "x-splitwise",
+  "title": "Splitwise / debt settlement",
+  "kind": "lld",
+  "prompt": "Groups, expenses, split types, balances; simplify debts.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4930493/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6725210/",
+     "https://leetcode.com/discuss/post/7253754/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6303081/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5590877/"
+    ]
+   },
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7521596/"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "currency conversion inside expenses (Amazon SDE3)",
+   "minimum number of transactions to settle (Stripe, Rippling follow-up)",
+   "deep dive only on expense management (Amazon)"
+  ],
+  "maps_to": "splitwise",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-bookmyshow",
+  "title": "Ticket / slot / hotel booking",
+  "kind": "lld",
+  "prompt": "Shows, seats, hold-then-pay, cancellation; slot booking with max bookings per slot.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7228788/",
+     "https://leetcode.com/discuss/post/6883459/"
+    ]
+   },
+   {
+    "name": "Oracle",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6597845/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6924065/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/4393803/"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "held-but-unpaid seats + concurrency (Amazon)",
+   "build it as a Spring Boot project with proper structure (Oracle IC2)",
+   "IRCTC: re-sell a seat for a later segment (Adobe)",
+   "hotel: optimistic concurrency on overlapping bookings (Rippling)"
+  ],
+  "maps_to": "bookmyshow",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-vending",
+  "title": "Vending machine / coffee machine",
+  "kind": "lld",
+  "prompt": "States, inventory, coins/cards, dispense, change.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6614921/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8426283/",
+     "https://leetcode.com/discuss/post/7599188/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7910157/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "class diagrams + signatures only on a whiteboard (Amazon)",
+   "coffee steps pour milk etc. as template/strategy (Apple)"
+  ],
+  "maps_to": "vending",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-atm",
+  "title": "ATM",
+  "kind": "lld",
+  "prompt": "Card, PIN, balance, withdraw with denominations, states.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6840488/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "interface + classes given, implement driver (Uber L5A)"
+  ],
+  "maps_to": "atm",
+  "tier": 3,
+  "notes": ""
+ },
+ {
+  "id": "x-notification",
+  "title": "Notification service / notification center",
+  "kind": "lld",
+  "prompt": "Channels (email/SMS/push), templates, preferences, retries; desktop notification center for many apps.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8462091/",
+     "https://www.fastprep.io/microsoft-interview"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6789642/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6408439/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4999447/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "message content building per channel (Amazon)",
+   "Windows app notifications, AI-assisted LLD (Microsoft 2026)",
+   "priority, grouping, do-not-disturb"
+  ],
+  "maps_to": "notification-lld",
+  "tier": 2,
+  "notes": "Uber's stock-price-alert prompt (LC 5273112, 6603468, 7302014, 7896720) is asked as HLD, not coded."
+ },
+ {
+  "id": "x-pubsub",
+  "title": "Pub/Sub / Kafka-like broker",
+  "kind": "concurrency",
+  "prompt": "Topics, publishers, subscribers with offsets; consumer groups; concurrency.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5807498/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6603468/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7801963/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8399267/",
+     "https://leetcode.com/discuss/post/7619394/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8513742/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://codezym.com/question/72"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "working multithreaded solution required (Uber 2026)",
+   "delete message once all consumers read vs per-consumer queues (Uber 2025)",
+   "convert your scheduler to Kafka producer/consumer (Salesforce)"
+  ],
+  "maps_to": "pubsub",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-file-system",
+  "title": "In-memory file system",
+  "kind": "lld",
+  "prompt": "mkdir/cd/pwd/ls/create/delete; sizes; wildcard cd.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7300207/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7647484/",
+     "https://www.fastprep.io/uber-interview"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7278768/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6537648/"
+    ]
+   },
+   {
+    "name": "Snowflake",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/snowflake-interview"
+    ]
+   },
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "cd with '*' wildcard (codezym q30: uber, atlassian)",
+   "N-ary tree choice + error handling (Uber)",
+   "CodeSignal progressive version with users/quotas (see icf-cloud-storage)"
+  ],
+  "maps_to": "file-system",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-text-editor",
+  "title": "Text editor / undo-redo command history",
+  "kind": "lld",
+  "prompt": "Insert/delete/cursor ops with undo/redo; command history.",
+  "companies": [
+   {
+    "name": "Microsoft",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6519704/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6699963/"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5843584/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3657264/"
+    ]
+   },
+   {
+    "name": "Netflix",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/netflix-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "two users editing (Google-Docs-like) (Microsoft)",
+   "media & file sharing in the editor (Amazon SDE3)",
+   "undo/redo as level 4 of an in-memory DB (Coinbase)",
+   "generic command undo structure (Netflix fastprep 2)"
+  ],
+  "maps_to": "text-editor",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-spreadsheet",
+  "title": "Spreadsheet (cells, simple formulas)",
+  "kind": "lld",
+  "prompt": "set(cell, value or '=A1+2'), get(cell); reset on empty; later dependencies.",
+  "companies": [
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4496620/",
+     "https://leetcode.com/discuss/post/4731151/",
+     "https://leetcode.com/discuss/post/5071351/",
+     "https://leetcode.com/discuss/post/5868538/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6314198/",
+     "https://leetcode.com/discuss/post/6315868/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   }
+  ],
+  "reports": 6,
+  "followups": [
+   "only '=X+Y' of ints/cells at first (Rippling)",
+   "separate eval function; StaticCell vs ExpressionCell",
+   "cycle detection later"
+  ],
+  "maps_to": "spreadsheet",
+  "tier": 3,
+  "notes": "Rippling signature; codezym tags Excel sum formulas to microsoft, amazon."
+ },
+ {
+  "id": "x-stackoverflow",
+  "title": "Stack Overflow / Quora (incl. runnable REST API)",
+  "kind": "lld",
+  "prompt": "Questions, answers, votes, tags; Rippling version: build and run a real local REST server.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6884999/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4496620/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7196226/",
+     "https://leetcode.com/discuss/post/6936355/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "DB normalisation (Amazon)",
+   "Flask/Django server with endpoints exercised live (Rippling)",
+   "auth, caching, indexes"
+  ],
+  "maps_to": "stackoverflow",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-ride-sharing",
+  "title": "Ride sharing / cab hailing",
+  "kind": "lld",
+  "prompt": "Riders, drivers, matching, trip lifecycle, pricing.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8476675/",
+     "https://www.fastprep.io/uber-interview"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7599995/",
+     "https://leetcode.com/discuss/post/7576550/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7398700/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "cab allocation logic + multithreading (Uber premium cab)",
+   "quick-commerce rider assignment (Amazon)"
+  ],
+  "maps_to": "ride-sharing",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-food-delivery",
+  "title": "Food / grocery delivery and restaurant",
+  "kind": "lld",
+  "prompt": "Restaurants, menus, orders, delivery partners; subscription model.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5066843/"
+    ]
+   },
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6782621/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5077429/"
+    ]
+   },
+   {
+    "name": "Uber",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5559039/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "subscription vs non-subscription (Walmart grocery)"
+  ],
+  "maps_to": "food-delivery",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-order-book",
+  "title": "Order book / trading platform",
+  "kind": "lld",
+  "prompt": "Limit orders, matching, trades; or a stock-trading platform LLD.",
+  "companies": [
+   {
+    "name": "Uber",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6628212/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "price-time priority"
+  ],
+  "maps_to": "order-book",
+  "tier": 3,
+  "notes": "Coinbase order book lead: no first-hand evidence found for 2023-26 (only SEO guides). Bloomberg recruiter hinted an order-book system-design question (LC 6114533)."
+ },
+ {
+  "id": "x-banking",
+  "title": "Banking system (CodeSignal ICF 4 levels)",
+  "kind": "practical",
+  "prompt": "L1 create account, deposit, transfer; L2 top spenders by outgoing; L3 scheduled payments with 2% cashback after 24h + status; L4 merge accounts keeping histories + balance at time T.",
+  "companies": [
+   {
+    "name": "Dropbox",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5121903/"
+    ]
+   },
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/coinbase-interview"
+    ]
+   },
+   {
+    "name": "Stripe",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/stripe-interview"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "keep a transaction history from level 1 or level 4 breaks",
+   "timestamps matter from level 3",
+   "accepted/pending transfers (Ramp 2023 version)",
+   "historical snapshots (Coinbase)"
+  ],
+  "maps_to": "banking",
+  "tier": 1,
+  "notes": "fastprep: Ramp 'Progressive Banking System' 6 + 'Bank Requests with Delayed Cashback' 6 + 2023 version 2; Airbnb 4; Coinbase 1. Blind thread on Coinbase ICA mentions 'Banking system?'. Stripe 'Account Balance Manager' is a cousin."
+ },
+ {
+  "id": "x-inmem-db",
+  "title": "In-memory database / KV store with transactions",
+  "kind": "practical",
+  "prompt": "Rippling: get/set/delete, then begin/commit/rollback, then nested transactions. CodeSignal ICF: record->field->value set/get/delete, scan and scan-by-prefix, TTL, backup/restore or undo/redo.",
+  "companies": [
+   {
+    "name": "Rippling",
+    "year": 2023,
+    "urls": [
+     "https://leetcode.com/discuss/post/3928848/",
+     "https://leetcode.com/discuss/post/4393803/",
+     "https://www.glassdoor.com.hk/Interview/Implementation-of-a-key-value-store-which-followed-into-high-level-implementation-of-transactions-with-commit-and-rollback-QTN_7009709.htm"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/4496620/",
+     "https://leetcode.com/discuss/post/5071351/",
+     "https://leetcode.com/discuss/post/5094495/",
+     "https://leetcode.com/discuss/post/5375106/",
+     "https://leetcode.com/discuss/post/5411057/",
+     "https://leetcode.com/discuss/post/5590877/",
+     "https://leetcode.com/discuss/post/5868538/"
+    ]
+   },
+   {
+    "name": "Rippling",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6314198/",
+     "https://www.fastprep.io/rippling-interview"
+    ]
+   },
+   {
+    "name": "Coinbase",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5843584/",
+     "https://www.fastprep.io/coinbase-interview"
+    ]
+   },
+   {
+    "name": "Meta",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7616684/",
+     "https://www.fastprep.io/meta-interview"
+    ]
+   },
+   {
+    "name": "Airbnb",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/airbnb-interview"
+    ]
+   },
+   {
+    "name": "Ramp",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/ramp-interview"
+    ]
+   },
+   {
+    "name": "Lyft",
+    "year": 2026,
+    "urls": [
+     "https://www.fastprep.io/lyft-interview"
+    ]
+   }
+  ],
+  "reports": 13,
+  "followups": [
+   "nested begin inside begin; inner commit merges into parent",
+   "delete inside a transaction = tombstone",
+   "count of keys with a value (NUMEQUALTO / 'value counts', Lyft)",
+   "multi-threaded operations (needed to pass senior at Rippling per LC 5375106)",
+   "scan by prefix sorted",
+   "TTL at set time; backup(t)/restore(t) or undo/redo"
+  ],
+  "maps_to": "inmem-db",
+  "tier": 1,
+  "notes": "Rippling's KV-with-transactions is its single most repeated LC-reported question (10 posts). fastprep: Lyft 'Nested Transaction KV Store with Value Counts' 3; Ramp in-memory DB 5; Airbnb 3."
+ },
+ {
+  "id": "x-producer-consumer",
+  "title": "Producer-consumer / thread-safe queue usage",
+  "kind": "concurrency",
+  "prompt": "Thread-safe producer-consumer queue; find the bug in given producer-consumer code; N producers placing items into K slots.",
+  "companies": [
+   {
+    "name": "Adobe",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8452812/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6079959/"
+    ]
+   },
+   {
+    "name": "Intuit",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6599290/"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6794886/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7910157/"
+    ]
+   }
+  ],
+  "reports": 5,
+  "followups": [
+   "debug a C++ producer-consumer with a race (Rubrik)",
+   "4 car-producer threads placing cars in single-occupancy warehouse slots (Apple)",
+   "use BlockingQueue vs wait/notify"
+  ],
+  "maps_to": "mt-producer-consumer",
+  "tier": 1,
+  "notes": ""
+ },
+ {
+  "id": "x-blocking-queue",
+  "title": "Bounded blocking queue",
+  "kind": "concurrency",
+  "prompt": "put/take blocking with capacity; then build a thread pool on it.",
+  "companies": [
+   {
+    "name": "LinkedIn",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5039865/"
+    ]
+   },
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7629615/",
+     "https://leetcode.com/discuss/post/7947916/"
+    ]
+   }
+  ],
+  "reports": 3,
+  "followups": [
+   "build a thread pool on top (Rubrik)",
+   "timeouts on offer/poll"
+  ],
+  "maps_to": "mt-blocking-queue",
+  "tier": 2,
+  "notes": "LinkedIn India SSE loops have a dedicated 1-hr Concurrency round."
+ },
+ {
+  "id": "x-rwlock",
+  "title": "Read-write lock",
+  "kind": "concurrency",
+  "prompt": "Implement a reader-writer lock with fairness choices.",
+  "companies": [
+   {
+    "name": "Rubrik",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7947916/"
+    ]
+   },
+   {
+    "name": "MongoDB",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7118665/"
+    ]
+   }
+  ],
+  "reports": 2,
+  "followups": [
+   "writer starvation",
+   "ReentrantLock + conditions (MongoDB)",
+   "use it in a concurrent search/insert/delete structure (Rubrik)"
+  ],
+  "maps_to": "mt-rwlock",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-concurrent-hashmap",
+  "title": "Concurrent hash map (and plain HashMap/HashSet internals)",
+  "kind": "concurrency",
+  "prompt": "Implement get/put/delete safely under concurrency; or implement HashMap/HashSet from scratch (collisions, resize).",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/5058037/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6181134/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6900849/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6298766/",
+     "https://www.fastprep.io/apple-interview"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "lock striping vs segment locks",
+   "resize under concurrency",
+   "plain internals: collision strategy and resizing (Google L5, Apple)"
+  ],
+  "maps_to": "mt-striped-map",
+  "tier": 2,
+  "notes": "Codezym q43 'Custom HashMap' tags uber, microsoft, amazon, atlassian (plus many India companies)."
+ },
+ {
+  "id": "x-thread-ordering",
+  "title": "Thread ordering / coordination (two or three threads)",
+  "kind": "concurrency",
+  "prompt": "Two threads increment to 5000 alternately; print in a fixed order from two functions; three threads exchange data through a buffer; parallel sum with two threads.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6412363/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6819770/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7636712/"
+    ]
+   },
+   {
+    "name": "Apple",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7910157/"
+    ]
+   }
+  ],
+  "reports": 4,
+  "followups": [
+   "mutex + condition variable in C++ (Adobe)",
+   "CompletableFuture/AtomicLong (Apple)"
+  ],
+  "maps_to": "mt-print-series",
+  "tier": 2,
+  "notes": ""
+ },
+ {
+  "id": "x-logger",
+  "title": "Logger / logging framework",
+  "kind": "lld",
+  "prompt": "Levels, multiple destinations, formatting, per-module config; async logging.",
+  "companies": [
+   {
+    "name": "Amazon",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6884999/"
+    ]
+   },
+   {
+    "name": "Amazon",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/8523912/",
+     "https://leetcode.com/discuss/post/7576550/"
+    ]
+   },
+   {
+    "name": "Salesforce",
+    "year": 2024,
+    "urls": [
+     "https://leetcode.com/discuss/post/6162551/"
+    ]
+   },
+   {
+    "name": "Microsoft",
+    "year": 2026,
+    "urls": [
+     "https://leetcode.com/discuss/post/7636712/"
+    ]
+   },
+   {
+    "name": "Adobe",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6603811/"
+    ]
+   },
+   {
+    "name": "Google",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/6476739/"
+    ]
+   }
+  ],
+  "reports": 7,
+  "followups": [
+   "multi-module framework streaming to file/tool (Microsoft)",
+   "no explicit requirements given (Amazon)",
+   "thread-safe singleton logger (Adobe)",
+   "logger rate limiter: drop duplicates within 10 s, past or future (Google)"
+  ],
+  "maps_to": "logger",
+  "tier": 1,
+  "notes": "For the concurrent durable writer core see buffered-writer."
+ },
+ {
+  "id": "x-payment-wallet",
+  "title": "Wallet / payment processing",
+  "kind": "lld",
+  "prompt": "Wallet balance, history, transfers; payment strategy selected at runtime.",
+  "companies": [
+   {
+    "name": "Walmart",
+    "year": 2025,
+    "urls": [
+     "https://leetcode.com/discuss/post/7192540/"
+    ]
+   }
+  ],
+  "reports": 1,
+  "followups": [
+   "UPI-like payment flow (Walmart)"
+  ],
+  "maps_to": "digital-wallet",
+  "tier": 3,
+  "notes": "Weak in this company set. Codezym tags Flipkart-wallet and payment-gateway-strategy questions to Walmart."
+ },
+ {
+  "id": "x-dining-h2o",
+  "title": "Dining philosophers / H2O barrier",
+  "kind": "concurrency",
+  "prompt": "Classic synchronisation puzzles.",
+  "companies": [],
+  "reports": 0,
+  "followups": [],
+  "maps_to": "mt-dining",
+  "tier": 3,
+  "notes": "No evidence found in 2023-26 reports for these companies. Nearest real asks: Rubrik playground (team-exclusive room, max 10) and search-insert-delete list."
+ }
+]

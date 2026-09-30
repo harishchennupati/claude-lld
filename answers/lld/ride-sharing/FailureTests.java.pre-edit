@@ -1,0 +1,196 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    static final Location PICKUP = new Location(12.9352, 77.6245);
+    static final Location DROP   = new Location(12.9720, 77.5940);
+    static long[] now = { 1_700_000_000_000L };
+
+    /** A fresh service on a fresh grid, driven by the test's own clock. */
+    static RideService service(GridIndex index, PaymentProcessor pay, PricingStrategy pricing) {
+        RideService svc = new RideService(index);
+        svc.configure(new NearestDriver(), pricing, new StandardCancellation(), pay);
+        svc.setClock(() -> now[0]);
+        return svc;
+    }
+    static Driver car(String id, String name, VehicleType type, double lat, double lng) {
+        return new Driver(id, name, new Vehicle("KA" + id, type), new Location(lat, lng));
+    }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. the race: two riders reaching for the same car must not both get it. Fifty threads, one car,
+        //    then two hundred threads and forty cars: the count of trips must equal the count of cars exactly.
+        for (int[] size : new int[][]{{1, 50}, {40, 200}}) {
+            int cars = size[0], riders = size[1];
+            GridIndex index = new GridIndex();
+            RideService svc = service(index, new CardPayment(), new NormalPricing());
+            List<Driver> fleet = new ArrayList<>();
+            for (int i = 0; i < cars; i++) {
+                Driver d = car("d" + i, "driver" + i, VehicleType.GO, 12.9352, 77.6245);
+                svc.goOnline(d, d.location()); fleet.add(d);
+            }
+            for (int i = 0; i < riders; i++) svc.addRider(new Rider("r" + i, "rider" + i));
+            ExecutorService pool = Executors.newFixedThreadPool(16);
+            CountDownLatch go = new CountDownLatch(1);
+            List<Future<Optional<Trip>>> futures = new ArrayList<>();
+            for (int i = 0; i < riders; i++) {
+                final String rid = "r" + i;
+                futures.add(pool.submit(() -> { go.await(); return svc.requestRide(rid, PICKUP, DROP, VehicleType.GO); }));
+            }
+            go.countDown();
+            Set<String> claimed = new HashSet<>(); Set<String> tripIds = new HashSet<>();
+            for (Future<Optional<Trip>> f : futures) f.get().ifPresent(t -> { claimed.add(t.driver().id()); tripIds.add(t.id()); });
+            pool.shutdown();
+            check(tripIds.size() == cars, riders + " riders, " + cars + " car(s): exactly " + cars + " trips were created");
+            check(claimed.size() == cars, "and no car was handed to two riders");
+            long busy = fleet.stream().filter(d -> d.status() == DriverStatus.RESERVED).count();
+            check(busy == cars, "every car that was claimed is RESERVED, none is still AVAILABLE");
+        }
+
+        // 2. matching: the NEAREST car of the RIGHT tier, and nobody outside the neighbourhood or offline
+        GridIndex index = new GridIndex();
+        RideService svc = service(index, new CardPayment(), new NormalPricing());
+        svc.addRider(new Rider("R1", "Meera")); svc.addRider(new Rider("R2", "Ravi")); svc.addRider(new Rider("R3", "Nita"));
+        Driver near    = car("D1", "Bilal", VehicleType.GO,      12.9354, 77.6246);   //  ~25 m
+        Driver farIsh  = car("D2", "Asha",  VehicleType.GO,      12.9380, 77.6260);   // ~355 m
+        Driver premier = car("D3", "Chen",  VehicleType.PREMIER, 12.9353, 77.6245);   //  ~11 m, wrong tier
+        Driver away    = car("D4", "Dev",   VehicleType.GO,      12.9600, 77.6400);   // ~3.2 km, outside the 9 cells
+        Driver offline = car("D5", "Evan",  VehicleType.GO,      12.9352, 77.6245);   // sitting on the pickup point
+        for (Driver d : List.of(near, farIsh, premier, away)) svc.goOnline(d, d.location());
+        Trip first = svc.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        check(first.driver() == near, "the nearest GO car was chosen, not the nearest car of any tier");
+        check(offline.status() == DriverStatus.OFFLINE, "a driver who never went online is not in the index at all");
+        Trip second = svc.requestRide("R2", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        check(second.driver() == farIsh, "the second rider got the next-nearest GO car");
+        check(svc.requestRide("R3", PICKUP, DROP, VehicleType.GO).isEmpty(),
+              "a car 3 km away is never offered: the scan is nine cells, not the fleet");
+        check(svc.requestRide("R3", PICKUP, DROP, VehicleType.PREMIER).orElseThrow().driver() == premier,
+              "asking for PREMIER gets the PREMIER car, which was nearest all along");
+
+        // 3. an out-of-order call throws BEFORE it writes, so the trip is exactly as it was
+        Trip t = svc.trip(first.id());
+        try { svc.endTrip(t.id(), 5.0); check(false, "ending a trip that never started must throw"); }
+        catch (IllegalStateException e) { check(true, "out-of-order endTrip refused: " + e.getMessage()); }
+        check(t.status() == TripStatus.ASSIGNED && t.farePaise() == 0 && t.distanceKm() == 0,
+              "the refused call left the trip untouched: still ASSIGNED, no fare, no distance");
+        svc.driverArrived(t.id());
+        svc.startTrip(t.id());
+        try { svc.cancelTrip(t.id()); check(false, "cancelling a moving car must throw"); }
+        catch (IllegalStateException e) { check(true, "cancel after the meter started is refused: " + e.getMessage()); }
+        check(t.status() == TripStatus.IN_PROGRESS && t.driver().status() == DriverStatus.ON_TRIP,
+              "and the refused cancel left the trip running and the driver ON_TRIP");
+        now[0] += 24 * 60_000L;
+        svc.endTrip(t.id(), 8.0);
+        try { svc.endTrip(t.id(), 8.0); check(false, "ending the same trip twice must throw"); }
+        catch (IllegalStateException e) { check(true, "a second endTrip is refused, not charged again"); }
+
+        // 4. every path that takes a car out of the pool puts it back, and the fee depends on the state
+        check(near.status() == DriverStatus.AVAILABLE, "the finished trip put the car back into the pool");
+        Trip early = svc.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        Driver claimed = early.driver();
+        svc.cancelTrip(early.id());
+        check(early.feePaise() == 0, "cancelling while the driver has only just set off is free");
+        check(claimed.status() == DriverStatus.AVAILABLE, "and the car is back in the pool immediately");
+        Trip late = svc.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        svc.driverArrived(late.id());
+        now[0] += 5 * 60_000L;
+        svc.cancelTrip(late.id());
+        check(late.feePaise() == Money.rupees("30.00"), "cancelling with the driver at the kerb costs 30.00");
+        check(late.driver().status() == DriverStatus.AVAILABLE, "and that car is back in the pool too");
+
+        // 5. the fare comes from the injected clock and the driven distance, exactly, and surge multiplies it
+        CardPayment cash = new CardPayment();
+        GridIndex gi = new GridIndex();
+        RideService plain = service(gi, cash, new NormalPricing());
+        plain.addRider(new Rider("R1", "Meera"));
+        Driver go = car("G1", "Asha", VehicleType.GO, 12.9352, 77.6245);
+        plain.goOnline(go, go.location());
+        Trip ride = plain.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        plain.driverArrived(ride.id()); plain.startTrip(ride.id());
+        now[0] += 24 * 60_000L;
+        plain.endTrip(ride.id(), 8.0);
+        check(ride.minutes() == 24, "the ride lasted exactly 24 minutes by the injected clock");
+        check(ride.farePaise() == Money.rupees("172.00"), "GO fare = 40 base + 12x8 km + 1.50x24 min = 172.00");
+        RideService surged = service(new GridIndex(), new CardPayment(), new SurgePricing(new NormalPricing(), b -> 15_000));
+        surged.addRider(new Rider("R1", "Meera"));
+        Driver go2 = car("G2", "Bilal", VehicleType.GO, 12.9352, 77.6245);
+        surged.goOnline(go2, go2.location());
+        Trip hot = surged.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        surged.driverArrived(hot.id()); surged.startTrip(hot.id());
+        now[0] += 24 * 60_000L;
+        surged.endTrip(hot.id(), 8.0);
+        check(hot.farePaise() == Money.rupees("258.00"), "the surge wrapper multiplied the same ride by 1.5: 258.00");
+        check(hot.farePaise() == ride.farePaise() * 3 / 2, "and it multiplied, it did not re-derive the fare");
+
+        // 6. the card declines AFTER the ride: the trip is COMPLETED_UNPAID, the car is free, the retry charges once
+        boolean[] declining = { true };
+        CardPayment real = new CardPayment();
+        RideService flaky = service(new GridIndex(), (riderId, paise, key) -> {
+            if (declining[0]) throw new PaymentDeclined("card declined");
+            return real.charge(riderId, paise, key);
+        }, new NormalPricing());
+        flaky.addRider(new Rider("R1", "Meera"));
+        Driver auto = car("A1", "Frank", VehicleType.AUTO, 12.9352, 77.6245);
+        flaky.goOnline(auto, auto.location());
+        Trip unpaid = flaky.requestRide("R1", PICKUP, DROP, VehicleType.AUTO).orElseThrow();
+        flaky.driverArrived(unpaid.id()); flaky.startTrip(unpaid.id());
+        now[0] += 10 * 60_000L;
+        flaky.endTrip(unpaid.id(), 4.0);
+        check(unpaid.status() == TripStatus.COMPLETED_UNPAID, "a declined card leaves the trip COMPLETED_UNPAID");
+        check(unpaid.farePaise() == Money.rupees("62.00"), "the fare is still recorded: 20 + 8x4 km + 1x10 min = 62.00");
+        check(auto.status() == DriverStatus.AVAILABLE, "the driver is free anyway: a card must never strand a car");
+        check(unpaid.paymentRef().isEmpty(), "and nothing pretends the money moved");
+        declining[0] = false;
+        flaky.retryPayment(unpaid.id());
+        check(unpaid.status() == TripStatus.COMPLETED && !unpaid.paymentRef().isEmpty(), "the retry completed the trip");
+        check(real.charges() == 1, "money moved exactly once");
+        try { flaky.retryPayment(unpaid.id()); check(false, "retrying a paid trip must throw"); }
+        catch (IllegalStateException e) { check(true, "a retry on a paid trip is refused by the state machine"); }
+        check(real.charges() == 1, "and the gateway's idempotency key meant the money still moved only once");
+
+        // 7. a listener that throws cannot break a trip: observers run after the state has already moved
+        RideService noisy = service(new GridIndex(), new CardPayment(), new NormalPricing());
+        noisy.addObserver((trip, from, to) -> { throw new RuntimeException("push gateway is down"); });
+        noisy.addRider(new Rider("R1", "Meera"));
+        Driver quiet = car("Q1", "Asha", VehicleType.GO, 12.9352, 77.6245);
+        noisy.goOnline(quiet, quiet.location());
+        Trip ok = noisy.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        noisy.driverArrived(ok.id()); noisy.startTrip(ok.id());
+        now[0] += 12 * 60_000L;
+        noisy.endTrip(ok.id(), 6.0);
+        check(ok.status() == TripStatus.COMPLETED, "the trip completed although every notification threw");
+        check(ok.farePaise() == Money.rupees("130.00"), "and the fare is right: 40 + 12x6 km + 1.50x12 min = 130.00");
+        check(quiet.status() == DriverStatus.AVAILABLE, "and the car went back into the pool");
+
+        // 8. the ping path: cheap, correct, and a driver who goes offline disappears from matching
+        GridIndex pings = new GridIndex();
+        RideService moving = service(pings, new CardPayment(), new NormalPricing());
+        moving.addRider(new Rider("R1", "Meera"));
+        Driver roamer = car("M1", "Dev", VehicleType.GO, 12.9352, 77.6245);
+        moving.goOnline(roamer, roamer.location());
+        long rewritesAfterOnline = pings.rewrites();
+        for (int i = 0; i < 200; i++) moving.ping("M1", new Location(12.9352 + i * 0.000002, 77.6245));
+        check(pings.pings() == 201, "201 pings arrived (the one at sign-on plus 200)");
+        check(pings.rewrites() == rewritesAfterOnline, "none of the 200 rewrote the grid: the car never left its cell");
+        check(pings.nearby(PICKUP).contains(roamer), "and he is still found at the pickup point");
+        moving.ping("M1", new Location(12.9600, 77.6400));                    // 3 km away: a real cell crossing
+        check(pings.rewrites() == rewritesAfterOnline + 1, "crossing a cell boundary rewrote the grid exactly once");
+        check(!pings.nearby(PICKUP).contains(roamer), "he is no longer found at the old place");
+        check(pings.nearby(new Location(12.9600, 77.6400)).contains(roamer), "and he is found at the new one");
+        check(moving.requestRide("R1", PICKUP, DROP, VehicleType.GO).isEmpty(), "so a rider at the old place gets no car");
+        moving.goOffline("M1");
+        check(pings.nearby(new Location(12.9600, 77.6400)).isEmpty(), "going offline removes him from the index entirely");
+        Trip busy = svc.requestRide("R1", PICKUP, DROP, VehicleType.GO).orElseThrow();
+        svc.driverArrived(busy.id()); svc.startTrip(busy.id());
+        try { svc.goOffline(busy.driver().id()); check(false, "a driver must not vanish mid-ride"); }
+        catch (IllegalStateException e) { check(true, "a driver cannot go offline while ON_TRIP"); }
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

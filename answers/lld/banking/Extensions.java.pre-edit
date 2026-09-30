@@ -1,0 +1,389 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: a daily cap on cash withdrawals -- one new class and one addRule line, and it composes with the floor
+/**
+ * "Cap ATM withdrawals at INR 3,000 a day." A cap is stateful: it has to remember what today already cost. As an
+ * overridden method on SavingsAccount there is nowhere clean to keep that memory; as a rule object it is one
+ * class with a private counter, updated through the onWithdrawn hook. It composes with the minimum balance,
+ * because every rule on the account must agree. Its fields are only ever touched inside the account's lock.
+ */
+final class DailyLimitRule implements WithdrawalRule {
+    private final Money cap;
+    private long day = -1;                                          // which UTC day the counter belongs to
+    private long spentPaise = 0;                                    // guarded by the account lock, like the balance
+
+    /** @param cap the most that may leave this account in one calendar day. */
+    DailyLimitRule(Money cap) { this.cap = cap; }
+
+    /** Refuse anything that would take today's total past the cap. A new day starts the count at zero. */
+    public void check(Account account, Money amount, long nowMs) {
+        long today = nowMs / 86_400_000L;                           // UTC days; a real bank would use the branch's zone
+        long already = (today == day) ? spentPaise : 0;
+        if (already + amount.paise() > cap.paise())
+            throw new RuleViolation("daily cap " + cap + ": " + Money.of(already, cap.currency())
+                                    + " already taken today, " + amount + " would break it");
+    }
+
+    /** The memory: only called after the row was written, so a refused withdrawal never counts against the cap. */
+    public void onWithdrawn(Account account, Money amount, long nowMs) {
+        long today = nowMs / 86_400_000L;
+        if (today != day) { day = today; spentPaise = 0; }
+        spentPaise += amount.paise();
+    }
+    /** What is left of today's allowance. */
+    Money remainingToday(long nowMs) {
+        long today = nowMs / 86_400_000L;
+        return Money.of(cap.paise() - (today == day ? spentPaise : 0), cap.currency());
+    }
+}
+// the whole change at the call site:
+//     asha.addRule(new DailyLimitRule(Money.inr("3000.00")));
+
+// ---- ext: a joint account -- two owners, and anything large needs a second signature
+/**
+ * Two owners on one balance. The only new state is the owner set; everything that makes it a joint account is a
+ * rule: above a threshold a withdrawal is refused until a second, different owner has signed for that exact
+ * amount. The signature arms the rule; the withdrawal spends it, through the same onWithdrawn hook the daily cap
+ * uses, so one signature can never pay for two withdrawals.
+ */
+final class DualApprovalRule implements WithdrawalRule {
+    private final Money threshold;
+    private final Map<Long, Set<String>> signatures = new HashMap<>();   // amount in paise -> who has signed
+    private final Set<Long> armed = new HashSet<>();                     // amounts with two distinct signatures
+
+    /** @param threshold the amount above which one owner is not enough. */
+    DualApprovalRule(Money threshold) { this.threshold = threshold; }
+
+    /** Record a signature; returns true once two different owners have signed for this amount. */
+    boolean sign(String ownerId, Money amount) {
+        Set<String> who = signatures.computeIfAbsent(amount.paise(), k -> new LinkedHashSet<>());
+        who.add(ownerId);
+        if (who.size() >= 2) { armed.add(amount.paise()); return true; }
+        return false;
+    }
+    /** Small amounts pass; large ones need the amount to be armed by a second owner. */
+    public void check(Account account, Money amount, long nowMs) {
+        if (threshold.lessThan(amount) && !armed.contains(amount.paise()))
+            throw new RuleViolation("a withdrawal over " + threshold + " needs a second owner's signature");
+    }
+    /** Spend the signature: one approval, one withdrawal. */
+    public void onWithdrawn(Account account, Money amount, long nowMs) {
+        armed.remove(amount.paise());
+        signatures.remove(amount.paise());
+    }
+}
+
+/**
+ * An account with more than one owner. It is a plain Account plus a set of owners and the approval rule; the
+ * balance, the ledger, the lock and the posting path are exactly the ones every other account uses.
+ */
+final class JointAccount extends Account {
+    private final Set<String> owners;
+    private final DualApprovalRule approvals;
+
+    /** Open a joint account. The first owner is the primary for reporting; both may sign. */
+    JointAccount(String id, List<String> owners, Money opening, Money minBalance, Money approvalThreshold,
+                 Clock clock, List<AccountListener> listeners) {
+        super(id, owners.get(0), AccountKind.SAVINGS, opening, clock, listeners);
+        this.owners = new LinkedHashSet<>(owners);
+        this.approvals = new DualApprovalRule(approvalThreshold);
+        addRule(new MinBalanceRule(minBalance));
+        addRule(approvals);                                          // two vetoes, and both must agree
+    }
+    /** Who may sign. */
+    Set<String> owners() { return Collections.unmodifiableSet(owners); }
+    /**
+     * One owner asks for money. Under the threshold it simply goes through; over it, the first call parks the
+     * request and returns null, and the second owner's call performs the withdrawal.
+     */
+    Txn sign(String ownerId, Money amount, String note) {
+        if (!owners.contains(ownerId)) throw new RuleViolation(ownerId + " does not own " + id());
+        boolean armed = approvals.sign(ownerId, amount);
+        if (!armed && amount.paise() > 0) {
+            try { return withdraw(amount, note); }                   // small amounts never needed a signature
+            catch (RuleViolation waiting) { return null; }           // large ones wait for the second owner
+        }
+        return withdraw(amount, note);
+    }
+}
+
+// ---- ext: a standing instruction -- rent on the first of every month, and a job that ran twice pays once
+/**
+ * Rent, an SIP, an EMI: a schedule that posts real transfers. The interesting part is not the schedule, it is
+ * the transfer id: it carries the period number, so running the job twice — or running it on two servers at the
+ * same moment — pays each period exactly once, because Bank.transfer is idempotent by that id.
+ */
+final class StandingInstruction {
+    private final String id, fromId, toId;
+    private final Money amount;
+    private final long startMs, periodMs;
+
+    /** @param id the instruction's name, which becomes the prefix of every transfer id it creates. */
+    StandingInstruction(String id, String fromId, String toId, Money amount, long startMs, long periodMs) {
+        this.id = id; this.fromId = fromId; this.toId = toId; this.amount = amount;
+        this.startMs = startMs; this.periodMs = periodMs;
+    }
+    /** Pay every period that has fallen due by nowMs. Safe to call as often as you like, from anywhere. */
+    List<TransferReceipt> runUpTo(Bank bank, long nowMs) {
+        List<TransferReceipt> paid = new ArrayList<>();
+        for (long period = 0; startMs + period * periodMs <= nowMs; period++)
+            paid.add(bank.transfer(id + "#" + period, fromId, toId, amount, id + " period " + period));
+        return paid;
+    }
+}
+
+// ---- ext: a loan as a schedule -- the outstanding falls, and each instalment is an ordinary transfer
+/**
+ * A loan is not a new kind of money: it is an account with a negative balance and a schedule of instalments.
+ * This one uses equal principal with interest on the reducing outstanding, so every number is exact integer
+ * paise (a bank's EMI uses the annuity formula, which needs a double for the power; the fix there is to compute
+ * the instalment in paise once and let the LAST instalment absorb the rounding so the loan closes at zero).
+ */
+final class Loan {
+    private final String loanAccountId, borrowerAccountId;
+    private final Money principal;
+    private final int annualBasisPoints, months;
+    private Money outstanding;
+
+    /** @param principal what was lent; @param months how many equal-principal instalments. */
+    Loan(String loanAccountId, String borrowerAccountId, Money principal, int annualBasisPoints, int months) {
+        this.loanAccountId = loanAccountId; this.borrowerAccountId = borrowerAccountId;
+        this.principal = principal; this.annualBasisPoints = annualBasisPoints; this.months = months;
+        this.outstanding = principal;
+    }
+    /** What is still owed. */
+    Money outstanding() { return outstanding; }
+    /** The interest part of the next instalment: one month on what is still outstanding. */
+    Money interestDue() {
+        return Money.of(outstanding.paise() * annualBasisPoints / (10_000L * 12L), outstanding.currency());
+    }
+    /**
+     * Pay instalment n: principal/months plus this month's interest, moved from the borrower's account to the
+     * loan account by an ordinary transfer, with an id that contains n so a repeated job cannot double-charge.
+     * The last instalment absorbs the rounding, so the loan closes at exactly zero.
+     */
+    TransferReceipt pay(Bank bank, int n) {
+        Money principalPart = (n == months - 1) ? outstanding
+                            : Money.of(principal.paise() / months, principal.currency());
+        Money due = principalPart.plus(interestDue());
+        TransferReceipt r = bank.transfer(loanAccountId + "#emi" + n, borrowerAccountId, loanAccountId, due,
+                                          "emi " + (n + 1) + " of " + months);
+        outstanding = outstanding.minus(principalPart);
+        return r;
+    }
+}
+
+// ---- ext: KYC -- an unverified account may receive money, but not take much out
+/**
+ * KYC is a state, and the consequence of the state is a rule. Nothing in Account or Bank changes: the status
+ * lives on the rule that reads it, and a verified customer's rule simply stops refusing. Note the shape — this
+ * is the same move as the daily cap, which is what "a new rule is a new class" is supposed to feel like.
+ */
+enum KycStatus { PENDING, VERIFIED, EXPIRED }
+
+/** Caps withdrawals while the customer's papers are not in order. */
+final class KycRule implements WithdrawalRule {
+    private final Money capWhilePending;
+    private KycStatus status = KycStatus.PENDING;
+    /** @param capWhilePending the most an unverified account may take out in one go. */
+    KycRule(Money capWhilePending) { this.capWhilePending = capWhilePending; }
+    /** Move the customer along their KYC life. */
+    void set(KycStatus s) { status = s; }
+    /** VERIFIED passes everything; PENDING and EXPIRED are capped. */
+    public void check(Account account, Money amount, long nowMs) {
+        if (status != KycStatus.VERIFIED && capWhilePending.lessThan(amount))
+            throw new RuleViolation("KYC is " + status + ": withdrawals are capped at " + capWhilePending);
+    }
+}
+
+// ---- ext: a fee on a transfer -- a third row, written inside the same two locks
+/**
+ * A flat fee on anything above a threshold. The policy itself is trivial; the design point is where the row is
+ * written: Bank.transfer asks the policy inside the same two-lock section that moved the money, so the transfer
+ * and its charge are never apart, even if the process dies between them.
+ */
+final class FlatFeeAboveThreshold implements FeePolicy {
+    private final Money threshold, fee;
+    /** @param threshold transfers above this are charged; @param fee the flat charge. */
+    FlatFeeAboveThreshold(Money threshold, Money fee) { this.threshold = threshold; this.fee = fee; }
+    /** The flat fee, or null when the transfer is small enough to be free. */
+    public Money feeFor(Account from, Account to, Money amount) { return threshold.lessThan(amount) ? fee : null; }
+}
+// the whole change at the call site:
+//     bank.setFeePolicy(new FlatFeeAboveThreshold(Money.inr("100000.00"), Money.inr("25.00")));
+
+// ---- ext: multi-currency -- a rate provider, converted at the boundary, with the rate written on the row
+/**
+ * Money already refuses to add INR to USD, so nothing can drift. What is missing is one injected rule: what a
+ * rupee is worth in dollars at the moment of the transfer. Rates are quoted as basis points of the destination
+ * currency per unit of the source, so the arithmetic stays in longs.
+ */
+interface ExchangeRateProvider {
+    /** How many hundredths of a destination-currency unit one source-currency unit buys right now. */
+    long rateBasisPoints(String fromCurrency, String toCurrency, long nowMs);
+}
+
+/** A fixed rate table, which is what a test hands in and what a treasury desk publishes every morning. */
+final class FixedRates implements ExchangeRateProvider {
+    private final Map<String, Long> table = new HashMap<>();
+    /** Quote one pair: 1 INR = rate/10000 of the destination currency. */
+    FixedRates quote(String from, String to, long basisPoints) { table.put(from + ">" + to, basisPoints); return this; }
+    /** The quoted rate, or an exception: a bank that guesses a rate is a bank that loses money. */
+    public long rateBasisPoints(String from, String to, long nowMs) {
+        Long bp = table.get(from + ">" + to);
+        if (bp == null) throw new CurrencyMismatch("no rate for " + from + " to " + to);
+        return bp;
+    }
+}
+
+/** Converts at the rate of the moment. The result is what the destination account is credited with. */
+final class Fx {
+    /** amount x rate / 10000, rounded down, in the destination currency. */
+    static Money convert(Money amount, String toCurrency, ExchangeRateProvider rates, long nowMs) {
+        if (amount.currency().equals(toCurrency)) return amount;
+        long bp = rates.rateBasisPoints(amount.currency(), toCurrency, nowMs);
+        return Money.of(amount.paise() * bp / 10_000L, toCurrency);
+    }
+}
+// the one line that changes inside Bank.transfer, between the debit and the credit:
+//     Money credited = Fx.convert(amount, to.currency(), rates, clock.nowMs());
+//     in = to.creditForTransfer(credited, transferId, note + " @ " + bp + "bp");
+// the rate and the source amount go on the row, so the statement can be explained a year later.
+
+// ---- ext: persistence and a second server -- the conditional UPDATE is the lock, moved into the database
+/**
+ * When the balance outlives the process, the account lock is no longer the thing that decides the winner: the
+ * database is. The debit becomes one conditional UPDATE whose WHERE clause carries the rule, so two servers
+ * racing on the same account cannot both succeed, and the transfer id gets a unique index, so a retried request
+ * inserts nothing the second time. Both are the same idea as the in-memory version, one level down.
+ */
+interface AccountRepository {
+    /** UPDATE accounts SET paise = paise - ? WHERE id = ? AND paise - ? >= floor -- true if one row changed. */
+    boolean debitIfAllowed(String accountId, long paise, long floorPaise);
+    /** UPDATE accounts SET paise = paise + ? WHERE id = ? -- a credit has no condition to fail on. */
+    void credit(String accountId, long paise);
+    /** INSERT INTO transfers(id) VALUES (?) ON CONFLICT DO NOTHING -- true if this caller inserted the row. */
+    boolean claimTransfer(String transferId);
+    /** SELECT paise FROM accounts WHERE id = ?. */
+    long balance(String accountId);
+}
+
+/** A hash map pretending to be a table, so the shape of the calls can be run and tested here. */
+final class InMemoryAccountRepository implements AccountRepository {
+    private final Map<String, Long> rows = new ConcurrentHashMap<>();
+    private final Set<String> transfers = ConcurrentHashMap.newKeySet();
+    /** Seed a row, the way a migration would. */
+    InMemoryAccountRepository open(String accountId, long paise) { rows.put(accountId, paise); return this; }
+    /** The compare-and-set: compute the new value and write it only if the condition still holds. */
+    public boolean debitIfAllowed(String accountId, long paise, long floorPaise) {
+        Long[] ok = { null };
+        rows.computeIfPresent(accountId, (k, current) -> {
+            if (current - paise < floorPaise) return current;                  // the WHERE clause said no
+            ok[0] = current - paise; return current - paise;
+        });
+        return ok[0] != null;
+    }
+    /** An unconditional add. */
+    public void credit(String accountId, long paise) { rows.merge(accountId, paise, Long::sum); }
+    /** The unique index on the transfer id, doing the idempotency. */
+    public boolean claimTransfer(String transferId) { return transfers.add(transferId); }
+    /** Read one row. */
+    public long balance(String accountId) { return rows.getOrDefault(accountId, 0L); }
+}
+
+/** The whole two-server transfer: claim the id, debit conditionally, credit. No application lock anywhere. */
+final class PersistedTransfer {
+    /** Returns false when the debit's condition failed; true when the money moved or had already moved. */
+    static boolean transfer(AccountRepository repo, String transferId, String fromId, String toId,
+                            long paise, long floorPaise) {
+        if (!repo.claimTransfer(transferId)) return true;                      // somebody already did this one
+        if (!repo.debitIfAllowed(fromId, paise, floorPaise)) return false;     // the rule lives in the WHERE clause
+        repo.credit(toId, paise);
+        return true;
+    }
+}
+
+/**
+ * Runs every extension once, so the reference code on page 05 is code that actually executes rather than a
+ * snippet in a slide. Compile with Main.java and run: java ExtDemo.
+ */
+class ExtDemo {
+    public static void main(String[] args) {
+        long day = 24L * 3600 * 1000, month = 30L * day;
+        long[] now = { 1_700_000_000_000L };
+        Bank bank = new Bank();
+        bank.configure(Map.of(AccountKind.SAVINGS, new SimpleInterest(400)), () -> now[0]);
+        bank.addCustomer(new Customer("c1", "Asha"));
+        bank.addCustomer(new Customer("c2", "Bharat"));
+
+        // 1. the daily cap: one class, one line, and it composes with the minimum balance
+        SavingsAccount asha = bank.openSavings("SB-1", "c1", Money.inr("50000.00"), Money.inr("1000.00"));
+        DailyLimitRule cap = new DailyLimitRule(Money.inr("3000.00"));
+        asha.addRule(cap);
+        asha.withdraw(Money.inr("2000.00"), "atm");
+        try { asha.withdraw(Money.inr("1500.00"), "atm again"); }
+        catch (RuleViolation e) { System.out.println("daily cap: " + e.getMessage()); }
+        System.out.println("left today " + cap.remainingToday(now[0]) + ", balance " + asha.balance());
+        now[0] += day;                                                         // tomorrow, the allowance is back
+        asha.withdraw(Money.inr("2500.00"), "atm tomorrow");
+        System.out.println("tomorrow the cap resets: balance " + asha.balance());
+
+        // 2. a joint account: the second signature is what makes the large withdrawal happen
+        JointAccount joint = new JointAccount("JT-1", List.of("c1", "c2"), Money.inr("200000.00"),
+                Money.inr("1000.00"), Money.inr("50000.00"), () -> now[0], List.of());
+        System.out.println("one owner asks for INR 80000: " + joint.sign("c1", Money.inr("80000.00"), "car"));
+        Txn done = joint.sign("c2", Money.inr("80000.00"), "car");
+        System.out.println("the second owner signs: " + done + ", balance " + joint.balance());
+
+        // 3. a standing instruction, run twice on purpose
+        CurrentAccount landlord = bank.openCurrent("CA-9", "c2", Money.inr("0.00"), Money.inr("0.00"));
+        bank.openSavings("SB-R", "c1", Money.inr("100000.00"), Money.inr("0.00"));   // no daily cap on this one
+        StandingInstruction rent = new StandingInstruction("rent", "SB-R", "CA-9", Money.inr("12000.00"),
+                                                           now[0], month);
+        rent.runUpTo(bank, now[0] + 2 * month);
+        rent.runUpTo(bank, now[0] + 2 * month);                                // the job ran twice
+        System.out.println("rent after running the job twice: landlord holds " + landlord.balance()
+                           + " over " + landlord.rowCount() + " rows");
+
+        // 4. a loan: equal principal plus interest on the reducing outstanding, closing at exactly zero
+        CurrentAccount loanAccount = bank.openCurrent("LN-1", "c1", Money.inr("0.00"), Money.inr("0.00"));
+        bank.openSavings("SB-2", "c1", Money.inr("100000.00"), Money.inr("0.00"));
+        Loan loan = new Loan("LN-1", "SB-2", Money.inr("60000.00"), 1200, 6);
+        for (int i = 0; i < 6; i++) loan.pay(bank, i);
+        System.out.println("loan outstanding after six instalments: " + loan.outstanding()
+                           + ", loan account holds " + loanAccount.balance());
+
+        // 5. KYC: a state, whose consequence is a rule
+        SavingsAccount newbie = bank.openSavings("SB-3", "c2", Money.inr("90000.00"), Money.inr("0.00"));
+        KycRule kyc = new KycRule(Money.inr("10000.00"));
+        newbie.addRule(kyc);
+        try { newbie.withdraw(Money.inr("25000.00"), "big"); }
+        catch (RuleViolation e) { System.out.println("kyc: " + e.getMessage()); }
+        kyc.set(KycStatus.VERIFIED);
+        newbie.withdraw(Money.inr("25000.00"), "big, after verification");
+        System.out.println("after verification the same withdrawal works: " + newbie.balance());
+
+        // 6. a fee: a third row inside the same two locks as the transfer
+        bank.setFeePolicy(new FlatFeeAboveThreshold(Money.inr("10000.00"), Money.inr("25.00")));
+        Money before = newbie.balance();
+        bank.transfer("F-1", "SB-3", "CA-9", Money.inr("20000.00"), "big transfer");
+        System.out.println("transfer of INR 20000 with a fee: " + before + " -> " + newbie.balance()
+                           + " (20000 + 25), rows end with " + newbie.ledger().get(newbie.rowCount() - 1).type());
+
+        // 7. multi-currency: the rate is injected and applied at the moment of the transfer
+        ExchangeRateProvider rates = new FixedRates().quote("INR", "USD", 12).quote("USD", "INR", 830_000);
+        System.out.println("INR 100000.00 at 12bp = " + Fx.convert(Money.inr("100000.00"), "USD", rates, now[0]));
+
+        // 8. persistence: the conditional UPDATE is the lock, and the unique index is the idempotency
+        AccountRepository repo = new InMemoryAccountRepository().open("A", 100_000).open("B", 0);
+        System.out.println("db transfer 700.00: " + PersistedTransfer.transfer(repo, "t1", "A", "B", 70_000, 0));
+        System.out.println("the same request again: " + PersistedTransfer.transfer(repo, "t1", "A", "B", 70_000, 0)
+                           + " and A still holds " + Money.of(repo.balance("A"), Money.INR));
+        System.out.println("one more, which the WHERE clause refuses: "
+                           + PersistedTransfer.transfer(repo, "t2", "A", "B", 70_000, 0));
+    }
+}

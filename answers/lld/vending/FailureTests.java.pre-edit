@@ -1,0 +1,150 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+/**
+ * Eight claims the design makes, each proven by a few lines. Run it with
+ * javac Main.java Extensions.java FailureTests.java && java FailureTests
+ * It prints ALL PASS, or the first failure and a non-zero exit code.
+ */
+public class FailureTests {
+    static int failed = 0;
+
+    /** Record one claim. Prints ok or FAIL with the claim's name. */
+    static void check(boolean ok, String what) {
+        System.out.println((ok ? "  ok   " : "  FAIL ") + what);
+        if (!ok) failed++;
+    }
+
+    /** A machine with one column and a float big enough to make change. */
+    static VendingMachine machine(int qty) {
+        VendingMachine vm = new VendingMachine();
+        vm.addSlot(new Slot("B1", new Product("DMK", "Dairy Milk", 2500), 8, qty));
+        vm.loadFloat(Coin.R1, 10);
+        vm.loadFloat(Coin.R2, 10);
+        vm.loadFloat(Coin.R5, 6);
+        vm.loadFloat(Coin.R10, 4);
+        return vm;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. two terminals press for the last unit: exactly one item leaves, and no paise is lost
+        System.out.println("1. forty panels, one unit left");
+        VendingMachine race = machine(1);
+        int floatBefore = race.floatPaise();
+        int panels = 40;
+        CountDownLatch go = new CountDownLatch(1), done = new CountDownLatch(panels);
+        List<Outcome> out = Collections.synchronizedList(new ArrayList<>());
+        for (int i = 0; i < panels; i++)
+            new Thread(() -> {
+                try { go.await(); out.add(race.purchase("B1", List.of(Coin.R20, Coin.R10))); }
+                catch (Exception e) { /* counted as no sale */ }
+                finally { done.countDown(); }
+            }).start();
+        go.countDown();
+        done.await();
+        long sold = out.stream().filter(o -> o.item() != null).count();
+        int handedBack = out.stream().filter(o -> o.item() == null).mapToInt(Outcome::paise).sum();
+        check(sold == 1, "exactly one panel got the item, " + (panels - 1) + " were refused");
+        check(race.qty("B1") == 0, "the column ended at zero, never below");
+        check(handedBack == (panels - 1) * 3000, "every refused panel got its whole Rs 30 back");
+        check(race.floatPaise() == floatBefore + 2500, "the float grew by exactly one price, Rs 25");
+
+        // 2. the float cannot make change: refuse, refund in full, touch nothing
+        System.out.println("2. the float cannot make change");
+        VendingMachine lop = new VendingMachine();
+        lop.addSlot(new Slot("B1", new Product("DMK", "Dairy Milk", 2500), 8, 3));
+        lop.loadFloat(Coin.R10, 1);                                   // Rs 15 change is impossible
+        lop.insertCoin(Coin.R20);
+        lop.insertCoin(Coin.R20);
+        Outcome refused = lop.select("B1");
+        check(refused.status() == Status.NO_CHANGE, "the sale is refused, not half done");
+        check(Coin.total(refused.coins()) == 4000, "the whole Rs 40 is refunded");
+        check(lop.qty("B1") == 3, "stock is exactly what it was");
+        check(lop.floatPaise() == 1000, "the float is exactly what it was");
+        check(lop.state() == MachineState.IDLE, "the machine is idle again");
+
+        // 3. the coin return hands back exactly the coins that went in
+        System.out.println("3. cancel");
+        VendingMachine cancel = machine(1);
+        cancel.insertCoin(Coin.R10);
+        cancel.insertCoin(Coin.R2);
+        cancel.insertCoin(Coin.R2);
+        List<Coin> back = cancel.cancel();
+        check(back.equals(List.of(Coin.R10, Coin.R2, Coin.R2)), "the same three coins, same denominations");
+        check(cancel.escrowPaise() == 0, "nothing is left in escrow");
+        check(cancel.collect().paise() == 1400, "and the same Rs 14 is in the tray");
+
+        // 4. the motor jams: nothing dispensed, everything refunded, no stock lost
+        System.out.println("4. the motor jams");
+        VendingMachine jam = machine(3);
+        jam.configure(new ListPrice(), new BackoffChange(), code -> false);
+        int floatWas = jam.floatPaise();
+        jam.insertCoin(Coin.R20);
+        jam.insertCoin(Coin.R10);
+        Outcome jammed = jam.select("B1");
+        check(jammed.status() == Status.JAMMED, "the press reports a jam");
+        check(Coin.total(jammed.coins()) == 3000, "the whole Rs 30 is refunded");
+        check(jam.qty("B1") == 3, "no unit was taken off the coil");
+        check(jam.floatPaise() == floatWas, "the float never moved");
+
+        // 5. restocking, and the pager that fires when a column hits zero
+        System.out.println("5. restock and the empty-column alert");
+        VendingMachine stock = machine(1);
+        RestockAlert pager = new RestockAlert();
+        stock.addObserver(pager);
+        stock.purchase("B1", List.of(Coin.R20, Coin.R10));
+        check(stock.qty("B1") == 0, "the last unit sold");
+        check(pager.empty.equals(List.of("B1")), "the pager was told which column is empty");
+        check(stock.restock("B1", 5) == 5 && stock.qty("B1") == 5, "restock puts five back");
+        check(stock.restock("B1", 100) == 3, "and it never goes past the column's capacity of 8");
+
+        // 6. a screen that throws cannot break a sale
+        System.out.println("6. a broken screen");
+        VendingMachine noisy = machine(2);
+        noisy.addObserver(e -> { throw new RuntimeException("screen is dead"); });
+        Outcome still = noisy.purchase("B1", List.of(Coin.R20, Coin.R10));
+        check(still.item() != null, "the item still dropped");
+        check(noisy.qty("B1") == 1, "and the stock still moved");
+
+        // 7. an action that the current mode does not allow is refused, loudly
+        System.out.println("7. illegal moves");
+        VendingMachine strict = machine(2);
+        final boolean[] refusedInsert = { false }, refusedSelect = { false };
+        strict.configure(new ListPrice(), new BackoffChange(), code -> {     // a coin pushed in mid-drop
+            try { strict.insertCoin(Coin.R1); } catch (IllegalStateException e) { refusedInsert[0] = true; }
+            try { strict.select("B1"); }       catch (IllegalStateException e) { refusedSelect[0] = true; }
+            return true;
+        });
+        strict.purchase("B1", List.of(Coin.R20, Coin.R10));
+        check(refusedInsert[0], "a coin pushed in while the flap is open is refused");
+        check(refusedSelect[0], "so is a second press of the button");
+        boolean threw = false;
+        try { machine(1).select("B1"); } catch (IllegalStateException e) { threw = true; }
+        check(threw, "pressing a slot with no money in is refused");
+        boolean empty = false;
+        try { machine(1).collect(); } catch (IllegalStateException e) { empty = true; }
+        check(empty, "taking from an empty tray is refused, not a silent null");
+
+        // 8. the price comes from the injected clock, so happy hour is testable at any hour
+        System.out.println("8. time is handed in");
+        VendingMachine hh = machine(3);
+        long[] now = { at(10, 0) };
+        hh.setClock(() -> now[0]);
+        hh.configure(new HappyHourDiscount(new ListPrice(), () -> now[0], 16, 18, 20), new BackoffChange(), new Motor());
+        check(hh.priceOf("B1") == 2500, "at 10:00 the column costs its list price, Rs 25");
+        now[0] = at(16, 30);
+        check(hh.priceOf("B1") == 2000, "at 16:30 the same column costs Rs 20");
+        hh.insertCoin(Coin.R20);
+        Outcome cheap = hh.select("B1");
+        check(cheap.status() == Status.SOLD && cheap.paise() == 0, "Rs 20 buys it outright during happy hour");
+
+        System.out.println(failed == 0 ? "ALL PASS" : failed + " FAILED");
+        if (failed > 0) System.exit(1);
+    }
+
+    /** A fixed moment on 15 September 2026 in Kolkata, so the tests never depend on when they run. */
+    static long at(int hour, int minute) {
+        return java.time.LocalDateTime.of(2026, 9, 15, hour, minute)
+                 .atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli();
+    }
+}

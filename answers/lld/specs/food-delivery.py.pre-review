@@ -1,0 +1,772 @@
+# Food Delivery LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"food-delivery/Main.java").read_text()
+ext   = (H/"food-delivery/Extensions.java").read_text()
+tests = (H/"food-delivery/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("place an order", 26, [("a cart, one restaurant", "the items the customer tapped"),
+                                ("reserve under the lock", "live menu + stock, all or none"),
+                                ("charge the card", "outside every lock, ~400 ms"),
+                                ("only now, the order exists", "PLACED, and the kitchen is told")]),
+        ("cook it, carry it", 168, [("ACCEPTED &rarr; PREPARING", "the restaurant tablet drives it"),
+                                    ("READY: claim a rider", "one compare-and-set, one winner"),
+                                    ("PICKED_UP", "past this point, no cancelling"),
+                                    ("DELIVERED", "the rider goes back in the pool")])]
+for lab, y, boxes in rows:
+    pf += _tx(86, y+29, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 172 + k*262
+        pf += _bx(x, y, 242, 52, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+242, y+26, x+262), True)
+pf += _ar("M555 78 V92", dash=True) + _ar("M817 78 V92", dash=True)
+pf += _bx(295, 92, 640, 46, "refused: sold out, declined, or no answer from the bank at all",
+          "the food goes straight back, no order is created, and a charge nobody answered for is written down", dash=True)
+pf += _ar("M293 226 V240", dash=True) + _ar("M817 226 V240", dash=True)
+pf += _bx(175, 240, 470, 46, "the restaurant refuses it",
+          "the whole bill is refunded and the food goes back on the shelf", dash=True)
+pf += _bx(675, 240, 530, 46, "the customer cancels",
+          "free before the kitchen starts, a fee after that, never once the rider has it", dash=True)
+pf += _tx(86, 310, "read", "var(--acc)", 13)
+pf += _tx(172, 310, "at any moment: where is my order?   what is on the restaurant&rsquo;s screen?   how many portions are left?",
+          "var(--text)", 12, "start")
+pf += _tx(615, 344, "many phones check out of the same restaurant at the same instant: two of them must never get the same last portion, and money that moved must always be findable",
+          "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 358, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("12:31:02  Anita checks out", ["2 paneer + 1 naan = 558.00", "44.00 fee + 22.00 surge - 120.00", 
+                                      "card charged 504.00, then the order", "paneer stock 3 &rarr; 1"], True),
+      ("12:31:03  Bala taps for 2 paneer", ["only 1 left: Anita reserved two", "refused inside the restaurant&rsquo;s lock",
+                                            "his card is never touched at all"], False),
+      ("12:52:00  Anita cancels", ["the paneer is already on the tawa", "policy keeps 50.00, refunds 454.00",
+                                   "this stock does NOT go back"], False),
+      ("12:58:30  two orders go READY", ["one rider is nearest to both", "one compare-and-set wins, one loses",
+                                         "the loser waits 40 s and gets p-23"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 268, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Browse one restaurant&rsquo;s menu; add in-stock items to a cart bound to that one restaurant.</li>
+<li>Check out: price the basket at today&rsquo;s menu prices, take payment, place the order.</li>
+<li>Price = food + a distance fee + surge - coupons, with a cap on the coupon.</li>
+<li>The restaurant accepts or refuses it &mdash; a refusal refunds in full &mdash; then cooks it and marks it ready.</li>
+<li>A free rider is claimed for a ready order; if none is free the order waits its turn.</li>
+<li>Pick up and deliver, with every step pushed to the customer&rsquo;s phone.</li>
+<li>Cancel: free before the kitchen starts, a fee after that, impossible once the rider has it.</li>
+<li>Read at any time: the order&rsquo;s state, the restaurant&rsquo;s live queue, what is left in stock.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many phones checking out at once: the last portion is sold exactly once, never twice.</li>
+<li>One rider per order and one order per rider, and both are handed back on every terminal path.</li>
+<li>An order only ever takes a legal step; an illegal one throws rather than being written.</li>
+<li>Nothing half-done: a declined card leaves no order and the stock as it was, and a charge the bank never
+answered for is written down and swept later rather than assumed either way.</li>
+<li>Money is integer paise, never a double; the price is the server&rsquo;s, never the client&rsquo;s.</li>
+<li>Pricing, assignment and the cancellation policy are swappable without touching the flow.</li>
+<li>&ldquo;Where is my order?&rdquo; is one map lookup and a volatile read, with no lock at all; in memory, one
+process (say it; a follow-up adds a database).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design the ordering side of Swiggy. A customer fills a cart from one restaurant and checks out; the '
+          'restaurant accepts it, cooks it and marks it ready; a delivery partner picks it up and drops it. '
+          'I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A customer opens one restaurant, taps items into a cart '
+ 'and pays. The restaurant sees the order on a tablet, accepts it, cooks it and says it is ready. The platform '
+ 'then finds a free delivery partner, who picks it up and drops it at the customer&rsquo;s door, and the phone '
+ 'shows every step as it happens. Three different apps are driving the same order &mdash; the customer&rsquo;s, the '
+ 'restaurant&rsquo;s, the rider&rsquo;s &mdash; and none of them can be trusted to send a sensible step, so the order&rsquo;s '
+ 'life has to be written down as a set of legal moves. Two things are genuinely contended: the last portion of a '
+ 'dish, which two customers can tap for in the same millisecond, and a free rider, whom two ready orders can want '
+ 'at the same instant. Everything else in this problem is bookkeeping &mdash; except the money, which has one '
+ 'case the others do not: a card charge can fail, and it can also simply not answer. The invariant to say out '
+ 'loud: a portion of food is sold once, a rider carries one order, and a payment that fails leaves the system '
+ 'exactly as it was while a payment that never answers leaves a written record instead of a guess.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that places an order, walks it to delivered and prints the bill. The interviewer is '
+ 'watching for, in this order: the questions you ask before typing (one restaurant per cart, and whether payment '
+ 'is in scope, are the first two); which classes exist and which one owns the stock, the state and the rider; '
+ 'checkout end to end; what happens when two phones want the last portion; where the rules that will change '
+ '(the fee, the coupon, who gets dispatched) live, so a new one is a class and not an edit; and what the system '
+ 'looks like the instant the card is declined &mdash; and the instant the bank does not answer at all. Then the '
+ 'twists: surge, ETA, cancellations and refunds, a rider who says no, two drops on one trip, scheduled orders, '
+ 'persistence.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>One cart per restaurant, or a basket that spans several?</td><td>One restaurant per cart</td><td>The cart is bound at open time; multi-restaurant fans out into N orders (moves 1, 12)</td></tr>'
+ '<tr><td>Is payment in scope, and what does the gateway say when it does not know?</td><td>In scope; the order exists after it; a timeout means &ldquo;unknown&rdquo;</td><td>The order of operations at checkout &mdash; reserve, pay, then commit &mdash; and the charge log that makes an unanswered charge findable (moves 6, 9)</td></tr>'
+ '<tr><td>Do items run out, or is the menu just on/off?</td><td>They run out: a stock count</td><td>The one real race, and where the lock goes (moves 4, 7)</td></tr>'
+ '<tr><td>Push assignment (we reserve a rider) or pull (riders accept offers)?</td><td>Push, one rider per order</td><td>A compare-and-set on the rider instead of a pool lock (move 4); offers are a follow-up</td></tr>'
+ '<tr><td>Until when can a customer cancel, and who pays?</td><td>Free until cooking starts, then a flat fee</td><td>The transition table plus an injected refund policy (moves 3, 6)</td></tr>'
+ '<tr><td>How is money represented, and who decides the price?</td><td>Integer paise; the server, from the live menu</td><td><code>long</code> everywhere, prices copied into the order at checkout (moves 1, 5)</td></tr>'
+ '<tr><td>Live GPS on a map, or just the milestones?</td><td>Milestones now; GPS is a separate stream</td><td>Observers for six events an hour, not for three fixes a second (moves 3, 12)</td></tr>'
+ '<tr><td>One process and in memory, or a database and many servers?</td><td>One process, in memory</td><td>No repository yet; a follow-up adds one with a conditional UPDATE (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One lunch hour at Truffles Koramangala, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> one restaurant per cart; money is integer paise and the price comes '
+ 'from the live menu, never from the client; the order is created only after the card is charged, and a declined '
+ 'card puts the food back; an item&rsquo;s stock is the thing two customers race for; a rider is claimed with one '
+ 'compare-and-set, and the order&rsquo;s rider field with a second; every state change is checked against a table. '
+ 'Named as out of scope: live GPS, multi-restaurant baskets, scheduled orders, ratings and persistence &mdash; each '
+ 'is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="18" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 45, "a CUSTOMER fills a CART from one RESTAURANT; checkout makes an ORDER with LINES and a BILL; a RIDER carries it; PRICING and DISPATCH are rules",
+          "var(--text)", 12.5)
+for x, w, t, sub, acc in [(15, 185, "Restaurant", "menu, stock, queue", 1), (215, 170, "Cart", "lines, one restaurant", 1),
+                          (400, 190, "Order", "lines, bill, state", 1), (605, 205, "DeliveryPartner", "one free/busy flag", 1),
+                          (825, 185, "Bill / OrderLine", "frozen at checkout", 0), (1025, 190, "Pricing rule", "no state: an interface", 0)]:
+    m1 += _bx(x, 108, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 62 V108" % (x + w/2))
+m1 += _tx(615, 186, "solid = it has state of its own that changes, so it becomes a class.   dashed = a value frozen once, or a rule with no state at all", "var(--muted)", 11)
+m1 += _tx(615, 205, "a CUSTOMER is just an id: nothing about him moves, so storing the id means a change of name can never move money or food", "var(--muted)", 11)
+MV[1] = _mv(1230, 218, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("check out a cart", "OrderService  (owns the ORDER of operations)", "svc.placeOrder(key, customer, coupons)"),
+                                       ("take the last portion", "Restaurant  (owns menu, stock and its lock)", "restaurant.reserve(want)"),
+                                       ("move the order on", "Order  (owns its state and its own lock)", "svc.accept / markReady / deliver"),
+                                       ("take a rider", "DeliveryPartner  (owns one free/busy flag)", "partner.claim(orderId)")]):
+    y = 20 + k*54
+    m2 += _bx(25, y, 300, 44, verb, "the verb") + _ar("M325 %s H390" % (y+22), True)
+    m2 += _bx(390, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M790 %s H850" % (y+22), True)
+    m2 += _bx(850, y, 355, 44, meth, "the method")
+m2 += _tx(615, 254, "a verb whose state is spread over several classes goes to the one that can see them all: that class becomes the orchestrator", "var(--muted)", 11)
+m2 += _tx(615, 273, "notice there is no OrderManager doing pricing and dispatch and notification: each of those verbs found an owner of its own", "var(--muted)", 11)
+MV[2] = _mv(1230, 286, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(25, 78, 250, 90, "OrderService", "configure(...): handed all four", acc=True)
+for k, (t, sub, impl) in enumerate([("PricingRule", "food, fee, surge, coupons", "ItemTotal / DistanceFee / SurgeFee / PercentCoupon"),
+                                    ("AssignmentRule", "who should carry this", "NearestFree, least-busy, pooled, penalise-refusers"),
+                                    ("CancellationPolicy", "what comes back, by state", "free until PREPARING, then a flat fee"),
+                                    ("OrderObserver", "the phone, the tablet, analytics", "CustomerApp, a dashboard, an SLA timer, a lambda")]):
+    y = 18 + k*56
+    m3 += _ar("M275 123 H320 V%s H360" % (y+22), True, True) + _bx(360, y, 290, 44, t, sub, dash=True)
+    m3 += _bx(720, y, 485, 44, impl, "classes that can be handed in") + _ar("M720 %s H650" % (y+22))
+m3 += _tx(615, 258, "dashed = handed in. The service never builds a rule, so a new fee or a new dispatcher is a new class plus one line in a list", "var(--muted)", 11)
+m3 += _tx(615, 277, "and two rules WRAP other rules: CappedDiscount(coupon, 120.00) caps whatever the coupon took off, and CheckedRule wraps every rule to refuse a bill whose parts do not add up", "var(--acc)", 11)
+MV[3] = _mv(1230, 290, m3)
+
+# move 4: the gap, and one owner per piece of shared state
+m4 = _D + _bx(25, 26, 185, 44, "Anita's phone", "reads paneer: 3 left") + _bx(25, 104, 185, 44, "Bala's phone", "reads paneer: 3 left")
+m4 += _bx(320, 66, 175, 44, "paneer stock", "3", acc=True)
+m4 += _ar("M210 48 H320 V66") + _ar("M210 126 H320 V110") + _tx(265, 36, "read", "var(--muted)", 10.5) + _tx(265, 156, "read", "var(--muted)", 10.5)
+m4 += '<rect x="530" y="18" width="290" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(675, 42, "the gap", RED, 12) + _tx(675, 66, "both see 3, both take 2", RED, 11) + _tx(675, 86, "four portions sold from three", RED, 11)
+m4 += _tx(675, 128, "fix: check and decrement as ONE step", "var(--text)", 11)
+m4 += _bx(855, 40, 350, 96, "Restaurant.lock", "check every line, then take the stock down", acc=True)
+m4 += _tx(1030, 156, "one lock per RESTAURANT, because the stock is per restaurant", "var(--muted)", 10.5)
+m4 += '<rect x="25" y="182" width="1180" height="92" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m4 += _tx(615, 204, "the same shape three times more, and the tool follows the shape of the state", "var(--text)", 12)
+m4 += _tx(615, 226, "an ORDER&rsquo;s state: read, check the table, write &mdash; one small lock per order", "var(--muted)", 11)
+m4 += _tx(615, 246, "a RIDER&rsquo;s free/busy flag, and the ORDER&rsquo;s rider field: ONE field each, so two compareAndSets and no lock at all", "var(--acc)", 11)
+m4 += _tx(615, 266, "four pieces of contended state, four owners; nothing is guarded by a global lock that everybody in the city has to queue behind", "var(--muted)", 11)
+MV[4] = _mv(1230, 288, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("is this dish on the menu, and how many are left?", "Map&lt;itemId, MenuItem&gt; + Map&lt;itemId, Integer&gt;", "O(1)"),
+                                      ("where is my order?", "Map&lt;orderId, Order&gt;, state is volatile", "O(1), no lock"),
+                                      ("what is on the restaurant's screen?", "LinkedHashSet&lt;orderId&gt;, arrival order", "O(1) in and out"),
+                                      ("have I already placed this tap?", "Map&lt;idempotencyKey, InFlight&gt;", "O(1)"),
+                                      ("which READY orders have no rider?", "ConcurrentLinkedDeque&lt;orderId&gt;", "O(1)"),
+                                      ("is this move legal?", "EnumMap&lt;OrderState, EnumSet&lt;OrderState&gt;&gt;", "O(1)")]):
+    y = 16 + k*44
+    m5 += _bx(25, y, 380, 36, q, "") + _ar("M405 %s H455" % (y+18), True)
+    m5 += _bx(455, y, 555, 36, shape, "", acc=True) + _ar("M1010 %s H1055" % (y+18), True) + _bx(1055, y, 150, 36, cost, "")
+m5 += _tx(615, 300, "the only scan left is &ldquo;who is free to ride?&rdquo;, which is O(n) over the free riders; a geo-index (a quadtree, or H3 cells) turns it into O(candidates)", "var(--muted)", 11)
+m5 += _tx(615, 319, "nothing here re-reads the order history to answer a question, which is the mistake that makes a real system slow exactly at lunchtime", "var(--muted)", 11)
+MV[5] = _mv(1230, 332, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D
+st = [("PLACED", 25), ("ACCEPTED", 215), ("PREPARING", 405), ("READY", 595), ("PICKED_UP", 785), ("DELIVERED", 985)]
+for k, (s, x) in enumerate(st):
+    w = 165 if k < 5 else 195
+    m6 += _bx(x, 22, w, 40, s, "", acc=(k == 3))
+    if k < 5: m6 += _ar("M%s 42 H%s" % (x+w, st[k+1][1]), True)
+m6 += _tx(690, 16, "a rider is claimed here", "var(--acc)", 10.5)
+m6 += _bx(215, 96, 165, 38, "REJECTED", "", dash=True) + _bx(455, 96, 230, 38, "CANCELLED", "", dash=True)
+m6 += _ar("M107 62 V96 H215", dash=True) + _ar("M297 62 V80 H470 V96", dash=True)
+m6 += _ar("M520 62 V96", dash=True) + _ar("M677 62 V96 H685", dash=True)
+m6 += _tx(945, 146, "PICKED_UP has exactly one successor: once it is on the road, nobody cancels", "var(--muted)", 11)
+m6 += '<rect x="25" y="166" width="1180" height="244" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(615, 192, "the order of operations at checkout, and why it is this order and no other", "var(--text)", 12)
+for k, l in enumerate(["1  claim the idempotency key -- a retried tap waits for the first attempt instead of paying twice",
+                       "2  take the RESTAURANT's lock: check every line against the live menu and stock, then take the stock down. All the lines or none",
+                       "3  release the lock and price it: the chain runs with no lock held, and a rule that throws has still committed nothing",
+                       "4  write the charge down as ATTEMPTED, then charge the card, outside every lock. Slow, irreversible, and until it answers there is no order",
+                       "5  no answer at all is not the same as 'no': mark that charge UNKNOWN, create nothing, and let a sweep ask the gateway later",
+                       "6  the money moved, so only now build the Order, put it in the map and on the restaurant's screen, and clear the cart",
+                       "7  and only then tell everybody: the observers run after the commit, never inside a lock",
+                       "a decline, a sold-out line or a broken pricing rule all take the same exit: the reservation is handed back and no order was ever created,",
+                       "so the customer sees one clean error and can try another card. Note what is NOT here: the card is never charged while a lock is held."]):
+    m6 += _tx(40, 218 + k*22, l, "var(--muted)" if k > 6 else "var(--text)", 11, "start")
+MV[6] = _mv(1230, 424, m6)
+
+# move 7: what is inside the lock, and twelve callers at the same instant
+m7 = _D + _card(25, 18, 385, 150, "inside the restaurant's lock: ~2 us",
+                ["is the restaurant open? one read", "k lines checked against two maps", "k stock counters decremented",
+                 "one insert into the live-order set", "about ten hash operations in all"], acc=True)
+m7 += _card(430, 18, 360, 150, "inside the order's own lock: ~0.3 us",
+            ["read the current state", "one EnumMap lookup: is the move legal?", "write the state and one timestamp",
+             "the rider's flag is not even here:", "one compareAndSet, about 20 ns"])
+m7 += _card(810, 18, 395, 150, "outside every lock: ms to minutes",
+            ["the pricing chain: ~1 us, but still outside", "the card gateway: about 400 ms", "the push notification: about 40 ms",
+             "the kitchen cooking: 18 minutes", "the customer deciding: as long as he likes"])
+m7 += _tx(615, 196, "twelve phones check out of the same restaurant in the same millisecond", "var(--text)", 12)
+for k in range(12):
+    x = 25 + k*99
+    m7 += _bx(x, 212, 88, 40, "phone %d" % (k+1), "waits %s us" % ("0" if k == 0 else "%d" % (k*2)), acc=(k == 11))
+m7 += _tx(615, 280, "the twelfth waits about twenty-two microseconds for the lock and then four hundred milliseconds for its own card payment:", "var(--muted)", 11)
+m7 += _tx(615, 299, "yes, one restaurant's checkouts are serialised, and the part that is serialised is twenty thousand times shorter than the part that is not", "var(--muted)", 11)
+MV[7] = _mv(1230, 312, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="18" width="560" height="205" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(300, 40, "one lock per restaurant: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["the locked part of a checkout: ~10 map operations, about 2 us",
+                       "a busy Koramangala kitchen at lunch: 4 orders a minute",
+                       "that is one every 15 seconds against a 2 us lock",
+                       "even at a fictional 50 checkouts a second into ONE restaurant:",
+                       "100 us of lock in every second = 0.01% busy",
+                       "and the card gateway, at 400 ms, is 200,000x longer than the lock",
+                       "the lock is per restaurant: 8,000 of them in the city never meet"]):
+    m8 += _tx(34, 64 + k*23, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 40, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1  pay and notify outside the lock", "already done: nothing slow is inside it"),
+                              ("2  one atomic counter per item", "AtomicInteger stock, CAS-decremented: two different dishes never wait"),
+                              ("3  a row per item in the database", "UPDATE menu SET left = left - ? WHERE id = ? AND left &gt;= ?  -- 0 rows = sold out")]):
+    m8 += _bx(600, 58 + k*54, 600, 46, t, sub, acc=(k == 0))
+m8 += _tx(615, 240, "say the arithmetic before you climb: sharding a lock that is busy one ten-thousandth of the time is complexity nobody asked for", "var(--muted)", 11)
+MV[8] = _mv(1230, 254, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two phones want the last portion", "check and decrement in one step under the lock; test 1: 30 threads, 10 portions, exactly 5 orders"),
+                                ("one line of the cart is sold out", "reject the whole order before any write; test 2: the in-stock line was not reserved either"),
+                                ("a coupon worth more than the food", "the cap wraps the coupon, the flat one is trimmed; test 3: the parts add up to 454.00"),
+                                ("a pricing rule written next year", "CheckedRule wraps every rule; test 3b: SloppyRule is caught before the card is touched"),
+                                ("the card is declined", "the order is built after the charge; test 4: stock restored, no order, no refund needed"),
+                                ("the gateway never answers at all", "the attempt was written down first; test 10: the sweep finds the money and refunds it once"),
+                                ("the customer cancels while it cooks", "the policy decides, inside the lock; test 5: 50.00 kept, 70.00 back, stock not returned"),
+                                ("the restaurant refuses a paid order", "refund the whole bill, put the food back; test 9: REJECTED, off the tablet, nobody can accept it"),
+                                ("delivering what was never picked up", "the transition table refuses it; test 6: READY -&gt; DELIVERED throws"),
+                                ("two ready orders, one free rider", "one compareAndSet wins; test 7: the loser queues, then takes him back"),
+                                ("a rider comes free in the gap", "queue the order first, then look again; test 11: 150 races, nobody waits for an idle rider"),
+                                ("the push is down; the tap is retried", "publish after the unlock in try/catch, dedupe by key; test 8: one order, one charge")]):
+    y = 14 + k*40
+    m9 += _bx(25, y, 310, 36, bad, "") + _ar("M335 %s H380" % (y+18), True) + _bx(380, y, 825, 36, fix, "", acc=True)
+m9 += _tx(615, 514, "every claim this design makes has a test: FailureTests.java runs thirty-eight checks and must print ALL PASS before this page will build", "var(--muted)", 11)
+MV[9] = _mv(1230, 528, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 190), ("the line in the code", 280), ("what it buys", 730)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface PricingRule / AssignmentRule / CancellationPolicy", None), ("a new fee or dispatcher is a class, not an edit", None)],
+          [("Chain", "var(--text)"), ("move 3", None), ("for (PricingRule r : pricing) bill = r.apply(bill, ctx);", None), ("the bill grows one rule at a time, in a list you can reorder", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new CappedDiscount(coupon, 120.00);  new CheckedRule(everyRule)", None), ("a cap and an invariant that police rules nobody has written yet", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("publish(o, from) after the unlock, inside a try/catch", None), ("the phone hears; the order never waits for a push", None)],
+          [("State", "var(--text)"), ("move 6", None), ("EnumMap&lt;OrderState, EnumSet&lt;OrderState&gt;&gt; NEXT", None), ("&ldquo;deliver what was never picked up&rdquo; cannot be written", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the service is handed to its callers, never getInstance()", "var(--muted)"), ("a test builds a fresh OrderService", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("the pricing list IS the registry, one line per rule", "var(--muted)"), ("it earns the name when coupons come from a config table", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("not yet", None), ("an order has seven fields and every one is required", "var(--muted)"), ("it earns a place when tips, notes and packaging arrive", "var(--muted)")]]
+m10 = _D + _table(20, 18, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 303, "name a pattern only after the move that produced it; then every name has a one-sentence defence, and nothing is decoration", "var(--muted)", 11)
+MV[10] = _mv(1230, 316, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Restaurant: stock. Order: its state. Service: the flow. A rule: the arithmetic.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("MembershipWaiver is a new file plus one line in the pricing list", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("rule.apply(bill, ctx);  never \"is this the surge one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("PricingRule, AssignmentRule, CancellationPolicy, OrderObserver, Demand, Clock, ChargeLog", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("configure(pricing, dispatch, policy, gateway);  setClock(() -&gt; t)", None)]]
+m11 = _D + _table(20, 18, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 248, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 262, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "a membership that waives the fee", "a new class behind PricingRule plus one line in the list", "", "move 3"),
+        ("someone new wants to know", "an SLA timer, fraud, analytics", "one more observer; the order, the locks and the tests do not change", "", "move 4"),
+        ("a new step in a life", "awaiting pickup, disputed, returned", "one more constant and one more row in the transition table", "", "move 6"),
+        ("a new invariant across items", "one rider carries two drops", "the same single claim, but a Semaphore permit instead of a boolean CAS", "", "move 4"),
+        ("state that must outlive the process", "persist it; two servers", "a repository, and the guarded transition becomes", "UPDATE orders SET state = ? WHERE id = ? AND state = ?   -- 0 rows means somebody else moved it first", "moves 5 + 12")]):
+    y = 20 + k*54
+    m12 += _bx(25, y, 320, 44, t, sub) + _ar("M345 %s H405" % (y+22), True) + _bx(405, y, 690, 44, fix, sub2, acc=True) + _tx(1160, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 308, "for all five, the checkout order and the races do not change; that is the test that the derivation was right, and page 05 has the code for each", "var(--muted)", 11)
+MV[12] = _mv(1230, 322, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "The nouns are in the picture; the test that sorts them is whether the thing has state of its own that changes. A "
+ "restaurant does (menu, stock, a queue of live orders) and so do a cart, an order and a rider. A bill and an order "
+ "line do not: they are frozen the moment the card is charged, so they are records, not classes with setters &mdash; "
+ "which is what makes an order a receipt rather than a live document the restaurant can reprice. A pricing rule has "
+ "no state at all, so it is an interface. And a customer, in this hour, is an id: nothing about him moves, so the "
+ "order stores the id and a change of name can never move money.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "Each verb goes to whoever owns the state it touches, which is mechanical until the last row: &ldquo;check out a "
+ "cart&rdquo; touches the stock, the order, the rider <i>and</i> the card gateway, so it belongs to the only object "
+ "that can see them all &mdash; <code>svc.placeOrder(...)</code>, the orchestrator. Doing the rows in that order is "
+ "what stops the orchestrator becoming a God class: by the time you write it, pricing, dispatch and notification "
+ "have each found an owner of their own, and all that is left for the service is the <i>order</i> of operations.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "The fee will change, the surge will change, the coupon will change twice before the round is over, and who gets "
+ "dispatched will change from nearest to least-busy to whoever is already going that way. Each becomes a one-method "
+ "interface the service is <i>given</i> in <code>configure()</code> and never builds. This is where the patterns come "
+ "from, not the other way round: a swappable rule behind an interface is <b>Strategy</b>, a list of them applied in "
+ "order is a <b>Chain</b>, and a rule that wraps another rule is <b>Decorator</b> &mdash; which here does two jobs "
+ "worth naming. <code>CappedDiscount(coupon, 120.00)</code> caps whatever the coupon took off, so &ldquo;40% off, up "
+ "to 120&rdquo; is a wrapper rather than a clause inside every coupon ever written. <code>CheckedRule</code> wraps "
+ "<i>every</i> rule the service is handed and refuses a bill whose parts do not add up to its total, so a rule "
+ "written next year cannot charge a customer a number nobody can explain. I do the patterns; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner, and the tool follows the shape of the state.",
+ "Two phones check out the last three portions of paneer, two each. Both read three, both decide there is enough, both "
+ "write: four portions sold from three, and nobody notices until the kitchen does. So reading the stock and writing it "
+ "must be one step, in the class that owns it: the restaurant, with its own lock &mdash; per <i>restaurant</i>, not "
+ "per application, so eight thousand kitchens check out in parallel and never wait for each other. Then ask the same "
+ "question of the other contended state, and notice the answer is not automatically a lock. An order's state is a "
+ "read-check-write of one field against a table, so it gets its own "
+ "small lock, one per order. A rider's free/busy flag is a <i>single field</i> with two values, and for that a "
+ "compare-and-set is enough: the winner of the CAS has him, the loser tries the next candidate, and no lock is taken "
+ "at all. One more field is contended and it is easy to miss: the order's own <code>partnerId</code>. Two dispatchers "
+ "can be looking at the same waiting order at the same instant &mdash; two riders finished two deliveries in the same "
+ "millisecond &mdash; and each can win a <i>different</i> rider. So taking a rider is really two indivisible claims, "
+ "one on the rider and one on the order, and whoever loses the second hands his rider straight back to the pool. "
+ "Four pieces of shared state, four owners, and nothing guarded by a global lock the whole city queues behind.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "Every row of the table is a question somebody actually asks, and the shape is chosen to answer <i>that</i> question "
+ "in one step. Two are worth saying out loud. &ldquo;Where is my order?&rdquo; is asked far more often than anything "
+ "is written, so it is a map lookup plus a volatile field and takes no lock at all. &ldquo;Is this move legal?&rdquo; "
+ "is an <code>EnumMap</code> of <code>EnumSet</code>s, which is an array index and a bitmask &mdash; the transition "
+ "table costs nothing, which is why there is no excuse for if-chains. The one scan left is &ldquo;who is free to "
+ "ride?&rdquo;, O(n) over the free riders, and at this scale that is honestly the right answer; say that a geo-index "
+ "&mdash; a quadtree, or H3 cells &mdash; turns it into O(candidates) the day the city has forty thousand riders.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "Write the legal moves down as a table and two things become impossible to write: delivering something nobody picked "
+ "up, and cancelling something already on the road. Three untrusted apps drive this object, so every mutation is a "
+ "guarded read-check-write and never a setter. Then the harder half, which is the order of operations at checkout, "
+ "and every line of it is there to make one failure harmless. Claim the idempotency key, so a retried tap waits for "
+ "the first attempt instead of paying twice. Reserve the stock under the restaurant's lock, all the lines or none. "
+ "Release the lock and price it. Charge the card, outside every lock, because it is slow and "
+ "irreversible. And only when the money has moved does an <code>Order</code> object exist. A decline, a sold-out line "
+ "or a broken pricing rule all take the same exit: the reservation is handed straight back and no order was ever "
+ "created, so the customer sees one clean error and can try another card. One answer is not like the others, and it "
+ "is the one candidates forget: <i>no</i> answer. A gateway that times out may or may not have taken the money, so "
+ "the attempt is written down <i>before</i> the call and marked UNKNOWN when the call dies &mdash; that row is the "
+ "only thing left pointing at the customer's money, and a sweep asks the gateway about it later.", 6),
+("Move 7: yes, the lock makes one restaurant's checkouts happen one at a time. Ask for how long, and what is inside it.",
+ "Answer it with the contents of the lock, not with an opinion. About ten hash operations are inside the restaurant's "
+ "lock, roughly two microseconds; an order's own lock holds one read, one <code>EnumMap</code> lookup and two writes; "
+ "the rider is not even a lock. Everything slow is outside all three &mdash; the pricing chain, the gateway at four "
+ "hundred milliseconds, the push at forty, the kitchen at eighteen minutes. That separation is the design, not a "
+ "detail: charging a card while holding a restaurant's lock would stop everyone else ordering from that restaurant "
+ "for four hundred milliseconds, and at four orders a minute you would never see it in testing and would see it every "
+ "lunchtime in production. So yes, one restaurant's checkouts are serialised &mdash; the twelfth phone waits about "
+ "twenty-two microseconds, and then four hundred milliseconds for its own payment.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "The numbers are in the picture; what matters is that you say them before you offer to shard anything. Four orders a "
+ "minute against a lock held two microseconds is a lock that is busy one ten-thousandth of the time, and it is per "
+ "restaurant, so the city's eight thousand kitchens are eight thousand locks that never meet. The ladder is worth "
+ "knowing in order because the first rung is the only one you have already climbed: nothing slow is inside the lock. "
+ "The second rung, an atomic counter per <i>item</i>, only pays off when one restaurant is genuinely the whole "
+ "business. The third leaves this process altogether: stock becomes a row and the reservation becomes "
+ "<code>UPDATE menu SET left = left - ? WHERE id = ? AND left &gt;= ?</code>, where zero rows updated means sold out "
+ "&mdash; the database performing exactly the atomic step the lock was performing.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "The table is the list; each row is a few lines in FailureTests.java. Four of them are worth saying out loud because "
+ "they are the ones that separate a design from a claim. The last-portion race is proved by a <i>count</i>, not a "
+ "hope: thirty threads, ten portions, exactly five orders, stock exactly zero and the card touched exactly five times. "
+ "The declined card is proved by what is <i>absent</i> afterwards: no order, no refund to make, the stock where it "
+ "started. The gateway that never answers is proved by the sweep: the money is found, refunded once, and a second "
+ "sweep refunds nothing. And the two dispatch races are run a hundred and fifty times each, because a race that "
+ "passes once has proved nothing. A design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Read the table as a defence, not a list: each name has a move behind it, and a name with no move behind it is "
+ "decoration. The two rows worth arguing are the bottom ones. Factory has not earned its place, because the list of "
+ "pricing rules <i>is</i> the registry today; it earns the name the day coupons arrive as rows in a config table and "
+ "somebody has to turn a row into a rule. Builder is the tempting one, and the honest answer is &ldquo;not yet&rdquo;: "
+ "an order has seven fields and every single one is required, so a constructor says more than a builder would; it "
+ "earns its place the day tips, cooking notes, packaging and gift wrapping arrive and most orders leave them empty.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "The table is the answer; the point of it is that not one row was designed for. Each letter is something moves 2 and "
+ "3 already did, and if a row had come up empty that would have been the signal to go back, not to bolt on an "
+ "interface. The proof of the last two rows is the test file: <b>I</b> is seven interfaces with one method each, so a "
+ "fake is a lambda &mdash; the demand signal really is <code>(r, t) -&gt; true</code>; and <b>D</b> is why a test can "
+ "hand the service a gateway that declines every card, a gateway that never answers, a clock that says last Tuesday "
+ "and a pricing rule that is deliberately broken, without touching a line of the service.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "Name the move out loud before you type, because the naming is the answer and the code is bookkeeping. Two of the "
+ "five are worth a sentence more. &ldquo;One rider carries two drops&rdquo; sounds like a redesign and is not: the "
+ "rider's flag had two values so a compare-and-set fitted, capacity makes it a counter, so the same single indivisible "
+ "claim becomes <code>Semaphore.tryAcquire</code> and the ranking, the queue and the terminal release do not move. "
+ "&ldquo;It has to survive a restart&rdquo; is the same trick one level down: the order's lock only guards one "
+ "process, so the guarded transition becomes <code>UPDATE orders SET state = ? WHERE id = ? AND state = ?</code>, "
+ "where zero rows updated means another server moved it first. For all five, the checkout order and the races do not "
+ "change &mdash; which is the test that the derivation was right. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, BookMyShow, ride sharing) and the class diagram, the locks, the "
+ "tests, the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and "
+ "nothing is named before the move that produced it. On this problem the moves earn their keep at move 4, because the "
+ "system has three separate pieces of contended state and the right tool is different for each one.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# column A: the values the customer's side is made of
+put("cart", 10, 20, 235, "Cart", ["restaurantId: String", "dropAt: Geo", "lines: Map&lt;itemId, qty&gt;"],
+    ["add(item, qty) / remove(item)", "snapshot(): Map  -- a frozen copy"])
+put("geo", 10, 164, 235, "Geo", ["lat, lng: double"], ["kmTo(other): double"])
+put("item", 10, 258, 235, "MenuItem", ["id, name: String", "pricePaise: long", "(immutable: the true price)"], [])
+put("line", 10, 362, 235, "OrderLine", ["itemId, name: String", "unitPaise: long", "qty: int", "(copied at checkout)"],
+    ["amountPaise(): long"])
+put("bill", 10, 500, 235, "Bill", ["items: long", "delivery: long", "surge: long", "discount: long", "total: long"],
+    ["withItems / addDelivery", "addSurge / addDiscount"])
+put("money", 10, 670, 235, "Money", [], ["rupees(\"249.00\"): long", "fmt(paise): String"])
+put("refund", 10, 760, 235, "Refund", ["refundedPaise: long", "keptPaise: long"], [])
+# column B: the orchestrator and the two things it owns
+put("svc", 295, 20, 345, "OrderService",
+    ["restaurants / partners / orders", "carts: Map&lt;customerId, Cart&gt;", "byKey: Map&lt;key, InFlight&gt;",
+     "waitingForRider: Deque&lt;orderId&gt;", "pricing: List&lt;PricingRule&gt;", "assignment / cancellation",
+     "payments / chargeLog / demand / clock", "observers: CopyOnWriteArrayList"],
+    ["configure(pricing, assign, policy, pay)", "openCart / addToCart", "placeOrder(key, customer, coupons)",
+     "accept / reject / startPreparing", "markReady(id): boolean", "pickUp / deliver(id)", "cancel(id): Refund",
+     "- transition(o, to): guarded", "- tryAssign(o): rank, then CAS", "- publish(o, from): after the unlock"])
+put("order", 295, 372, 345, "Order",
+    ["id / customerId / restaurantId", "chargeId: String", "lines: List&lt;OrderLine&gt;", "bill: Bill,   dropAt: Geo",
+     "state: volatile OrderState", "partner: AtomicReference&lt;String&gt;", "stamps: EnumMap&lt;OrderState, Long&gt;", "lock: ReentrantLock"],
+    ["state() / partnerId()", "takePartner(id): boolean  -- CAS", "moveTo(to, atMs)", "stamps(): Map", "lock() / unlock()"])
+put("rest", 295, 640, 345, "Restaurant",
+    ["id, name: String,   at: Geo", "prepMinutes: int", "menu: Map&lt;itemId, MenuItem&gt;", "stock: Map&lt;itemId, Integer&gt;",
+     "liveOrders: LinkedHashSet", "lock: ReentrantLock"],
+    ["reserve(want): List&lt;OrderLine&gt;", "giveBack(lines)", "enqueue / dequeue(orderId)", "stockOf(id) / menu() / liveQueue()"])
+# column C: the rider, the enums, and the seams that are not pricing
+put("part", 680, 20, 235, "DeliveryPartner",
+    ["id: String", "state: AtomicReference", "at: volatile Geo", "orderId: volatile String"],
+    ["claim(orderId): boolean", "release()", "goOffline() / goOnline()"])
+put("pstate", 680, 196, 235, "PartnerState", ["OFFLINE, AVAILABLE, ASSIGNED"], [], "enum")
+put("ostate", 680, 276, 235, "OrderState",
+    ["PLACED, ACCEPTED, PREPARING,", "READY, PICKED_UP, DELIVERED,", "CANCELLED, REJECTED", "NEXT: EnumMap&lt;state, Set&gt;"],
+    ["canGoTo(target): boolean", "isTerminal(): boolean"], "enum")
+put("pay", 680, 436, 235, "PaymentProcessor", [], ["charge(chargeId, paise): boolean", "refund(chargeId, paise)"], "interface")
+put("obs", 680, 536, 235, "OrderObserver", [], ["onState(order, from)"], "interface")
+put("clock", 680, 620, 235, "Clock", [], ["nowMs(): long"], "interface")
+put("demand", 680, 696, 235, "Demand", [], ["busy(restaurantId, now)"], "interface")
+put("clog", 680, 766, 235, "ChargeLog", ["ATTEMPTED / CHARGED /", "DECLINED / UNKNOWN / REFUNDED"],
+    ["record(charge, paise, outcome)"], "interface")
+# column D: the pricing chain, the dispatcher and the refund policy
+put("ctx", 955, 20, 265, "PriceCtx", ["restaurantId, customerId", "km: double,   busy: boolean", "coupons: List&lt;String&gt;", "lines: List&lt;OrderLine&gt;"], [])
+put("price", 955, 138, 265, "PricingRule", [], ["apply(running, ctx): Bill"], "interface")
+put("basic", 955, 218, 265, "the concrete rules",
+    ["ItemTotal -- the food itself", "DistanceFee -- 20.00 + 8.00 a km", "SurgeFee -- 1.5x on the fee only",
+     "PercentCoupon / FlatCoupon"], ["each adds one line to the bill"])
+put("capped", 955, 360, 265, "CappedDiscount", ["inner: PricingRule (wrapped)"], ["caps what the inner took off"])
+put("checked", 955, 454, 265, "CheckedRule", ["inner: PricingRule (wrapped)"], ["the parts must add to the total"])
+put("assign", 955, 548, 265, "AssignmentRule", [], ["rank(free, pickup): List&lt;id&gt;"], "interface")
+put("near", 955, 622, 265, "NearestFree", [], ["the free riders, sorted by km"])
+put("canc", 955, 696, 265, "CancellationPolicy", [], ["refundPaise(order, from, now)"], "interface")
+put("std", 955, 770, 265, "StandardCancellation", ["feePaise: long"], ["free until the kitchen starts"])
+
+def bus(y):
+    return '<path d="M1220 %s H1228" fill="none" stroke="var(--muted)" stroke-width="1.3"/>' % y
+
+EDGES = [
+ # the orchestrator owns the orders and the restaurants, and holds the carts
+ ln(B["svc"]["b"], B["order"]["t"], "compose", "every order"),
+ ln((295, 120), (295, 729), "compose", "", [(284, 120), (284, 729)]),
+ ln((295, 160), (245, 81), "compose", "", [(262, 160), (262, 81)]),
+ ln((640, 100), (680, 100), "assoc", "fleet"),
+ # the order points at its rider by id, and at its state
+ ln((640, 430), (680, 97), "assoc", "", [(646, 430), (646, 97)]),
+ ln((640, 480), (680, 345), "assoc", "", [(652, 480), (652, 345)]),
+ _tx(660, 252, "by id", "var(--muted)", 10.5),
+ ln(B["part"]["b"], B["pstate"]["t"], "assoc"),
+ # the order owns its lines and carries its bill; the restaurant owns its menu; the cart carries a drop point
+ ln((295, 470), (245, 423), "compose", "", [(266, 470), (266, 423)]),
+ ln((295, 540), (245, 577), "assoc", "", [(272, 540), (272, 577)]),
+ ln((295, 700), (245, 299), "compose", "", [(256, 700), (256, 299)]),
+ ln(B["cart"]["b"], B["geo"]["t"], "assoc"),
+ # the seams: handed in through configure(), plus the listeners
+ ln((640, 185), (955, 165), "inject", "", [(930, 185), (930, 165)]),
+ ln((640, 265), (955, 575), "inject", "", [(946, 265), (946, 575)]),
+ ln((640, 330), (680, 471), "inject", "", [(660, 330), (660, 471)]),
+ ln((640, 300), (680, 563), "notify", "", [(668, 300), (668, 563)]),
+ ln((640, 340), (680, 647), "inject", "", [(674, 340), (674, 647)]),
+ ln((640, 348), (680, 800), "inject", "", [(678, 348), (678, 800)]),
+ _tx(1092, 212, "handed in through configure()", "var(--acc)", 10.5),
+ # the pricing rules implement one interface, on a bus around the right edge
+ ln(B["checked"]["r"], (1220, 165), "inherit", "", [(1228, 491), (1228, 165)]),
+ bus(279), bus(397),
+ ln(B["ctx"]["b"], B["price"]["t"], "assoc", "given to every rule"),
+ ln((955, 397), (955, 165), "assoc", "", [(938, 397), (938, 165)]),
+ _tx(950, 212, "wraps", "var(--acc)", 10.5, "end"),
+ ln(B["near"]["t"], B["assign"]["b"], "inherit"),
+ ln(B["std"]["t"], B["canc"]["b"], "inherit"),
+]
+UMLSVG = uml_svg(1230, 906, EDGES, legend_y=886)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements. Filled diamond = owns, and the four coming off the left of the service are the only ownerships in the '
+ 'design: the service owns every order and every restaurant, an order owns its lines and its bill, a restaurant owns '
+ 'its menu. Plain arrow = references: an order points at its rider <i>by id</i>, because the rider outlives the order '
+ 'and belongs to the fleet. Dashed green = handed in through <code>configure()</code> or a setter &mdash; the '
+ 'pricing chain, the dispatcher, the gateway, the clock and the charge log, with the cancellation policy and the '
+ 'demand signal arriving the same way. Dotted blue = notifies. <b>Where the state lives, and where the locks are:</b> '
+ 'the restaurant has the menu, the stock counts and one <code>ReentrantLock</code>; each order has its own lock for its '
+ 'own state, and its rider field is an <code>AtomicReference</code> because two dispatchers can reach for it at once; a '
+ 'rider has a single <code>AtomicReference</code> flag and no lock at all; the service itself holds no lock, only maps '
+ 'and the rules it was handed. Notice what is <i>not</i> here: no Payment class (the gateway is an interface, and an '
+ 'order keeps only the charge id), no Notification class, and no separate Menu class &mdash; a menu is two maps inside '
+ 'the restaurant that owns them. Two classes in Main.java are deliberately not drawn: <code>FakeGateway</code> and '
+ '<code>CustomerApp</code> are the stand-ins the demo and the tests hand in, not part of the design.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does; read only those first for the shape, then the bodies for the mechanics. Each copy '
+ 'button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s reference code, with '
+ 'an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (thirty-eight checks proven; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (one restaurant per cart, and whether payment is in '
+ 'scope, first); then type in the order of Main.java: OrderState with its transition table, PartnerState, Money, the '
+ 'records (Geo, MenuItem, OrderLine, Bill, PriceCtx, Refund), the seven one-method interfaces, the pricing rules with '
+ 'the two decorators, NearestFree and StandardCancellation, Restaurant with its lock and <code>reserve()</code>, Cart, '
+ 'Order with its own lock and its compare-and-set for the rider, DeliveryPartner with its compare-and-set, then '
+ 'OrderService with placeOrder in its numbered steps, then a main with thirty threads racing for ten portions.</div></div>')
+
+FU = [
+("Marketing wants 40% off, capped at 120 rupees, on a bill that already has a distance fee and a surge multiplier on it.",
+ "functional", 10,
+ "The price is a list of one-method rules applied in order, so this is two new classes and two lines. "
+ "<code>PercentCoupon</code> takes its percentage off the food only; <code>CappedDiscount</code> wraps it and trims "
+ "whatever it took off down to the cap, so &ldquo;40% off, up to 120&rdquo; is a wrapper rather than a clause inside "
+ "every coupon written from now on. The order of the list is the order of the maths: food, distance fee, surge on the "
+ "fee only, then the coupons &mdash; 558.00 of food, 44.00 of fee (20 plus 8 a kilometre, rounded up to 3 km), 22.00 "
+ "of surge, and 223.20 of coupon trimmed to 120.00, for 504.00. Every rule is wrapped in <code>CheckedRule</code> "
+ "before it is used, so one that leaves the parts and the total out of step throws before the card is touched.",
+ sect(src, "final class DistanceFee", "final class CheckedRule")),
+("Two customers tap for the last two portions at the same instant. Prove one of them loses, with a test.",
+ "non-functional", 10,
+ "The race lives between reading a stock count and writing it back. <code>Restaurant.reserve</code> does the whole "
+ "read-modify-write inside the restaurant's lock, and in two phases: check <i>every</i> line against the live menu and "
+ "the live stock first, and only then decrement them all, so an order is all of its lines or none of them. The proof is "
+ "a count, not a hope: thirty threads wait on one latch, each wants two of the ten portions, and afterwards exactly "
+ "five orders exist, the stock is exactly zero and the card was touched exactly five times. The last number is the one "
+ "worth pointing at &mdash; it proves the twenty-five losers never reached the gateway at all.",
+ T("        // 1. thirty phones", "        // 2. one unavailable line")),
+("One lock per restaurant. Does that scale, or have you serialised Swiggy?",
+ "non-functional", 5,
+ "It scales, and the answer is arithmetic rather than opinion: about ten hash operations under the lock, roughly two "
+ "microseconds, against four orders a minute in a busy kitchen. Even a fictional fifty checkouts a second into one "
+ "restaurant is a hundred microseconds of lock in every second. And the lock is per restaurant, so the city's eight "
+ "thousand kitchens never meet. The sentence to say next is the one that shows you know what you are defending: what "
+ "would ruin it is not the number of customers, it is putting the card gateway inside the lock &mdash; four hundred "
+ "milliseconds is two hundred thousand times longer than the critical section, you would never see it in testing at "
+ "four orders a minute, and you would see it every lunchtime in production. Read <code>reserve()</code> and notice "
+ "what is <i>not</i> in it: no pricing, no payment, no notification.",
+ sect(src, "List<OrderLine> reserve(Map<String, Integer> want)", "void giveBack(List<OrderLine> lines)")),
+("The card is declined at checkout. What is the state of the system?",
+ "functional", 10,
+ "Exactly what it was. The order is built <i>after</i> the charge returns, so a decline leaves no order in the map, "
+ "nothing on the restaurant's screen and no refund to issue. What it does leave is a reservation, so the catch hands "
+ "the stock straight back under the restaurant's lock and rethrows; the customer sees one clean error and can try "
+ "another card. The same exit covers a sold-out line and a pricing rule that throws. One thing to defend out loud: "
+ "the card is charged with no lock held, because four hundred milliseconds inside a lock would stall every other "
+ "customer of that restaurant. And read step 3 carefully &mdash; a decline and a gateway that never answers are not "
+ "the same event, and the next question is about the second one.",
+ sect(src, "private Order doPlace", "void accept(String orderId)")),
+("The gateway times out. You do not know whether the customer was charged. Now what?",
+ "functional", 10,
+ "This is the one case &ldquo;pay, then commit&rdquo; cannot rule out, and the wrong answer is to treat it as a "
+ "decline: the money may have left, and nothing points at it. So the attempt is written down <i>before</i> the "
+ "gateway is called and marked UNKNOWN when the call dies; that row is the only thing left pointing at the "
+ "customer's money. No order is created and the food goes back, exactly as for a decline. A sweep then asks the "
+ "gateway what really happened, and if the money moved it is an orphan &mdash; an UNKNOWN charge can never belong to "
+ "an order, because an order is only built after a charge that answered &mdash; so it goes back, and the answer is "
+ "written into the log, which is what makes running the sweep twice refund once.",
+ sect(src, "enum ChargeOutcome", "interface OrderObserver") + "\n"
+ + X("unknown payment", "a gateway that dies")),
+("The restaurant refuses the order after the customer has already paid.",
+ "functional", 5,
+ "A separate path from a cancellation, because a different person is refusing and the money has already moved. "
+ "REJECTED is a legal successor of PLACED and of nothing else, so a restaurant can only refuse an order it has not "
+ "accepted yet. The method moves the state through the same guarded transition, gives the food back to the shelf, takes the "
+ "order off the tablet's queue, refunds the whole bill &mdash; there is no fee, the customer did nothing wrong "
+ "&mdash; and hands back any rider. Afterwards REJECTED is terminal, so a second tap on the restaurant's tablet "
+ "throws instead of refunding twice, which is the part worth pointing at.",
+ sect(src, "Refund reject(String orderId)", "Refund cancel(String orderId)")),
+("The app asks 'where is my order?' a thousand times a second. Make it O(1), with no lock.",
+ "non-functional", 5,
+ "No new structure. The order is one hash lookup by id, and its state is a <code>volatile</code> field and its rider "
+ "an <code>AtomicReference</code>, so the hot read takes no lock at all &mdash; a reader sees either the old value or "
+ "the new one, never a torn one, which is all a status screen needs. Be precise about which reads those are: "
+ "<code>stamps()</code> takes the order's lock to copy the timestamp map, and the menu, the stock and the tablet's "
+ "queue are copied under the restaurant's lock. That is deliberate. Those are opened a few times per order; the "
+ "status poll is a thousand times a second, and it is the only one that had to be free.",
+ sect(src, "    private final Map<String, Restaurant> restaurants", "    private List<PricingRule> pricing")
+ + "\n" + sect(src, "Order order(String id)", "Cart openCart(")),
+("His network drops on the Pay screen and the app sends the checkout again. Do not charge him twice.",
+ "non-functional", 5,
+ "The app sends a key with the tap &mdash; the same key on every retry of the same tap &mdash; and the service claims "
+ "it with one <code>putIfAbsent</code> before doing anything else. The second arrival finds an attempt already there "
+ "and <i>waits on it</i> rather than starting a second checkout: it gets the first attempt's order back, or the first "
+ "attempt's exception. That waiting is the part people get wrong; returning &ldquo;already in progress&rdquo; pushes "
+ "the problem back to an app that will simply retry again. A failed attempt removes its key, so a genuine retry after "
+ "a declined card is allowed to charge. The test is a count: same key twice, one order, and the gateway touched once.",
+ sect(src, "private static final class InFlight", "private Order doPlace")
+ + "\n" + T("        int before = g6.chargeCount();", "        // 9. the restaurant rejects")),
+("The customer cancels. Sometimes it is free, sometimes there is a fee, and sometimes it is too late.",
+ "twist", 10,
+ "Two rules, in two places, each where it belongs. <i>Whether</i> a cancel is allowed is the transition table: "
+ "CANCELLED follows PLACED, ACCEPTED, PREPARING and READY but not PICKED_UP, so once the rider has the food the "
+ "attempt throws instead of quietly succeeding. <i>How much comes back</i> is an injected policy, asked inside the "
+ "order's lock and given the state it is cancelling out of, so a state change racing the refund cannot fool it: free "
+ "before the kitchen starts, the total minus a flat fee once it is cooking. The stock follows the same logic &mdash; "
+ "cancelled before ACCEPTED puts the food back, cancelled while cooking does not, because that food exists now. Then "
+ "the refund, the queue removal and the rider hand-back all happen outside the lock.",
+ sect(src, "Refund cancel(String orderId)", "private OrderState transition(")
+ + "\n" + sect(src, "final class StandardCancellation", "final class FakeGateway")),
+("Two orders become ready in the same millisecond and one rider is nearest to both. And what if nobody is free at all?",
+ "non-functional", 10,
+ "Ranking and claiming are deliberately separate. The rule ranks a <i>snapshot</i> of the free riders, which may "
+ "already be stale when it returns &mdash; that is fine, because the winner is decided by <code>claim()</code>, one "
+ "compare-and-set on the rider's flag, and the loser walks to the next candidate. There is a second claim most people "
+ "miss: two dispatchers can be looking at the same waiting order and win two <i>different</i> riders, so filling the "
+ "order's rider field is itself a compare-and-set, and whoever loses hands his rider straight back. Nobody free is a "
+ "normal outcome, not an exception: the order joins a waiting deque. Two lines then decide whether the fleet works at "
+ "all &mdash; queue the order <i>before</i> looking again, so a rider freed in the gap is not missed, and hand the "
+ "rider back on every terminal path, or the fleet does one delivery each and dies.",
+ sect(src, "boolean claim(String forOrderId)", "void release()")
+ + "\n" + sect(src, "boolean markReady(String orderId)", "private boolean tryAssign")
+ + "\n" + sect(src, "private boolean tryAssign", "void deliver(String orderId)")
+ + "\n" + sect(src, "private void handBack(Order o)", "private void publish(")),
+("When will it arrive? And where does the time come from, and where does live GPS go?",
+ "design", 8,
+ "The ETA is a pure function of state: what the kitchen still owes, plus the ride at a speed handed in. What the "
+ "kitchen owes is measured from the <code>PREPARING</code> stamp, not from when the customer paid &mdash; an order "
+ "sitting unaccepted for ten minutes still owes the full eighteen &mdash; which is what the order's stamp map is for. "
+ "Time comes from one injected interface, so a test picks the instant, starts the cooking, moves the clock ten "
+ "minutes and asserts the exact number of minutes left; nothing else in the system reads the wall clock. Live GPS is "
+ "deliberately <i>not</i> an observer: state changes happen six times an hour, positions arrive a few times a second, "
+ "so the location stream gets its own topic per order and touches no lock.",
+ X("eta", "multi-restaurant basket") + "\n"
+ + "// where time comes from: one interface, handed in, defaulted, never read from the wall clock inside a method\n"
+ + "interface Clock { long nowMs(); }\n"
+ + "private Clock clock = System::currentTimeMillis;\n"
+ + "void setClock(Clock c) { clock = c; }\n\n"
+ + "// in a test: pick the instant, start the kitchen, then move it\n"
+ + "long[] now = { 1_700_000_000_000L };\n"
+ + "svc.setClock(() -> now[0]);\n"
+ + "svc.accept(id); svc.startPreparing(id);                // stamps PREPARING at now[0]\n"
+ + "now[0] += 10 * 60_000;                                 // ten minutes on the tawa: eight left of eighteen\n\n"
+ + X("live tracking", "persistence")),
+("One tap, two restaurants: biryani from one and dessert from another.",
+ "twist", 5,
+ "It fans out into one order per restaurant, because stock, prep time and the rider all belong to a restaurant; a "
+ "single order spanning two kitchens would have two prep times and two pickups and no honest state machine. So the "
+ "basket places each order in turn with a key derived from the one tap. The interesting part is the failure: there is "
+ "no distributed transaction here, so if the second restaurant is out of stock the first order is cancelled, which "
+ "refunds it through the ordinary path. Say that out loud rather than hiding it &mdash; compensation is the answer, and "
+ "the alternative (reserve everywhere, then pay once) is a two-phase commit you do not want in an hour.",
+ X("multi-restaurant basket", "scheduled orders")),
+("A rider accepts and then does not show. And can one rider carry two drops on the same trip?",
+ "twist", 10,
+ "Push assignment lies a little, so an offer holds the rider, asks him with a deadline, and hands him straight back on "
+ "a no or on silence &mdash; the release happens before the method returns, so the pool never leaks. The refusal is "
+ "recorded, and the ranking rule pushes a flaky rider down the list by charging him half a kilometre per miss, which is "
+ "a new <code>AssignmentRule</code> and nothing else. Batching is the smaller change of the two: the rider's state was "
+ "a flag with two values, so a compare-and-set fitted; with capacity it becomes a counter, so the same single "
+ "indivisible claim becomes <code>Semaphore.tryAcquire</code>. The queue, the ranking and the terminal release do not "
+ "move at all.",
+ X("the rider says no", "a new pricing rule") + "\n" + X("pooling", "the rider says no")),
+("Scheduled orders: 'deliver at eight', booked at four in the afternoon.",
+ "twist", 5,
+ "Not a new state. A booking sits outside the order model until the kitchen has to start, which is the requested time "
+ "minus that restaurant's prep time; at that point the scheduler places an ordinary order and everything downstream is "
+ "unchanged. The part worth pointing at is the id: it is derived from the booking, so a tick that runs twice, or two "
+ "servers running the same job, place it exactly once &mdash; the same idempotency that makes a retried tap safe. What "
+ "you should <i>not</i> do is reserve the stock at booking time; the kitchen will restock before then, and holding a "
+ "portion for four hours is how a restaurant goes sold out at six.",
+ X("scheduled orders", "pooling")),
+("Persist it. And now there are two servers.",
+ "twist", 10,
+ "The order's lock only guards one process, so it becomes a conditional UPDATE and the database performs the same "
+ "atomic step: <code>UPDATE orders SET state = ? WHERE id = ? AND state = ?</code>, where zero rows updated means "
+ "another server moved it first &mdash; exactly the error the in-memory guard throws. The insert carries the "
+ "idempotency key with ON CONFLICT DO NOTHING, so a retried tap still creates one order. Stock moves the same way: "
+ "<code>SET left = left - ? WHERE left &gt;= ?</code>. The one genuinely new piece is the outbox: the notification is "
+ "written as a row in the <i>same transaction</i> as the state change and drained by a separate sender, because a "
+ "process that commits a state and then dies before the push is the one failure the in-memory try/catch cannot cover.",
+ X("persistence", "Runs every extension")),
+("Which pattern is where, why is the state an enum and not eight classes, and where would a Factory or a Builder earn its place?",
+ "design", 8,
+ "Not one of them was chosen up front; each is what a move produced, and moves 10 and 11 have the full table with the "
+ "line of code for each. What that table does not answer is the enum question, which interviewers ask because the "
+ "textbook State pattern is a class per state. Eight classes would buy nothing here: a state in this system has no "
+ "behaviour of its own &mdash; no <code>PreparingState.handle()</code> &mdash; only a list of legal successors, so it "
+ "is data, and data belongs in an <code>EnumMap</code> you can read in one screen and print in an error message. Same "
+ "test for the other two: Factory earns its place when coupons arrive as config rows and somebody must turn a row "
+ "into a rule; Builder earns its place when an order gains optional fields, because today all seven are required and "
+ "a builder would only let you forget one.",
+ "// Strategy: a rule behind an interface, handed in, never built by the service\n"
+ "interface PricingRule { Bill apply(Bill running, PriceCtx ctx); }\n\n"
+ "// Chain: the bill grows one rule at a time, in an order you can read off the list\n"
+ "for (PricingRule rule : pricing) bill = rule.apply(bill, ctx);\n\n"
+ "// Decorator, twice: one caps any coupon, one polices every rule including the ones written next year\n"
+ "new CappedDiscount(new PercentCoupon(\"TASTY40\", 4000), Money.rupees(\"120.00\"));\n"
+ "for (PricingRule r : pricing) checked.add(new CheckedRule(r));\n\n"
+ "// State as DATA, not eight classes: the legal moves are a table, so an illegal move cannot be written\n"
+ "NEXT.put(PICKED_UP, EnumSet.of(DELIVERED));            // on the road: no going back\n"
+ "if (!from.canGoTo(to)) throw new IllegalStateException(o.id() + \": \" + from + \" -> \" + to\n"
+ "                                                     + \" (legal: \" + from.next() + \")\");\n\n"
+ "// Factory: not yet. The list IS the registry; it earns the name when coupons come from config rows\n"
+ "List<PricingRule> fromConfig = rows.stream().map(PricingRules::of).toList();\n\n"
+ "// Builder: not yet. Seven required fields is a constructor; a tip, a note and packaging would change that\n"
+ "new Order(id, customerId, restaurantId, chargeId, lines, bill, dropAt, placedAtMs);\n"),
+]
+
+build(dict(
+    slug="food-delivery", title="Food Delivery",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 38 failure checks and four races pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

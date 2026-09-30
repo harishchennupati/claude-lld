@@ -1,0 +1,558 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+/** Which way a jump goes. It is derived from the two cells, never stored: a snake goes down, a ladder goes up. */
+enum JumpKind { SNAKE, LADDER }
+
+/**
+ * The game's life. WAITING = built and valid but nobody may roll yet; IN_PROGRESS = rolls are accepted;
+ * FINISHED = somebody rested on the last cell and every further roll is refused.
+ */
+enum GameStatus { WAITING, IN_PROGRESS, FINISHED }
+
+/**
+ * A one-way teleport from one cell to another. A snake and a ladder are the SAME object: only the sign of
+ * end - start differs, and a sign is data, not a reason for two classes. Immutable, and it validates the one
+ * thing that is always true of a jump.
+ */
+record Jump(int start, int end) {
+    Jump {
+        if (start == end) throw new IllegalArgumentException("a jump cannot start and end on the same cell: " + start);
+    }
+    /** SNAKE if it drags you back, LADDER if it lifts you. Computed, so the two can never disagree. */
+    JumpKind kind() { return end < start ? JumpKind.SNAKE : JumpKind.LADDER; }
+    @Override public String toString() { return (kind() == JumpKind.SNAKE ? "snake " : "ladder ") + start + "->" + end; }
+}
+
+/**
+ * A person at the table. Deliberately immutable: the one thing that moves during a game is the token's
+ * position, and the GAME owns that, so no two callers can ever write it at once.
+ */
+record Player(String id, String name) {}
+
+/** Where time comes from. Injected, so a test can stamp a turn with any instant it likes. */
+interface Clock { long nowMs(); }
+
+// "how would you test a game of random rolls?" -> hide the randomness behind an interface -> Strategy
+/** The source of a roll. One method, because "how many dice, with what faces" is the thing that changes. */
+interface Dice {
+    /** The total of this throw. Must be at least 1. */
+    int roll();
+}
+
+/** n fair dice of f faces each, driven by a Random that is handed in so a game can be seeded and replayed. */
+final class StandardDice implements Dice {
+    private final int count, faces;
+    private final Random rng;
+    /** @param count how many dice, @param faces faces per die, @param rng injected: seed it to reproduce a game. */
+    StandardDice(int count, int faces, Random rng) {
+        if (count < 1) throw new IllegalArgumentException("at least one die: " + count);
+        if (faces < 2) throw new IllegalArgumentException("at least two faces: " + faces);
+        this.count = count; this.faces = faces; this.rng = rng;
+    }
+    /** The highest total this dice can produce. The extra-turn rule needs it to know what "the maximum" is. */
+    int max() { return count * faces; }
+    @Override public int roll() {
+        int sum = 0;
+        for (int i = 0; i < count; i++) sum += rng.nextInt(faces) + 1;
+        return sum;
+    }
+}
+
+/**
+ * Loaded dice: a scripted sequence, so a test can say "now roll a 6, then a 3" and assert an exact board.
+ * It also counts how many rolls were taken, which is how the race test proves a refused request rolls nothing.
+ */
+final class ScriptedDice implements Dice {
+    private final int[] script;
+    private final boolean cycle;
+    private int used = 0;
+    /** A fixed script that runs out: the test that asks for one roll too many gets an error, not a surprise. */
+    ScriptedDice(int... script) { this(false, script); }
+    /** @param cycle true = start the script again from the top when it runs out. */
+    ScriptedDice(boolean cycle, int... script) {
+        if (script.length == 0) throw new IllegalArgumentException("an empty script");
+        this.script = script.clone(); this.cycle = cycle;
+    }
+    /** How many rolls have actually been taken out of this dice. */
+    int used() { return used; }
+    @Override public int roll() {
+        if (used >= script.length && !cycle) throw new IllegalStateException("the dice script ran out after " + used + " rolls");
+        return script[used++ % script.length];
+    }
+}
+
+// "what happens when a roll overshoots the last cell?" has more than one right answer -> Strategy
+/** The rule that turns a roll into the cell the token lands on, BEFORE any snake or ladder is applied. */
+interface MoveStrategy {
+    /** The landing cell. Must be between 0 and boardSize; the game refuses anything else rather than trusting it. */
+    int landingCell(int from, int roll, int boardSize);
+}
+
+/** The classic rule: a roll that would go past the last cell is wasted and the token stays where it is. */
+final class OvershootStays implements MoveStrategy {
+    @Override public int landingCell(int from, int roll, int boardSize) {
+        int target = from + roll;
+        return target > boardSize ? from : target;
+    }
+}
+
+/** The other common rule: you must land exactly, and the extra steps bounce back off the last cell. */
+final class BounceBack implements MoveStrategy {
+    @Override public int landingCell(int from, int roll, int boardSize) {
+        int target = from + roll;
+        if (target <= boardSize) return target;
+        int bounced = boardSize - (target - boardSize);
+        return bounced < 0 ? from : bounced;                      // a roll bigger than the whole board: stay
+    }
+}
+
+// "and if you roll a six you go again -- but not for ever" -> a rule that wraps a rule -> Decorator
+/** Whether the same player rolls again. Pure: the game hands in the roll and how many extras this player has had. */
+interface ExtraTurnRule {
+    /** @param roll what they just threw, @param extrasSoFar how many extra turns in a row they have already had. */
+    boolean rollAgain(int roll, int extrasSoFar);
+}
+
+/** The plain rule: one roll, one turn. */
+final class NoExtraTurn implements ExtraTurnRule {
+    @Override public boolean rollAgain(int roll, int extrasSoFar) { return false; }
+}
+
+/** Throw the maximum (a six on one die) and go again. */
+final class ExtraTurnOnMax implements ExtraTurnRule {
+    private final int max;
+    /** @param max the highest total the dice can throw, usually 6. */
+    ExtraTurnOnMax(int max) { this.max = max; }
+    @Override public boolean rollAgain(int roll, int extrasSoFar) { return roll == max; }
+}
+
+/**
+ * The house rule, as a wrapper rather than a copy: whatever the inner rule says, after `cap` extra turns in a
+ * row the turn passes. It adds a limit to any rule, including ones written next year.
+ */
+final class CappedExtraTurn implements ExtraTurnRule {
+    private final ExtraTurnRule base;
+    private final int cap;
+    /** @param cap how many extra turns in a row are allowed; three sixes and you are done. */
+    CappedExtraTurn(ExtraTurnRule base, int cap) { this.base = base; this.cap = cap; }
+    @Override public boolean rollAgain(int roll, int extrasSoFar) {
+        return base.rollAgain(roll, extrasSoFar) && extrasSoFar + 1 < cap;
+    }
+}
+
+/**
+ * One completed turn: everything that happened, as data. It is the audit log, it is what the observers are
+ * handed, it is what a replay reads, and because it records `from` and `to` it is its own undo.
+ * A roll of 0 means the turn was forfeited on a timer rather than played.
+ */
+record Turn(int number, String playerId, int roll, int from, int landedOn, int to,
+            Jump jump, boolean extraTurn, boolean won, long atMs) {
+    /** One line of commentary, the way a person would say it. */
+    String describe() {
+        if (roll == 0) return "#" + number + " " + playerId + " ran out of time at " + from;
+        String s = "#" + number + " " + playerId + " rolled " + roll + ": " + from + " -> " + landedOn;
+        if (jump != null) s += " then " + (jump.kind() == JumpKind.SNAKE ? "a snake down to " : "a ladder up to ") + to;
+        if (extraTurn) s += " (rolls again)";
+        if (won) s += "  *** WINS ***";
+        return s;
+    }
+}
+
+/**
+ * The board: a number line from 1 to size, plus the handful of cells that teleport. The jumps are kept in a
+ * map keyed by their start cell because they are sparse -- a dozen interesting cells on a hundred -- so a
+ * landing is one hash lookup instead of a scan. Every board-level invariant is enforced here, at build time,
+ * so the turn loop never has to check a layout it was given.
+ */
+class Board {
+    private final int size;
+    private final Map<Integer, Jump> jumps = new HashMap<>();
+    /** @param size the last cell, and the cell you must rest on to win. */
+    Board(int size) {
+        if (size < 2) throw new IllegalArgumentException("a board needs at least two cells: " + size);
+        this.size = size;
+    }
+    /** The last cell. */
+    int size() { return size; }
+    /**
+     * Add a snake or a ladder, refusing a layout that would make the game wrong: endpoints must be on the
+     * board, one cell may own at most one jump (so a snake head cannot also be a ladder foot), and nothing
+     * may start on the winning cell, which would make the game unwinnable.
+     */
+    void addJump(Jump j) {
+        if (j.start() < 1 || j.start() > size) throw new IllegalArgumentException("jump starts off the board: " + j);
+        if (j.end() < 1 || j.end() > size) throw new IllegalArgumentException("jump ends off the board: " + j);
+        if (j.start() == size) throw new IllegalArgumentException("nothing may start on the winning cell: " + j);
+        Jump other = jumps.get(j.start());
+        if (other != null) throw new IllegalArgumentException("cell " + j.start() + " already has " + other + ", cannot also have " + j);
+        jumps.put(j.start(), j);
+    }
+    /**
+     * The jump that starts on this cell, or null for a plain cell. O(1). Overridable: a board with special
+     * cells (teleport, boost) is a subclass, and the turn loop never changes.
+     */
+    Jump jumpAt(int cell) { return jumps.get(cell); }
+    /** How many snakes and ladders there are, for a display. */
+    int jumpCount() { return jumps.size(); }
+    /** A read-only view of the layout, for a display or a save file. */
+    Map<Integer, Jump> layout() { return Map.copyOf(jumps); }
+}
+
+/** Raised when somebody rolls out of turn. Its own type so a caller can tell it apart from a real failure. */
+class OutOfTurnException extends IllegalStateException {
+    OutOfTurnException(String message) { super(message); }
+}
+
+// "the phones both pressed roll" -> whoever hears about a turn must not be inside the lock -> Observer
+/** Anybody who wants to know that a turn happened: a screen, a commentator, an analytics sink. One method. */
+interface GameObserver {
+    /** Called AFTER the game's lock is released, so a slow or broken listener cannot stall the table. */
+    void onTurn(String gameId, Turn t);
+}
+
+/** The commentary line under the board. An observer that only prints: it holds no game state at all. */
+final class Commentary implements GameObserver {
+    @Override public void onTurn(String gameId, Turn t) { System.out.println("  " + t.describe()); }
+}
+
+/** A quieter screen: it shows only the turns that changed something interesting -- a jump, or the win. */
+final class Highlights implements GameObserver {
+    @Override public void onTurn(String gameId, Turn t) {
+        if (t.jump() != null || t.won()) System.out.println("  " + t.describe());
+    }
+}
+
+/**
+ * The game: the single owner of everything that moves -- every token's position, whose turn it is, the log,
+ * the status -- behind one lock. Every rule it obeys was handed to it by the builder, so this class never
+ * changes when a rule does. The critical method is roll(): all the checks happen before a die is touched,
+ * the whole move is computed into local variables, and only then is anything written.
+ */
+class Game {
+    private final String id;
+    private final Board board;
+    private final Dice dice;
+    private final MoveStrategy moveRule;
+    private final ExtraTurnRule extraRule;
+    private final Clock clock;
+    private final List<Player> roster;
+    private final Map<String, Integer> positions = new LinkedHashMap<>();
+    private final ArrayDeque<String> turns = new ArrayDeque<>();      // FIFO: the head is whose turn it is
+    private final List<Turn> log = new ArrayList<>();
+    private final EnumMap<JumpKind, Integer> jumpsTaken = new EnumMap<>(JumpKind.class);
+    private final List<GameObserver> observers = new CopyOnWriteArrayList<>();
+    private final ReentrantLock lock = new ReentrantLock();
+    private GameStatus status = GameStatus.WAITING;
+    private String winnerId;
+    private int turnNo = 0;
+    private int extrasInARow = 0;
+
+    /** Package-private on purpose: the only way to get a Game is GameBuilder.build(), which validates. */
+    Game(String id, Board board, Dice dice, MoveStrategy moveRule, ExtraTurnRule extraRule, Clock clock, List<Player> roster) {
+        this.id = id; this.board = board; this.dice = dice; this.moveRule = moveRule;
+        this.extraRule = extraRule; this.clock = clock; this.roster = List.copyOf(roster);
+        for (Player p : this.roster) { positions.put(p.id(), 0); turns.addLast(p.id()); }   // 0 = off board
+        for (JumpKind k : JumpKind.values()) jumpsTaken.put(k, 0);
+    }
+
+    /** The game's id. One lock per game, so this is also the shard key when there are a million of them. */
+    String id() { return id; }
+    /** The board, for a display or for a bot that wants to see what is ahead of it. */
+    Board board() { return board; }
+    /** Register a listener. It is called after the unlock, and a listener that throws is logged and ignored. */
+    void addObserver(GameObserver o) { observers.add(o); }
+
+    /** Open the table. Refused unless there are at least two players and the game has not started already. */
+    void start() {
+        lock.lock();
+        try {
+            if (status != GameStatus.WAITING) throw new IllegalStateException("the game is already " + status);
+            if (roster.size() < 2) throw new IllegalStateException("a game needs at least two players");
+            status = GameStatus.IN_PROGRESS;
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * One turn, and the only method that writes anything. The order is the design:
+     *   1 the game must be in progress and it must be this player's turn -- checked BEFORE a die is touched,
+     *     so a phone that presses roll out of turn costs the game nothing, not even a random number;
+     *   2 roll, ask the move rule for the landing cell, apply AT MOST ONE jump, decide the win and the extra turn;
+     *   3 only now write: the position, the counters, the log, the status, and the rotation LAST.
+     * Anything that throws in step 2 leaves the game exactly as it was and the same player still to move.
+     *
+     * @throws OutOfTurnException if it is not this player's turn
+     * @throws IllegalStateException if the game has not started or is already finished
+     */
+    Turn roll(String playerId) {
+        Turn t;
+        lock.lock();
+        try {
+            if (status != GameStatus.IN_PROGRESS) throw new IllegalStateException("the game is " + status);
+            String due = turns.peek();
+            if (!playerId.equals(due)) throw new OutOfTurnException(playerId + " rolled, but it is " + due + "'s turn");
+
+            int roll = dice.roll();                                   // every check passed: now the die is spent
+            int from = positions.get(playerId);
+            int landedOn = moveRule.landingCell(from, roll, board.size());
+            if (landedOn < 0 || landedOn > board.size())
+                throw new IllegalStateException("the move rule returned an off-board cell: " + landedOn);
+            Jump jump = board.jumpAt(landedOn);                       // at most ONE jump per landing: no chaining
+            int to = jump == null ? landedOn : jump.end();
+            if (to < 0 || to > board.size())
+                throw new IllegalStateException("the jump left the board: " + to);
+            boolean won = to == board.size();                         // the win is checked on the RESTING cell
+            boolean again = !won && extraRule.rollAgain(roll, extrasInARow);
+
+            positions.put(playerId, to);                              // the first write of the whole method
+            if (jump != null) jumpsTaken.merge(jump.kind(), 1, Integer::sum);
+            t = new Turn(++turnNo, playerId, roll, from, landedOn, to, jump, again, won, clock.nowMs());
+            log.add(t);
+            if (won) { status = GameStatus.FINISHED; winnerId = playerId; }
+            else if (again) extrasInARow++;
+            else { extrasInARow = 0; turns.addLast(turns.poll()); }   // rotate last, so a reader is never half-updated
+        } finally { lock.unlock(); }
+        publish(t);                                                   // the screens hear outside the lock
+        return t;
+    }
+
+    /**
+     * Give up the turn without moving: the clock ran out. Same lock, same log, the roll recorded as 0.
+     * It is the only other way the queue rotates, which is why it lives here and not in a timer class.
+     */
+    Turn forfeitTurn(String playerId) {
+        Turn t;
+        lock.lock();
+        try {
+            if (status != GameStatus.IN_PROGRESS) throw new IllegalStateException("the game is " + status);
+            String due = turns.peek();
+            if (!playerId.equals(due)) throw new OutOfTurnException(playerId + " cannot forfeit " + due + "'s turn");
+            int at = positions.get(playerId);
+            t = new Turn(++turnNo, playerId, 0, at, at, at, null, false, false, clock.nowMs());
+            log.add(t);
+            extrasInARow = 0;
+            turns.addLast(turns.poll());
+        } finally { lock.unlock(); }
+        publish(t);
+        return t;
+    }
+
+    /** Play the whole game by itself, for a demo or a simulation. Stops at the win or at maxTurns. */
+    Player playOut(int maxTurns) {
+        for (int i = 0; i < maxTurns; i++) {
+            String due = whoseTurn();
+            if (due == null) break;
+            roll(due);
+        }
+        return winner();
+    }
+
+    /** Where this token is: 0 means it has not entered the board yet. O(1). */
+    int positionOf(String playerId) {
+        lock.lock();
+        try {
+            Integer p = positions.get(playerId);
+            if (p == null) throw new NoSuchElementException("no such player: " + playerId);
+            return p;
+        } finally { lock.unlock(); }
+    }
+    /** Whose turn it is, or null once somebody has won. O(1): the head of the queue. */
+    String whoseTurn() { lock.lock(); try { return status == GameStatus.FINISHED ? null : turns.peek(); } finally { lock.unlock(); } }
+    /** WAITING, IN_PROGRESS or FINISHED. */
+    GameStatus status() { lock.lock(); try { return status; } finally { lock.unlock(); } }
+    /** The winner, or null while the game is still on. */
+    Player winner() {
+        lock.lock();
+        try {
+            for (Player p : roster) if (p.id().equals(winnerId)) return p;
+            return null;
+        } finally { lock.unlock(); }
+    }
+    /** Every token's cell, in join order, from one instant. */
+    Map<String, Integer> positions() { lock.lock(); try { return new LinkedHashMap<>(positions); } finally { lock.unlock(); } }
+    /** The turn order as it stands now, the next player first. */
+    List<String> turnOrder() { lock.lock(); try { return new ArrayList<>(turns); } finally { lock.unlock(); } }
+    /** Everyone at the table. */
+    List<Player> roster() { return roster; }
+    /** Every turn that has been played, oldest first: the audit log, and the input to a replay. */
+    List<Turn> history() { lock.lock(); try { return List.copyOf(log); } finally { lock.unlock(); } }
+    /** How many turns have been played. */
+    int turnNumber() { lock.lock(); try { return turnNo; } finally { lock.unlock(); } }
+    /** How many snakes were bitten and how many ladders climbed, for the scoreboard. */
+    Map<JumpKind, Integer> jumpsTaken() { lock.lock(); try { return new EnumMap<>(jumpsTaken); } finally { lock.unlock(); } }
+
+    /** Tell every observer, outside the lock, and survive one that throws. */
+    private void publish(Turn t) {
+        for (GameObserver o : observers) {
+            try { o.onTurn(id, t); } catch (RuntimeException ex) { System.err.println("[observer failed] " + ex.getMessage()); }
+        }
+    }
+}
+
+/**
+ * The only way to build a Game. There are seven knobs and four real invariants, so a telescoping constructor
+ * would be unreadable and would check nothing: build() is the single choke point that constructs the board,
+ * replays every jump through addJump (which fails fast on a bad layout) and hands Game a world that is already
+ * valid. Game's constructor is package-private, so an invalid Game cannot be made at all.
+ */
+final class GameBuilder {
+    private String id = "g1";
+    private int boardSize = 100, diceCount = 1, faces = 6;
+    private Random rng = new Random();
+    private Dice dice;                                            // set this to override the fair dice
+    private Board board;                                          // set this to override the plain board
+    private MoveStrategy moveRule = new OvershootStays();
+    private ExtraTurnRule extraRule = new NoExtraTurn();
+    private Clock clock = System::currentTimeMillis;
+    private final List<Jump> jumps = new ArrayList<>();
+    private final List<Player> players = new ArrayList<>();
+
+    /** The game id: the key it is stored under, and the shard key when there are a million games. */
+    GameBuilder id(String v) { id = v; return this; }
+    /** How many cells; the last one is the one you must rest on to win. */
+    GameBuilder boardSize(int v) { boardSize = v; return this; }
+    /** How many fair dice, and how many faces each. Ignored if dice(...) is handed in. */
+    GameBuilder dice(int count, int facesPerDie) { diceCount = count; faces = facesPerDie; return this; }
+    /** Seed the randomness so the same game plays out every run. */
+    GameBuilder seed(long seed) { rng = new Random(seed); return this; }
+    /** Hand in the dice yourself: scripted for a test, weighted for a house rule. */
+    GameBuilder dice(Dice d) { dice = d; return this; }
+    /** Hand in a board yourself: a subclass with special cells, for instance. */
+    GameBuilder board(Board b) { board = b; return this; }
+    /** The overshoot rule: stay put (default) or bounce back. */
+    GameBuilder moveRule(MoveStrategy m) { moveRule = m; return this; }
+    /** The extra-turn rule: none (default), on a six, or a capped version of either. */
+    GameBuilder extraTurn(ExtraTurnRule r) { extraRule = r; return this; }
+    /** Where time comes from. A test hands in a fixed instant. */
+    GameBuilder clock(Clock c) { clock = c; return this; }
+    /** One snake or ladder. Validated in build(), not here, so the error names the whole layout. */
+    GameBuilder jump(int from, int to) { jumps.add(new Jump(from, to)); return this; }
+    /** One player, in turn order. */
+    GameBuilder player(String playerId, String name) { players.add(new Player(playerId, name)); return this; }
+
+    /**
+     * Build a valid game or throw. Checks: at least two players, no duplicate ids, and every jump legal on
+     * this board (on the board, one per cell, none starting on the winning cell).
+     */
+    Game build() {
+        if (players.size() < 2) throw new IllegalArgumentException("a game needs at least two players: " + players.size());
+        Set<String> ids = new HashSet<>();
+        for (Player p : players) if (!ids.add(p.id())) throw new IllegalArgumentException("duplicate player id: " + p.id());
+        Board b = board != null ? board : new Board(boardSize);
+        for (Jump j : jumps) b.addJump(j);                        // fails fast, before a Game exists
+        Dice d = dice != null ? dice : new StandardDice(diceCount, faces, rng);
+        return new Game(id, b, d, moveRule, extraRule, clock, players);
+    }
+}
+
+/**
+ * The thin caller: it finds the game and calls it. It owns no game state and takes no lock of its own, which
+ * is exactly why a million tables can play at the same time -- each game's own lock is the only contention.
+ */
+final class GameServer {
+    private final Map<String, Game> games = new ConcurrentHashMap<>();
+    /** Put a built game on the server. */
+    Game host(Game g) { games.put(g.id(), g); return g; }
+    /** The game, or an error. O(1). */
+    Game game(String gameId) {
+        Game g = games.get(gameId);
+        if (g == null) throw new NoSuchElementException("no such game: " + gameId);
+        return g;
+    }
+    /** One roll from one phone. The server does nothing but route: the game decides whether it is allowed. */
+    Turn roll(String gameId, String playerId) { return game(gameId).roll(playerId); }
+    /** How many tables are live. */
+    int size() { return games.size(); }
+}
+
+/**
+ * Proof it works: the two tricky rules checked by hand, a seeded game played to a win, a board where a ladder
+ * lands on a snake head (resolved once, not chained), and four phones hammering roll at the same instant with
+ * the log coming out exactly consistent.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // the two rules that are always asked about are pure functions: check them without a game at all
+        MoveStrategy stay = new OvershootStays(), bounce = new BounceBack();
+        System.out.println("at 98, roll 5, board 100 -> stays at " + stay.landingCell(98, 5, 100)
+            + " (the roll is wasted); bounce-back goes to " + bounce.landingCell(98, 5, 100));
+        System.out.println("at 98, roll 2, board 100 -> lands exactly on " + stay.landingCell(98, 2, 100) + " and wins");
+
+        // a seeded game: the same run every time, which is what makes a bug reproducible
+        Game g = new GameBuilder().id("table-1").boardSize(100).dice(1, 6).seed(7)
+            .jump(2, 38).jump(7, 14).jump(8, 31).jump(15, 26).jump(21, 42).jump(28, 84).jump(36, 44)
+            .jump(51, 67).jump(71, 91).jump(78, 98).jump(87, 94)                       // ladders
+            .jump(16, 6).jump(46, 25).jump(49, 11).jump(62, 19).jump(64, 60).jump(74, 53)
+            .jump(89, 68).jump(92, 88).jump(95, 75).jump(99, 80)                        // snakes
+            .player("alice", "Alice").player("bob", "Bob").player("carol", "Carol")
+            .build();
+        g.addObserver(new Highlights());
+        g.start();
+        System.out.println("turn order: " + g.turnOrder() + ", board of " + g.board().size()
+            + " cells with " + g.board().jumpCount() + " jumps");
+        Player w = g.playOut(2000);
+        System.out.println("winner: " + (w == null ? "nobody yet" : w.name()) + " in " + g.turnNumber()
+            + " turns; positions " + g.positions());
+        System.out.println("snakes and ladders taken: " + g.jumpsTaken());
+        try { g.roll("alice"); } catch (IllegalStateException e) { System.out.println("after the win: " + e.getMessage()); }
+
+        // one jump per landing: a ladder whose top is a snake head does NOT chain
+        Game chain = new GameBuilder().id("chain").boardSize(50).dice(new ScriptedDice(4))
+            .jump(4, 20).jump(20, 3).player("p1", "P1").player("p2", "P2").build();
+        chain.start();
+        Turn t = chain.roll("p1");
+        System.out.println("ladder 4->20 whose top is snake 20->3: token rests on " + t.to() + " (one jump, not two)");
+
+        // a six rolls again, but three in a row and the turn passes: a rule wrapped in a rule
+        Game sixes = new GameBuilder().id("sixes").boardSize(60).dice(new ScriptedDice(6, 6, 6, 2))
+            .extraTurn(new CappedExtraTurn(new ExtraTurnOnMax(6), 3))
+            .player("p1", "P1").player("p2", "P2").build();
+        sixes.addObserver(new Commentary());
+        sixes.start();
+        sixes.roll("p1"); sixes.roll("p1"); sixes.roll("p1");
+        System.out.println("three sixes: p1 is on " + sixes.positionOf("p1")
+            + " and the turn has passed to " + sixes.whoseTurn());
+
+        // four phones press roll at the same instant, over and over: only the player on turn may move
+        Game race = new GameBuilder().id("race").boardSize(400).dice(new ScriptedDice(true, 3, 5, 2, 6, 1, 4))
+            .jump(12, 40).jump(60, 22).jump(120, 180).jump(200, 90)
+            .player("p0", "P0").player("p1", "P1").player("p2", "P2").player("p3", "P3").build();
+        race.start();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<int[]>> fs = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            final int seed = i;
+            fs.add(pool.submit(() -> {
+                go.await();
+                int ok = 0, refused = 0;
+                Random r = new Random(seed);
+                for (int k = 0; k < 50; k++) {
+                    try { race.roll("p" + r.nextInt(4)); ok++; }
+                    catch (OutOfTurnException e) { refused++; }
+                    catch (IllegalStateException e) { refused++; }
+                }
+                return new int[] { ok, refused };
+            }));
+        }
+        go.countDown();
+        int ok = 0, refused = 0;
+        for (Future<int[]> f : fs) { int[] r = f.get(); ok += r[0]; refused += r[1]; }
+        pool.shutdown();
+        List<Turn> log = race.history();
+        Map<String, Integer> replay = new LinkedHashMap<>();
+        for (Player p : race.roster()) replay.put(p.id(), 0);
+        boolean sane = log.size() == ok;
+        for (int i = 0; i < log.size(); i++) {
+            Turn x = log.get(i);
+            if (x.number() != i + 1) sane = false;                                  // turn numbers with no gaps
+            if (replay.get(x.playerId()) != x.from()) sane = false;                 // each token continues where it was
+            replay.put(x.playerId(), x.to());
+        }
+        System.out.println("400 roll attempts from 8 threads: accepted=" + ok + " refused=" + refused
+            + ", log rows=" + log.size() + ", replay matches live positions: " + replay.equals(race.positions())
+            + ", log consistent: " + sane);
+        if (!sane || !replay.equals(race.positions())) throw new AssertionError("the game lost or doubled a turn");
+    }
+}

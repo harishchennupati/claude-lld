@@ -1,0 +1,498 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Reference code for every follow-up on page 05. Each block is a small class or method that plugs into
+// the cache in Main.java without editing it; ExtDemo at the bottom runs all of them so none can rot.
+
+// ---- ext: TTL by key prefix, read from one configuration string -- where a Factory finally earns its name
+/**
+ * A TTL rule built from text like "user:=300000,price:=2000,=60000". The last entry with an empty
+ * prefix is the default. This is the moment the enum-or-map question stops being academic: the rules now
+ * arrive from a config file, so a static registry keyed by a prefix beats a switch nobody can extend.
+ */
+final class TtlRules implements TtlPolicy<String> {
+    private final LinkedHashMap<String, Long> byPrefix = new LinkedHashMap<>();
+    private final long fallbackMs;
+
+    private TtlRules(LinkedHashMap<String, Long> byPrefix, long fallbackMs) {
+        this.byPrefix.putAll(byPrefix); this.fallbackMs = fallbackMs;
+    }
+
+    /** The factory method. Longest prefix wins, so "user:session:" can be shorter-lived than "user:". */
+    static TtlRules parse(String config) {
+        LinkedHashMap<String, Long> rules = new LinkedHashMap<>();
+        long fallback = 60_000;
+        for (String part : config.split(",")) {
+            String[] kv = part.trim().split("=");
+            if (kv.length != 2) continue;
+            if (kv[0].isEmpty()) fallback = Long.parseLong(kv[1].trim());
+            else rules.put(kv[0].trim(), Long.parseLong(kv[1].trim()));
+        }
+        return new TtlRules(rules, fallback);
+    }
+
+    /** The longest matching prefix, or the default. No branching in the cache itself. */
+    public long ttlMsFor(String key) {
+        String best = null;
+        for (String prefix : byPrefix.keySet())
+            if (key.startsWith(prefix) && (best == null || prefix.length() > best.length())) best = prefix;
+        return best == null ? fallbackMs : byPrefix.get(best);
+    }
+}
+
+// ---- ext: refresh-ahead -- serve the value that is still live while exactly one thread reloads behind it
+/**
+ * Gives an entry a soft deadline before its hard one. A read past the soft deadline returns the value
+ * immediately and kicks off one background reload; a read past the hard deadline blocks on a normal load.
+ * Nobody ever waits for a hot key again, at the price of one extra load per key per window. Built on the
+ * public API only: the claim map here is a second single-flight, this time for the reload.
+ */
+final class RefreshAhead<K, V> {
+    private final TtlCache<K, V> cache;
+    private final long refreshAfterMs;
+    private final Clock clock;
+    private final ConcurrentHashMap<K, Long> softDeadline = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<K, Boolean> refreshing = new ConcurrentHashMap<>();
+    private final ExecutorService pool = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "refresh-ahead"); t.setDaemon(true); return t;
+    });
+
+    RefreshAhead(TtlCache<K, V> cache, long refreshAfterMs, Clock clock) {
+        this.cache = cache; this.refreshAfterMs = refreshAfterMs; this.clock = clock;
+    }
+
+    /** A read that never blocks once the key is warm. */
+    V get(K key, Loader<K, V> loader) {
+        V live = cache.get(key);
+        if (live == null) {                                   // cold or past the hard deadline: a normal load
+            V loaded = cache.getOrLoad(key, loader);
+            softDeadline.put(key, clock.nowMs() + refreshAfterMs);
+            return loaded;
+        }
+        Long soft = softDeadline.get(key);
+        if (soft != null && clock.nowMs() >= soft && refreshing.putIfAbsent(key, Boolean.TRUE) == null) {
+            pool.execute(() -> {                              // one reload, in the background, no caller waits
+                try {
+                    cache.put(key, loader.load(key));
+                    softDeadline.put(key, clock.nowMs() + refreshAfterMs);
+                } catch (RuntimeException ignored) {
+                    // keep serving the value we have; the hard deadline is still the safety net
+                } finally {
+                    refreshing.remove(key);
+                }
+            });
+        }
+        return live;
+    }
+
+    /** Wait for any background reload to finish. Test helper; production never needs it. */
+    boolean quiet(long timeoutMs) throws InterruptedException {
+        long end = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (!refreshing.isEmpty() && System.nanoTime() < end) Thread.sleep(2);
+        return refreshing.isEmpty();
+    }
+
+    void close() { pool.shutdownNow(); }
+}
+
+// ---- ext: negative caching -- a short-lived tombstone so a flood of misses does not become a flood of queries
+/**
+ * A key that does not exist is the worst case for a cache: every lookup is a miss, so every lookup reaches
+ * the database. Remember the absence too, in a second cache with a much shorter TTL, so a scraper asking
+ * for a million ids that do not exist costs one query each per short window instead of one query each.
+ */
+final class NegativeCache<K, V> {
+    private final TtlCache<K, V> present;
+    private final TtlCache<K, Boolean> absent;
+
+    NegativeCache(TtlCache<K, V> present, TtlCache<K, Boolean> absent) {
+        this.present = present; this.absent = absent;
+    }
+
+    /** Null means "really not there", and that answer is remembered for the tombstone TTL. */
+    V get(K key, Loader<K, V> loader) {
+        V hit = present.get(key);
+        if (hit != null) return hit;
+        if (Boolean.TRUE.equals(absent.get(key))) return null;      // remembered: it is not there
+        V loaded = loader.load(key);                                 // may legitimately return null
+        if (loaded == null) { absent.put(key, Boolean.TRUE); return null; }
+        present.put(key, loaded);
+        absent.invalidate(key);
+        return loaded;
+    }
+}
+
+// ---- ext: a size bound -- capacity plus LRU, and why the bound is soft (this is what Caffeine does)
+/**
+ * The TTL cache is unbounded on purpose: nothing in it decides which live key to throw away. Adding a
+ * bound means adding that rule, and the rule belongs behind its own seam. The bound is soft: size() is read,
+ * then a victim is evicted, and a burst between those two steps overshoots by a handful of entries. A hard
+ * bound would need one global lock on every write, which is exactly the thing this design refuses.
+ */
+final class BoundedTtlCache<K, V> {
+    private final TtlCache<K, V> cache;
+    private final int capacity;
+    /** Access-ordered, so the first key the iterator yields is the least recently used. Not thread-safe: guarded. */
+    private final LinkedHashMap<K, Boolean> order = new LinkedHashMap<>(16, 0.75f, true);
+
+    BoundedTtlCache(TtlCache<K, V> cache, int capacity) { this.cache = cache; this.capacity = capacity; }
+
+    /** Store, then evict while over the bound. The critical section is two map operations and no I/O. */
+    void put(K key, V value) {
+        cache.put(key, value);
+        touch(key);
+        while (cache.size() > capacity) {
+            K victim = leastRecentlyUsed();
+            if (victim == null) break;
+            cache.invalidate(victim);
+            forget(victim);
+        }
+    }
+
+    /** A read is a touch, so the ordering follows real usage. */
+    V get(K key) {
+        V v = cache.get(key);
+        if (v != null) touch(key); else forget(key);
+        return v;
+    }
+
+    private synchronized void touch(K key) { order.put(key, Boolean.TRUE); }
+    private synchronized void forget(K key) { order.remove(key); }
+    private synchronized K leastRecentlyUsed() {
+        Iterator<K> it = order.keySet().iterator();
+        return it.hasNext() ? it.next() : null;
+    }
+}
+
+// ---- ext: metrics -- hit rate and load latency, from one listener plus a loader wrapper
+/** Counts removals by reason. Plugged in with addListener; the cache does not know what a metric is. */
+final class CacheMetrics<K, V> implements RemovalListener<K, V> {
+    private final EnumMap<RemovalCause, LongAdder> byCause = new EnumMap<>(RemovalCause.class);
+    CacheMetrics() { for (RemovalCause c : RemovalCause.values()) byCause.put(c, new LongAdder()); }
+    /** Never throws; and if it did, the cache would carry on, because it fires inside a try/catch. */
+    public void onRemoval(K key, V value, RemovalCause cause) { byCause.get(cause).increment(); }
+    long count(RemovalCause cause) { return byCause.get(cause).sum(); }
+    /** One line for a dashboard. */
+    public String toString() {
+        StringBuilder sb = new StringBuilder("removals");
+        for (RemovalCause c : RemovalCause.values()) sb.append(' ').append(c).append('=').append(count(c));
+        return sb.toString();
+    }
+}
+
+/** Decorator over a loader: measures it, and is the natural place to put a retry or a circuit breaker. */
+final class TimedLoader<K, V> implements Loader<K, V> {
+    private final Loader<K, V> base;
+    private final LongAdder calls = new LongAdder(), totalMicros = new LongAdder();
+    TimedLoader(Loader<K, V> base) { this.base = base; }
+    /** The wrapped load, timed. The cache still calls it with no lock held, so the timing is honest. */
+    public V load(K key) {
+        long t0 = System.nanoTime();
+        try { return base.load(key); }
+        finally { calls.increment(); totalMicros.add((System.nanoTime() - t0) / 1000); }
+    }
+    long calls() { return calls.sum(); }
+    long averageMicros() { return calls.sum() == 0 ? 0 : totalMicros.sum() / calls.sum(); }
+}
+
+// ---- ext: a loader that never returns -- the timeout belongs on the loader, not inside the cache
+/**
+ * The cache waits on the winner with join(), which has no deadline: a loader that hangs hangs every waiter.
+ * Rather than teach the cache about timeouts, wrap the loader. One decorator, and every cache in the
+ * process gets a bounded load, including the ones written next year.
+ */
+final class BoundedLoader<K, V> implements Loader<K, V> {
+    private final Loader<K, V> base;
+    private final long timeoutMs;
+    private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "loader"); t.setDaemon(true); return t;
+    });
+    BoundedLoader(Loader<K, V> base, long timeoutMs) { this.base = base; this.timeoutMs = timeoutMs; }
+    /** Throws instead of hanging. The cache then writes nothing and releases the claim in its finally block. */
+    public V load(K key) {
+        Future<V> f = pool.submit(() -> base.load(key));
+        try {
+            return f.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            f.cancel(true);
+            throw new IllegalStateException("load timed out after " + timeoutMs + "ms for key " + key);
+        } catch (ExecutionException ee) {
+            Throwable c = ee.getCause();
+            throw (c instanceof RuntimeException re) ? re : new IllegalStateException(c);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while loading " + key);
+        }
+    }
+    void close() { pool.shutdownNow(); }
+}
+
+// ---- ext: a deadline queue -- so a sweep touches only what died, instead of walking the whole map
+/**
+ * The sweep in Main.java is O(n) per pass because it walks every key to find the few that died.
+ * Keep the deadlines in a priority queue instead and a pass pops only the ones that are actually due:
+ * O(k log n) for k dead keys. The token carried alongside the key is the entry object itself, so the
+ * compare-and-remove that protects a refreshed value still works.
+ */
+final class DeadlineQueue<K> {
+    /** key, the instant it dies, and the exact entry object that dies then. */
+    record Due<K>(long atMs, K key, Object token) {}
+    private final PriorityBlockingQueue<Due<K>> queue =
+        new PriorityBlockingQueue<>(64, Comparator.comparingLong((Due<K> d) -> d.atMs()));
+
+    /** Called on every write. One heap insert, O(log n), off the read path entirely. */
+    void schedule(long atMs, K key, Object token) { queue.add(new Due<>(atMs, key, token)); }
+
+    /** Everything due at or before now, oldest first. Stops at the first key that is not due yet. */
+    List<Due<K>> drainDue(long nowMs) {
+        List<Due<K>> out = new ArrayList<>();
+        while (true) {
+            Due<K> head = queue.peek();
+            if (head == null || head.atMs() > nowMs) return out;
+            Due<K> taken = queue.poll();
+            if (taken != null) out.add(taken);
+        }
+    }
+    int size() { return queue.size(); }
+}
+
+// ---- ext: sharding -- N sub-caches, N sweepers, one facade, when one map's bins stop being enough
+/**
+ * The last rung. Each shard is a whole TtlCache with its own map and its own sweeper, and a key belongs to
+ * exactly one shard, so a sweep of one shard never walks another shard's keys and resizing one map never
+ * pauses the others. Shard count is a power of two so the index is a mask, not a modulo.
+ */
+final class ShardedTtlCache<K, V> implements Cache<K, V> {
+    private final List<TtlCache<K, V>> shards = new ArrayList<>();
+    private final int mask;
+
+    ShardedTtlCache(int shardCount, long ttlMs, Clock clock) {
+        if (Integer.bitCount(shardCount) != 1) throw new IllegalArgumentException("shard count must be a power of two");
+        this.mask = shardCount - 1;
+        for (int i = 0; i < shardCount; i++) {
+            TtlCache<K, V> s = new TtlCache<>(ttlMs);
+            s.configure(new FixedTtl<>(ttlMs), clock);
+            shards.add(s);
+        }
+    }
+
+    /** The shard a key belongs to. Spread the hash first, the way ConcurrentHashMap does. */
+    private TtlCache<K, V> shardFor(K key) {
+        int h = key.hashCode();
+        h ^= (h >>> 16);
+        return shards.get(h & mask);
+    }
+
+    public void put(K key, V value) { shardFor(key).put(key, value); }
+    public V get(K key) { return shardFor(key).get(key); }
+    public V getOrLoad(K key, Loader<K, V> loader) { return shardFor(key).getOrLoad(key, loader); }
+    public boolean invalidate(K key) { return shardFor(key).invalidate(key); }
+    /** The sum of the shards. Approximate under writes, like every size() on a concurrent structure. */
+    public int size() { int n = 0; for (TtlCache<K, V> s : shards) n += s.size(); return n; }
+    /** One sweeper thread per shard: the passes are independent and never queue behind each other. */
+    void startSweepers(long everyMs) { for (TtlCache<K, V> s : shards) s.startSweeper(everyMs); }
+    void close() { for (TtlCache<K, V> s : shards) s.close(); }
+}
+
+// ---- ext: the naive cache, so both bugs can be seen side by side with the real one
+/**
+ * What the same design looks like when the two invariants are not defended: one global lock, expiry
+ * removed by key instead of by entry, and no claim on a load. It is here to be measured, not copied.
+ */
+final class NaiveCache<K, V> {
+    private final Map<K, Object[]> map = new HashMap<>();     // {value, deadline}
+    private final Clock clock;
+    NaiveCache(Clock clock) { this.clock = clock; }
+
+    /** Check-then-act with nothing holding the key: every thread that misses runs the loader. */
+    @SuppressWarnings("unchecked")
+    V getOrLoad(K key, Loader<K, V> loader, long ttlMs) {
+        synchronized (this) {
+            Object[] e = map.get(key);
+            if (e != null && clock.nowMs() < (Long) e[1]) return (V) e[0];
+        }
+        V loaded = loader.load(key);                           // outside the lock, and therefore unclaimed
+        synchronized (this) { map.put(key, new Object[]{loaded, clock.nowMs() + ttlMs}); }
+        return loaded;
+    }
+
+    /** remove(key), not remove(key, entry): this is the line that deletes a value somebody just refreshed. */
+    @SuppressWarnings("unchecked")
+    V getAndExpire(K key) {
+        synchronized (this) {
+            Object[] e = map.get(key);
+            if (e == null) return null;
+            if (clock.nowMs() < (Long) e[1]) return (V) e[0];
+            map.remove(key);
+            return null;
+        }
+    }
+    synchronized void put(K key, V value, long ttlMs) { map.put(key, new Object[]{value, clock.nowMs() + ttlMs}); }
+    synchronized int size() { return map.size(); }
+}
+
+// ---- ext: why not computeIfAbsent -- the bin lock is held for the whole loader call
+/**
+ * computeIfAbsent looks like single-flight for free, and for a fast function it is. For a slow loader it is
+ * a trap: the bin's lock is held for the whole call, so every other key that hashes to that bin blocks
+ * behind a database round trip. Worse, a loader that touches the same map is refused outright.
+ * This method proves the second half, which the JDK detects and reports as "Recursive update".
+ */
+final class ComputeIfAbsentTrap {
+    /** Two keys forced into the same bin by a constant hash, so the nested write is detected, not silent. */
+    record SameBin(String id) {
+        public int hashCode() { return 7; }
+    }
+
+    /** Returns what the JDK did when a loader inside computeIfAbsent touched the same map. */
+    static String probe() {
+        ConcurrentHashMap<SameBin, String> map = new ConcurrentHashMap<>();
+        try {
+            map.computeIfAbsent(new SameBin("a"), k -> {
+                map.put(new SameBin("b"), "written from inside the mapping function");
+                return "value";
+            });
+            return "no error: the JDK allowed the nested write (bin layout dependent)";
+        } catch (IllegalStateException ise) {
+            return "IllegalStateException: " + ise.getMessage();
+        }
+    }
+}
+
+// ---- ext: two processes -- Redis, and how an invalidation travels between them
+/**
+ * The moment there are two servers, an in-process cache is two caches, and a write on one leaves the other
+ * one stale. Three moves, in the order you would make them: put the entries in Redis with the TTL as
+ * part of the write; keep the in-process cache as a short-lived layer in front of it; and publish an
+ * invalidation so the other process drops its copy. The claim becomes a Redis lock with its own TTL.
+ */
+final class RemoteCacheSketch {
+    /** The write, with the deadline handed to the store rather than tracked here. */
+    static String writeCommand(String key, String value, long ttlMs) {
+        return "SET " + key + " " + value + " PX " + ttlMs;
+    }
+    /** The distributed claim: one loader per key across the whole fleet, and the claim itself expires. */
+    static String claimCommand(String key, String owner, long leaseMs) {
+        return "SET lock:" + key + " " + owner + " NX PX " + leaseMs;
+    }
+    /** What the other process must hear when a row changes, so its own copy is dropped. */
+    static String invalidateCommand(String key) {
+        return "PUBLISH cache:invalidate " + key;
+    }
+    /** The listener on the other side. Local drop only; the row in Redis is already correct. */
+    static void onInvalidation(Cache<String, String> local, String key) { local.invalidate(key); }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        ManualClock clock = new ManualClock();
+
+        // TTL by prefix, from config
+        TtlRules rules = TtlRules.parse("user:=300000, price:=2000, =60000");
+        System.out.println("TTL rules: user:42=" + rules.ttlMsFor("user:42") + "ms  price:AAPL="
+            + rules.ttlMsFor("price:AAPL") + "ms  other=" + rules.ttlMsFor("misc") + "ms");
+
+        // jitter: the same nominal TTL, spread
+        TtlPolicy<String> jittered = new JitteredTtl<>(new FixedTtl<>(60_000), 20);
+        long lo = Long.MAX_VALUE, hi = 0;
+        for (int i = 0; i < 1000; i++) { long t = jittered.ttlMsFor("k"); lo = Math.min(lo, t); hi = Math.max(hi, t); }
+        System.out.println("jitter:    1000 keys with a 60000ms TTL land between " + lo + "ms and " + hi + "ms");
+
+        // refresh-ahead: after the soft deadline the caller is served instantly and one reload runs behind it
+        TtlCache<String, String> ra = new TtlCache<>(10_000);
+        ra.configure(new FixedTtl<>(10_000), clock);
+        AtomicInteger raLoads = new AtomicInteger();
+        Loader<String, String> counting = k -> "v" + raLoads.incrementAndGet();
+        RefreshAhead<String, String> ahead = new RefreshAhead<>(ra, 4_000, clock);
+        System.out.println("refresh:   first read = " + ahead.get("hot", counting) + " (a real load)");
+        clock.advance(5_000);
+        System.out.println("refresh:   read past the soft deadline = " + ahead.get("hot", counting) + " (served at once)");
+        ahead.quiet(2_000);
+        System.out.println("refresh:   after the background reload = " + ra.get("hot") + ", loads = " + raLoads.get());
+        ahead.close();
+
+        // negative caching
+        TtlCache<String, String> present = new TtlCache<>(60_000); present.configure(new FixedTtl<>(60_000), clock);
+        TtlCache<String, Boolean> absent = new TtlCache<>(5_000);  absent.configure(new FixedTtl<>(5_000), clock);
+        AtomicInteger queries = new AtomicInteger();
+        NegativeCache<String, String> neg = new NegativeCache<>(present, absent);
+        Loader<String, String> maybe = k -> { queries.incrementAndGet(); return k.equals("real") ? "row" : null; };
+        for (int i = 0; i < 5; i++) neg.get("ghost", maybe);
+        System.out.println("negative:  five lookups of a key that does not exist -> " + queries.get() + " query");
+
+        // a size bound on top of the TTL cache
+        TtlCache<String, String> inner = new TtlCache<>(60_000); inner.configure(new FixedTtl<>(60_000), clock);
+        BoundedTtlCache<String, String> bounded = new BoundedTtlCache<>(inner, 2);
+        bounded.put("a", "1"); bounded.put("b", "2");
+        bounded.get("a");                                         // a is now the most recently used
+        bounded.put("c", "3");                                    // over the bound: b is the victim
+        System.out.println("bounded:   a=" + bounded.get("a") + " b=" + bounded.get("b") + " c=" + bounded.get("c")
+            + "  size=" + inner.size());
+
+        // metrics and a timed loader
+        TtlCache<String, String> metered = new TtlCache<>(1_000);
+        metered.configure(new FixedTtl<>(1_000), clock);
+        CacheMetrics<String, String> metrics = new CacheMetrics<>();
+        metered.addListener(metrics);
+        TimedLoader<String, String> timed = new TimedLoader<>(k -> "row-" + k);
+        metered.getOrLoad("m1", timed);
+        metered.put("m1", "overwritten");
+        clock.advance(2_000);
+        metered.sweepOnce();
+        metered.invalidate("nothing-here");
+        System.out.println("metrics:   " + metrics + ", loader calls = " + timed.calls()
+            + ", average " + timed.averageMicros() + "us");
+
+        // a loader that hangs, bounded by a decorator instead of by the cache
+        BoundedLoader<String, String> bl = new BoundedLoader<>(k -> {
+            try { Thread.sleep(5_000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            return "never";
+        }, 150);
+        try { bl.load("stuck"); System.out.println("timeout:   no timeout (unexpected)"); }
+        catch (IllegalStateException e) { System.out.println("timeout:   " + e.getMessage()); }
+        bl.close();
+
+        // the deadline queue: a pass touches only what actually died
+        DeadlineQueue<String> due = new DeadlineQueue<>();
+        for (int i = 0; i < 10_000; i++) due.schedule(1_000_000 + i, "k" + i, new Object());
+        System.out.println("deadlines: queued " + due.size() + ", due by t=1000004 -> " + due.drainDue(1_000_004).size()
+            + " (the other " + due.size() + " were never looked at)");
+
+        // sharding
+        ShardedTtlCache<String, String> sharded = new ShardedTtlCache<>(8, 60_000, clock);
+        for (int i = 0; i < 1_000; i++) sharded.put("k" + i, "v" + i);
+        System.out.println("sharded:   8 shards hold " + sharded.size() + " entries, k500=" + sharded.get("k500"));
+        sharded.close();
+
+        // the naive cache, measured against the real one
+        AtomicInteger naiveLoads = new AtomicInteger(), realLoads = new AtomicInteger();
+        NaiveCache<String, String> naive = new NaiveCache<>(new SystemClock());
+        TtlCache<String, String> real = new TtlCache<>(60_000);
+        real.configure(new FixedTtl<>(60_000), new SystemClock());
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < 40; i++) {
+            fs.add(pool.submit(() -> { go.await(); return naive.getOrLoad("cold", k -> {
+                naiveLoads.incrementAndGet(); try { Thread.sleep(30); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); } return "v"; }, 60_000); }));
+            fs.add(pool.submit(() -> { go.await(); return real.getOrLoad("cold", k -> {
+                realLoads.incrementAndGet(); try { Thread.sleep(30); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); } return "v"; }); }));
+        }
+        go.countDown();
+        for (Future<?> f : fs) f.get(20, TimeUnit.SECONDS);
+        pool.shutdown(); pool.awaitTermination(10, TimeUnit.SECONDS);
+        System.out.println("naive:     40 threads, one cold key -> naive loads = " + naiveLoads.get()
+            + ", single-flight loads = " + realLoads.get());
+
+        // computeIfAbsent, and what the JDK thinks of a loader that touches the same map
+        System.out.println("cIA:       " + ComputeIfAbsentTrap.probe());
+
+        // two processes
+        System.out.println("remote:    " + RemoteCacheSketch.writeCommand("user:42", "row", 60_000));
+        System.out.println("remote:    " + RemoteCacheSketch.claimCommand("user:42", "server-3", 5_000));
+        System.out.println("remote:    " + RemoteCacheSketch.invalidateCommand("user:42"));
+        real.close(); inner.close(); metered.close(); present.close(); absent.close(); ra.close();
+    }
+}

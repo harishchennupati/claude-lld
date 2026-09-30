@@ -1,0 +1,747 @@
+# Spreadsheet LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"spreadsheet/Main.java").read_text()
+ext   = (H/"spreadsheet/Extensions.java").read_text()
+tests = (H/"spreadsheet/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("type", 30, [("somebody types into B3", "a number, text, or =B1+B2"),
+                      ("parse it into a tree", "the tree knows what it reads"),
+                      ("would this make a loop?", "one walk, before any write"),
+                      ("recompute what it affects", "in order, each cell once")]),
+        ("delete", 165, [("a cell leaves the grid", "a column was removed"),
+                         ("the address is gone", "not blanked: gone"),
+                         ("everyone pointing at it", "reads #REF!, not a silent 0"),
+                         ("type there again", "every dependent heals")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 2))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+27, x+260), True)
+pf += _ar("M815 84 V95", dash=True) + _bx(650, 95, 340, 40, "a loop: not one cell is written", "", dash=True)
+pf += _tx(88, 266, "read", "var(--acc)", 13)
+pf += _tx(175, 266, "get(\"B7\") -- the cached value, evaluating nothing.   raw(\"B7\") -- the text the user typed.   addresses() -- every box that has one.",
+          "var(--text)", 12, "start")
+pf += _tx(88, 296, "bump", "var(--acc)", 13)
+pf += _tx(175, 296, "update(\"C1\", v -&gt; v + 1) -- read the number, change it, write it back, inside ONE lock. get() then set() is two steps.",
+          "var(--text)", 12, "start")
+pf += _tx(615, 332, "several people type at once: parse, cycle-check, commit and recompute are ONE step, or two typists lose each other's work",
+          "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 348, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("14:02  B7 = =SUM(B1:B6)", ["B1..B6 are blank except B2 = 40", "B7 = 40, and six read-edges appear",
+                                  "two cells stored: the grid is sparse"], True),
+      ("14:05  B2 = 120", ["the affected set is {B2, B7}", "B1 and B3..B6 are never evaluated",
+                           "recalc order = [B2, B7];  B7 = 120"], False),
+      ("14:06  B7 = =B7+1", ["the forward walk finds B7 reads B7", "circular reference: B7 -> B7",
+                             "same text, same value, same edges"], False),
+      ("14:07  two typists on C1", ["both would read 10 and write 11", "the write lock makes it one step",
+                                    "the run: 2000 with update(), ~1100 without"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Type a literal into a cell by address: a number, some text, or nothing.</li>
+<li>Type a formula: <code>=A1+B2*2</code>, <code>=SUM(A1:A10)</code>, <code>=IF(B1&gt;50,"BIG","SMALL")</code>.</li>
+<li>Every cell that reads a changed cell updates by itself, at once.</li>
+<li>Read a cell's value, and read the text the user typed there.</li>
+<li>Refuse an edit that would make a cell depend on itself, and name the cells in the loop.</li>
+<li>A broken cell shows #DIV/0!, #VALUE!, #NAME?, #REF! or #PARSE! and does not break its neighbours.</li>
+<li>Delete a cell, clear a cell, and add a new function without opening the engine.</li>
+<li>Insert a row, delete a row, and copy a formula down a column: every formula that moves still means the same thing.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Several people typing at once: no edit may be lost, and nobody may read a total that disagrees with the cells under it.</li>
+<li>Reading a cell is O(1): the value is cached, and a read never evaluates anything.</li>
+<li>An edit costs what it affects, not the size of the sheet.</li>
+<li>Every affected cell is recomputed exactly once, and after everything it reads.</li>
+<li>New functions and new policies are new classes, never edits to the engine.</li>
+<li>Nothing half-done: a refused edit leaves the same cells, the same values and the same number of edges.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design a spreadsheet. A user types into a cell by its address &mdash; "A1" &mdash; and what they type is '
+          'either a value or a formula like <code>=SUM(A1:A3)*2</code>. When a cell changes, everything that reads it '
+          'has to change too. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A grid of boxes. Each box is named by an address like B7, '
+ 'and holds either something the user typed &mdash; a number, some text &mdash; or an instruction: a formula that '
+ 'reads other boxes and produces a number. The instruction has to be obeyed <i>again</i> every time one of the boxes '
+ 'it reads changes, which is the whole product: somebody types 25 into one box and a total three screens away moves '
+ 'on its own. Formulas nest and chain, so one edit can move a hundred boxes, and they have to move in the right order '
+ '&mdash; a cell computed before its inputs shows a number that was true a moment ago and is now a lie. A formula can '
+ 'also be wrong: divide by zero, add a word to a number, or, worst of all, read itself. Several people can be typing '
+ 'into the same sheet at the same moment, so the one thing that must always be true is that a reader never sees a '
+ 'total that disagrees with the cells under it.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, with a '
+ '<code>main</code> that types into a few cells and prints the values that changed. The interviewer is watching for, '
+ 'in this order: the questions you ask before typing (what a cell can hold, and what happens to a circular reference, '
+ 'are the first two); which classes exist and which one owns the cells; one edit end to end; what happens when two '
+ 'people type at the same instant; where the rule that will change (which functions exist) lives, so MEDIAN is a new '
+ 'class and not an edit; and what the sheet looks like after an edit that had to be refused. Then the twists: inserting a row, '
+ 'copying a formula down, undo, #CYCLE! instead of a refusal, a million cells, persistence.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Which formulas &mdash; arithmetic and a few functions, or the whole Excel grammar?</td><td><code>+ - * / &amp;</code>, comparisons, and SUM / AVERAGE / MIN / MAX / COUNT / IF</td><td>The size of the parser, and the function registry (moves 2, 3)</td></tr>'
+ '<tr><td>What can a cell hold? Only numbers?</td><td>A number, text, blank, or an error code</td><td>Errors are values, not exceptions &mdash; the decision everything rests on (moves 1, 9)</td></tr>'
+ '<tr><td>Recalculate automatically on every edit, or on a button?</td><td>Automatically, and synchronously</td><td>The dependency graph and the topological order (moves 5, 6)</td></tr>'
+ '<tr><td>A circular reference: refuse the edit, or paint #CYCLE! on the loop?</td><td>Refuse it, like Excel</td><td>The check runs as a dry run, before anything is written (move 6)</td></tr>'
+ '<tr><td>Can two people type into one sheet at the same time?</td><td>Yes</td><td>One lock per sheet, around the <i>whole</i> edit (moves 4, 7)</td></tr>'
+ '<tr><td>Thousands of cells, or millions?</td><td>Sparse: only the boxes somebody touched are stored</td><td>A map, not an array; blank is the absence of an entry (move 5)</td></tr>'
+ '<tr><td>Inserting and deleting rows, and dragging a formula down a column?</td><td>Yes, and <code>$A$1</code> stays put when a formula is copied</td><td>Whether a formula is a tree you can rewrite or a string you cannot (moves 1, 12)</td></tr>'
+ '<tr><td>A workbook with <code>=Sales!A1</code>, persistence, a real collaborative merge?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One afternoon, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> a cell holds a number, text, blank or an error, and an error is a '
+ '<i>value</i> so one broken cell cannot abort the recalculation of forty others; a formula is parsed once into a tree '
+ 'and kept, because it has to be obeyed again; recalculation walks a dependency graph, not the sheet; a circular '
+ 'reference is refused before anything is written; the grid is sparse and in memory, one process. Named as out of '
+ 'scope: persistence, several sheets, real collaborative merging, lazy recalculation &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a USER types into a CELL at an ADDRESS; the text is a VALUE or a FORMULA; a formula reads other cells, so a SHEET must know who reads whom",
+          "var(--text)", 12.5)
+for k, (t, sub, acc) in enumerate([("CellRef", "an address: (row, col)", 0), ("Cell", "raw, tree, cached value", 1),
+                                   ("Value", "number|text|err|blank", 1), ("Expr", "the formula, parsed once", 1),
+                                   ("DependencyGraph", "reads, both directions", 1), ("Sheet", "cells, graph, one lock", 1),
+                                   ("SheetFunction", "no state: an interface", 0)]):
+    x = 10 + k*174
+    m1 += _bx(x, 110, 160, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + 80))
+m1 += _tx(615, 190, "solid = it holds state of its own, so it becomes a class.   dashed = a plain value, or a calculation with no state at all",
+          "var(--muted)", 11)
+m1 += _tx(615, 210, "and one noun did NOT become a class: the recalculated total. It is a cached value on a cell, not a thing to store twice.",
+          "var(--muted)", 11)
+MV[1] = _mv(1230, 225, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("turn text into a tree", "Parser  (owns no state: pure)", "Parser.parseInput(text)"),
+                                       ("turn a tree into a value", "Evaluator  (owns the registry)", "eval(expr, valueSource)"),
+                                       ("know who reads whom", "DependencyGraph  (owns two maps)", "graph.affectedBy(ref)"),
+                                       ("type into a cell", "Sheet  (owns cells, graph, lock)", "sheet.set(\"B3\", \"120\")")]):
+    y = 24 + k*56
+    m2 += _bx(30, y, 320, 44, verb, "the verb") + _ar("M350 %s H420" % (y+22), True)
+    m2 += _bx(420, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M820 %s H890" % (y+22), True)
+    m2 += _bx(890, y, 310, 44, meth, "the method")
+m2 += _tx(615, 267, "the verb whose state is spread over three classes goes to the one that owns all three: the sheet is the orchestrator",
+          "var(--muted)", 11)
+m2 += _tx(615, 287, "and \"recalculate\" is not a fifth verb: it is the second half of set(), which is exactly why an edit can never half-happen",
+          "var(--muted)", 11)
+MV[2] = _mv(1230, 300, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 84, 220, 90, "Sheet", "configure(functions, clock)", acc=True)
+for k, (t, sub, impl) in enumerate([("SheetFunction", "SUM, AVERAGE, MIN, MAX, COUNT, IF", "SumFunction / IfFunction / MedianFunction / IfErrorFunction"),
+                                    ("ValueSource", "where a reference's value comes from", "the sheet passes this::read; a test passes a HashMap lambda"),
+                                    ("ChangeListener", "a repaint, an autosave, a chart", "any lambda, called after the unlock, in a try/catch"),
+                                    ("Clock", "where NOW() gets the time", "System::currentTimeMillis, or () -&gt; 1_700_000_000_000L")]):
+    y = 24 + k*60
+    m3 += _ar("M250 129 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 290, 44, t, sub, dash=True)
+    m3 += _bx(730, y, 480, 44, impl, "what can be handed in") + _ar("M730 %s H690" % (y+22))
+m3 += _tx(615, 288, "dashed green = handed in. The sheet never builds a function, so MEDIAN is a new class and one register() line",
+          "var(--muted)", 11)
+m3 += _tx(615, 308, "and one base class holds what functions share: NumericFunction propagates errors and skips blanks, so SUM and MIN never write that code.",
+          "var(--acc)", 11)
+m3 += _tx(615, 328, "IF and COUNT decline it on purpose &mdash; they must SEE an error or a blank to do their job. That is the Template Method, and its opt-out.",
+          "var(--acc)", 11)
+MV[3] = _mv(1230, 340, m3)
+
+# move 4: the gap, and one owner with one lock
+m4 = _D + _bx(30, 30, 190, 44, "Ravi types", "reads C1 = 10") + _bx(30, 110, 190, 44, "Meera types", "reads C1 = 10")
+m4 += _bx(350, 70, 190, 44, "C1 = 10", "then both write 11", acc=True)
+m4 += _ar("M220 52 H350 V70") + _ar("M220 132 H350 V114") + _tx(285, 40, "get()", "var(--muted)", 10.5) + _tx(285, 160, "get()", "var(--muted)", 10.5)
+m4 += '<rect x="580" y="20" width="290" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(725, 45, "the gap", RED, 12) + _tx(725, 70, "both read 10, both write 11", RED, 11) + _tx(725, 90, "one increment simply vanishes", RED, 11)
+m4 += _tx(725, 115, "a real run: about 1100 of 2000", RED, 11)
+m4 += _tx(725, 145, "fix: read and write as ONE step", "var(--text)", 11)
+m4 += _bx(900, 40, 300, 100, "Sheet: the write lock", "parse, check, commit, recompute", acc=True)
+m4 += _tx(1050, 165, "the lock lives where the shared state lives", "var(--muted)", 10.5)
+m4 += _tx(615, 195, "one lock per SHEET, not per cell: an edit publishes many cells at once, and a reader who saw half of them", "var(--muted)", 11)
+m4 += _tx(615, 215, "would be looking at an arithmetically impossible sheet &mdash; a total that disagrees with the column under it", "var(--muted)", 11)
+m4 += _tx(615, 240, "and it is a READ-write lock, because a repaint reads hundreds of cells and computes nothing: readers never wait for each other",
+          "var(--acc)", 11)
+MV[4] = _mv(1230, 255, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("what is in B7, right now?", "Map&lt;CellRef, Cell&gt;, sparse", "O(1)"),
+                                      ("who has to recompute when B7 moves?", "dependents: Map&lt;ref, Set&lt;ref&gt;&gt;", "O(affected)"),
+                                      ("what does B7 read?", "precedents: Map&lt;ref, Set&lt;ref&gt;&gt;", "O(1)"),
+                                      ("which function is called SUM?", "Map&lt;String, SheetFunction&gt;", "O(1)"),
+                                      ("in what order do they recompute?", "Kahn over the affected set only", "O(D + edges)")]):
+    y = 18 + k*46
+    m5 += _bx(30, y, 400, 38, q, "the question") + _ar("M430 %s H480" % (y+19), True)
+    m5 += _bx(480, y, 490, 38, shape, "the shape", acc=True) + _ar("M970 %s H1020" % (y+19), True) + _bx(1020, y, 180, 38, cost, "")
+m5 += _tx(615, 265, "the two edge maps are written by ONE method, and it deletes the old edges before adding the new ones.", "var(--muted)", 11)
+m5 += _tx(615, 285, "Forget that and you get the classic leak: a cell that keeps recomputing off a cell it no longer reads.", "var(--muted)", 11)
+MV[5] = _mv(1230, 300, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D + _bx(30, 24, 180, 42, "TYPED", "text in the box") + _ar("M210 45 H265", True)
+m6 += _bx(265, 24, 180, 42, "PARSED", "a tree, and its reads", acc=True)
+m6 += _ar("M355 66 V108", True) + _bx(265, 108, 180, 42, "COMMITTED", "edges, then values", acc=True)
+m6 += _ar("M265 45 V180 H216", dash=True) + _bx(30, 160, 180, 42, "REFUSED", "the loop: nothing written", dash=True)
+m6 += _ar("M445 118 H495 V146 H450", True) + _tx(505, 168, "a precedent changed -&gt; recompute, not re-parse", "var(--muted)", 10.5, "start")
+m6 += '<rect x="530" y="16" width="680" height="140" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(870, 38, "the order of one edit, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1  parse the text into a tree -- outside the lock, and nothing has been written",
+                       "2  take the write lock; walk FORWARD from the cell over dependents: one walk",
+                       "3  is any new precedent in that set? then it is a loop: throw. Nothing was touched",
+                       "4  only now commit: rewire the edges, then store the text and the tree",
+                       "5  recompute that same set in topological order, once each; unlock; then tell the listeners"]):
+    m6 += _tx(545, 62 + k*20, l, "var(--text)" if k != 2 else "var(--acc)", 11, "start")
+m6 += _tx(615, 222, "the walk that finds the cycle IS the dirty set, because changing what a cell READS cannot change who reads IT.", "var(--acc)", 11)
+m6 += _tx(615, 244, "So there is nothing to roll back: a refused edit leaves the same cells, the same values and the same number of edges.", "var(--muted)", 11)
+MV[6] = _mv(1230, 258, m6)
+
+# move 7: what is inside the lock, and ten typists at the same instant
+m7 = _D + _card(30, 20, 560, 168, "inside the write lock: about one microsecond",
+                ["one forward walk over dependents: the affected set", "one set lookup per new precedent: the cycle test",
+                 "rewire: delete the old edges, add the new ones", "Kahn over the affected set, then one eval per cell",
+                 "a typical edit affects three cells: 0.9 us measured", "a hundred-cell column: 11.5 us measured"], acc=True)
+m7 += _ar("M590 104 H650", True) + _tx(620, 94, "unlock", "var(--acc)", 10.5)
+m7 += _card(650, 20, 550, 168, "outside it: milliseconds, or human time",
+            ["parsing the text: done BEFORE the lock is taken", "the repaint: a few ms, after the unlock",
+             "the database write: about 5 ms (a follow-up)", "the person typing: 200 ms between keystrokes",
+             "and every READ: they hold the read lock, together"])
+m7 += _tx(615, 216, "ten collaborators press a key at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 231, 106, 40, "typist %d" % (k+1), "waits %s us" % ("0" if k == 0 else "%.1f" % (k*0.9)), acc=(k == 9))
+m7 += _tx(615, 299, "the tenth typist waits eight microseconds for the lock and then a few milliseconds for the screen to repaint:", "var(--muted)", 11)
+m7 += _tx(615, 317, "one at a time is true, and nobody can tell, because nothing slow is allowed inside the lock", "var(--muted)", 11)
+MV[7] = _mv(1230, 330, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="205" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(300, 42, "one lock on the whole sheet: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["a typical edit (three affected cells): 0.9 us, printed by Main",
+                       "a person types about five characters a second",
+                       "ten collaborators = 50 edits a second = 45 us of lock a second",
+                       "that is 0.005% busy; two writers collide about never",
+                       "even 1000 edits a second is 0.9 ms of lock in every second",
+                       "repaints do not wait at all, and one read costs 25 ns",
+                       "the number that would hurt is a 100,000-cell recalculation: 11 ms"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 parse and repaint outside the lock", "already done: the listeners hear after the unlock"),
+                              ("2 publish an immutable snapshot", "one volatile reference; readers take no lock at all"),
+                              ("3 a row per cell, with a version column", "UPDATE ... WHERE version = ?, so two servers cannot lose an edit")]):
+    m8 += _bx(600, 58 + k*56, 600, 46, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 240, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two people type into one cell", "the whole read-modify-write inside one write lock; test 2: exactly 2000"),
+                                ("a formula that reads itself", "the dry-run walk before any write; test 3: the sheet is byte-identical"),
+                                ("a cell computed before its inputs", "Kahn over the affected set; test 4: [A1, A3, C1, B1, C2, B2], once each"),
+                                ("one #DIV/0! kills the whole pass", "an error is a VALUE; test 6: the unrelated cell still recomputed"),
+                                ("a rewired formula keeps its old edge", "delete the old edges first; test 7: D1 drops out of the pass"),
+                                ("a chart that throws breaks the edit", "listeners after the unlock, each in a try/catch; test 8"),
+                                ("=SUM(A1:Z10000) on a keystroke", "a cap, checked before the lock; test 5: nothing was written"),
+                                ("a row is inserted above a total", "every formula below it is rewritten, tree not text; test 9: =SUM(A1:A3) becomes =SUM(A1:A4)")]):
+    y = 16 + k*38
+    m9 += _bx(30, y, 320, 34, bad, "") + _ar("M350 %s H400" % (y+17), True) + _bx(400, y, 800, 34, fix, "", acc=True)
+m9 += _tx(615, 338, "every claim this design makes has a test: FailureTests.java runs nine blocks and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 352, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 190), ("the line in the code", 280), ("what it buys", 810)]
+rows10 = [[("Composite", "var(--text)"), ("move 1", None), ("sealed interface Expr permits Lit, Ref, RangeRef, Bin, Call", None), ("a nested formula is the same code as a flat one", None)],
+          [("Interpreter", "var(--text)"), ("move 2", None), ("Value eval(Expr e, ValueSource src)  -- one case per node kind", None), ("no switch on formula text, ever", None)],
+          [("Strategy", "var(--text)"), ("move 3", None), ("interface SheetFunction { Value apply(List&lt;Value&gt; args); }", None), ("MEDIAN is a class and one register() line", None)],
+          [("Template Method", "var(--text)"), ("move 3", None), ("abstract NumericFunction.reduce(List&lt;Double&gt;), which IF declines", None), ("error handling written once, and opt-out-able", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("publish(changes) after the unlock, inside a try/catch", None), ("the screen hears; the sheet never waits for it", None)],
+          [("State", "var(--text)"), ("move 6", None), ("TYPED &rarr; PARSED &rarr; COMMITTED, or REFUSED with nothing written", None), ("an edit cannot half-happen", None)],
+          [("Command", "var(--muted)"), ("a follow-up", None), ("the raw text IS the undo; EditCommand promotes it to a stack", "var(--muted)"), ("undo is a second set() with the old text", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("FunctionRegistry is already the registry, one line per function", "var(--muted)"), ("it earns the name when functions come from config", "var(--muted)")],
+          [("Visitor", "var(--muted)"), ("not yet", None), ("five cases in one eval method; sealed makes the compiler check them", "var(--muted)"), ("it earns the name when outsiders add node kinds", "var(--muted)")],
+          [("Singleton / Builder", "var(--muted)"), ("never here", None), ("the sheet is handed to its callers; a cell is three fields set together", "var(--muted)"), ("a test builds a fresh Sheet in one line", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 365, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 380, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 430), ("the line that shows it", 540)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Parser makes trees. Evaluator makes values. The graph knows edges. The sheet runs the edit.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("MedianFunction and IfErrorFunction are new files plus one register() line each", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("f.apply(args);  the evaluator never asks \"is this the IF one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: one job each", None), ("move 3", None), ("ValueSource, ChangeListener and Clock are one method each, so a test hands in a lambda", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("sheet.configure(registry, clock);  evaluator.eval(expr, this::read)  -- never the sheet itself", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "MEDIAN, VLOOKUP, IFERROR", "a new class behind SheetFunction plus one register() line", "", "move 3"),
+        ("someone new wants to know", "a chart, an autosave, another screen", "one more ChangeListener; the lock and the graph do not change", "", "move 4"),
+        ("a new step in a life", "paint #CYCLE! instead of refusing", "a policy object over the loop the check already found", "", "move 6"),
+        ("a new invariant across cells", "insert a row: forty formulas move", "the rewrite and the writes inside the SAME write lock: all or nothing", "", "move 4"),
+        ("state that must outlive the process", "persist it; two servers", "cells behind a repository, and the write becomes", "UPDATE cells SET raw = ?, version = version + 1 WHERE a1 = ? AND version = ?", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 320, 44, t, sub) + _ar("M350 %s H410" % (y+22), True) + _bx(410, y, 670, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the parser, the graph, the topological order and the tests do not change; that is the test that the derivation was right",
+           "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>user</b> types into a <b>cell</b> at an <b>address</b>; what they typed is a "
+ "<b>value</b> or a <b>formula</b>; a formula reads other cells, so the <b>sheet</b> has to know <b>who reads whom</b>. "
+ "A cell holds three things that all change &mdash; the text the user typed, the parsed formula, and the last computed "
+ "value &mdash; so it is a class. An address is two numbers that never change once made, so it is a record, and being a "
+ "record it is equal and hashes the same for the same box, which is what lets the whole graph be keyed by address. A "
+ "value is a closed set of four: number, text, error, blank &mdash; and an <i>error is a value</i>, not an exception, "
+ "which is the decision the rest of the design leans on. A formula is a tree with state, so a class. Who-reads-whom is "
+ "two maps that change on every edit, so a class of its own. A function has no state at all, so it is an interface. One "
+ "noun did not become a class: the recalculated total, which is a cached value on a cell and not a thing to store twice.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Turn text into a tree\" touches nothing at all: characters in, nodes out, so it belongs to a pure "
+ "<code>Parser</code> and is a static method. \"Turn a tree into a value\" needs the function registry and a way to "
+ "look up a cell, so it belongs to an <code>Evaluator</code> &mdash; and the way it looks up a cell is a one-method "
+ "<code>ValueSource</code> handed in, not the sheet, which is why the evaluator can be unit-tested with a HashMap. "
+ "\"Know who reads whom\" touches the two edge maps, so it belongs to the thing that owns them: "
+ "<code>graph.affectedBy(ref)</code>. \"Type into a cell\" touches the cells map, the graph and the lock at once; only "
+ "the sheet sees all three, so <code>sheet.set(\"B3\", \"120\")</code> is the orchestrator. And notice what is "
+ "<i>not</i> a fifth verb: recalculate. It is the second half of <code>set</code>, which is exactly why an edit can "
+ "never half-happen &mdash; there is no way to call it on its own.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Four things will change under you: which functions exist (SUM today, MEDIAN in four minutes), where a reference's "
+ "value comes from (the real sheet in production, a HashMap in a unit test), who is told that a cell moved (a repaint "
+ "today, an autosave and a chart later), and where time comes from, the moment somebody writes <code>=NOW()</code>. "
+ "Each becomes a one-method interface the sheet is <i>given</i> in "
+ "<code>configure()</code> and never builds. This is where the patterns come from, not the other way round: a "
+ "swappable rule behind an interface is <b>Strategy</b>; a sheet that announces \"this cell moved\" without knowing "
+ "what a screen is, is <b>Observer</b>. And there is a second, quieter one here. Most functions want the same "
+ "plumbing &mdash; an error argument comes straight back out, blanks are skipped, numeric text is coerced &mdash; so "
+ "that lives once in an abstract <code>NumericFunction</code> and SUM only writes the arithmetic: <b>Template "
+ "Method</b>. IF and COUNT decline it deliberately, because they are the two that must <i>see</i> an error or a blank "
+ "to do their job. A base class with a documented opt-out is a design, not an accident.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two collaborators type into the same cell. Both read ten, both add one, both write eleven: one increment simply "
+ "vanishes, and nobody notices, because eleven is a perfectly plausible number. The code in this page measures it "
+ "&mdash; eight threads adding one to a cell two hundred and fifty times each lands somewhere near 1100 instead of 2000 when the "
+ "read and the write are two calls. So reading a cell and writing it must be one step, in the class that owns the "
+ "cells: the sheet. And the lock is around the <i>whole edit</i>, not one cell, which is the part candidates get "
+ "wrong. One edit publishes many cells; a reader allowed in halfway through would see a total that disagrees with the "
+ "column under it, an arithmetically impossible sheet. Finally, it is a read-<i>write</i> lock rather than a plain "
+ "one, for a reason particular to this problem: a repaint reads hundreds of cells and computes nothing, so readers "
+ "must be able to run together and only the rare writer is exclusive.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"What is in B7?\" is a map from address to cell, and it is sparse &mdash; a real sheet is mostly empty, so a blank "
+ "cell is the absence of an entry rather than an allocated object. A Cell is a handful of fields, call it a hundred "
+ "bytes, so a hundred thousand typed cells is about ten megabytes and the million blank ones around them cost nothing. "
+ "\"Who has to recompute when B7 moves?\" is a map from address to the set of addresses that "
+ "read it. \"What does B7 read?\" is the same map the other way round. Keeping both directions is the decision that "
+ "makes an edit cheap: deriving the dependents on demand would mean scanning every formula in the sheet on every "
+ "keystroke, which is how an edit becomes O(cells) instead of O(affected). The one subtlety, and the "
+ "classic leak: the two edge maps are written by a single "
+ "method, and it deletes the old edges before it adds the new ones. Forget that and a cell that used to read A1 keeps "
+ "being recomputed every time A1 changes, forever, quietly.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "One edit goes TYPED, then PARSED, then either COMMITTED or REFUSED &mdash; and the interesting transition is the "
+ "one candidates skip: parsing succeeding does not mean the edit is accepted, because the cycle check sits between "
+ "them. Writing the states down forces the order. Parse the text into a tree first, outside the lock, because parsing "
+ "is the part that can throw and nothing may be written when it does. Take the write lock. Walk forward from the "
+ "edited cell over the dependents map to get everything that would have to recompute. Now the check: if any cell the "
+ "new formula reads is already <i>in</i> that set, then that cell reads this one and this one is about to read it "
+ "&mdash; a loop &mdash; so throw, having touched nothing. Only then commit: rewire the edges, store the text and the "
+ "tree, recompute that same set in topological order, unlock, and tell the listeners. Two things are worth saying out "
+ "loud. The walk that finds the cycle <i>is</i> the dirty set, because changing what a cell reads cannot change who "
+ "reads it. And because the check is a dry run, there is no rollback anywhere in this code: "
+ "a refused edit leaves the same cells, the same values and the same number of edges, which is a test you can run.", 6),
+("Move 7: yes, the lock makes one sheet's edits happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every edit takes the sheet's lock, is the spreadsheet "
+ "now a queue? It is, for about a microsecond. Inside the lock there is one forward walk over the dependents map, "
+ "one set lookup per cell the new formula reads, a rewire that deletes a few edges and adds a few, Kahn's algorithm "
+ "over the affected set, and one evaluation per affected cell. The code measures it and prints it: an edit that affects "
+ "three cells takes 0.9 microseconds, and a hundred-cell column takes 11.5. Everything slow is outside. Parsing "
+ "happens before the lock is taken, deliberately, because it is the part that throws. The repaint happens after the "
+ "unlock, in a try/catch, so a chart that blows up cannot undo an edit that already happened. And reads do not queue "
+ "at all: they take the read lock and run together. So when ten collaborators press a key at the same instant, the "
+ "tenth waits about eight microseconds for the lock and then a few milliseconds for its own screen to repaint.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "A person types about five characters a second. Ten collaborators in one sheet is fifty edits a second, against a "
+ "lock held for nine tenths of a microsecond: forty-five microseconds of lock in every second, five thousandths of one "
+ "per cent. Even an imaginary thousand edits a second is under a millisecond of lock per second. And the reads &mdash; "
+ "the overwhelming majority of what a grid does, since every scroll repaints hundreds of cells &mdash; hold the read "
+ "lock and never wait for each other at all. The number that would actually hurt is not contention, it is one edit "
+ "that dirties a hundred thousand cells: about eleven milliseconds, and every reader waits. Then the ladder, in the "
+ "order you would climb it: keep parsing and repainting outside the lock, which this code already does; publish an "
+ "immutable map of values behind one volatile reference, so readers take no lock whatsoever and the writer rebuilds "
+ "the changed slice; and beyond one process, give each cell a row with a version column and make the write "
+ "<code>UPDATE ... WHERE version = ?</code>, which is the database doing the same compare-then-write the lock did. "
+ "Say the arithmetic first: climbing the ladder without it is complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Two people typing into one cell (the whole read-modify-write inside one lock; the test lands on exactly 2000). A "
+ "formula that reads itself, directly or round a chain of six (the dry run before any write; the test checks the "
+ "sheet is byte-identical afterwards, down to the edge count). A cell computed before its inputs (Kahn's over the "
+ "affected set; the test asserts the recalculation order and that every cell appears exactly once). One #DIV/0! "
+ "killing a pass that was updating forty unrelated cells (an error is a value; the test shows the unrelated cell "
+ "recomputed in the same pass, and that the error heals when its precedent is fixed). A rewired formula that keeps "
+ "its old edge (the test points a cell away from A1 and checks it drops out of A1's recalculation). A chart that "
+ "throws (listeners after the unlock, in a try/catch). A fat-fingered <code>=SUM(A1:Z10000)</code> (a cap, checked "
+ "before the lock, so nothing was written). And the quiet one: a row inserted above a total, after which "
+ "<code>=SUM(A1:A3)</code> is adding the wrong three boxes unless every formula below the insertion is rewritten "
+ "&mdash; the test inserts a row and asserts that the formula changed and the value did not. Each of these is a few "
+ "lines in FailureTests.java; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every pattern on this page came out of a move, which is why each can be defended in one sentence. Composite is move "
+ "1: a formula nests, so a node holds nodes, and <code>=SUM(A1:A3)*2+IF(B1&gt;0,1,2)</code> runs through exactly the "
+ "same code as <code>=A1</code>. Interpreter is move 2: one case per node kind walking that tree, which is why there "
+ "is no switch on formula text anywhere. Strategy is move 3: which functions exist is the rule that changes. Template "
+ "Method is the same move's base class, and IF and COUNT decline it because they need to see what it swallows. "
+ "Observer is move 4's rule that a screen must never be inside the lock. State is move 6, with REFUSED as a real "
+ "state rather than an accident. The greyed rows are the honest ones. Command is one line away, because the sheet "
+ "already keeps the raw text of every cell, so undo is a second <code>set()</code> with the old text. Factory is not "
+ "earned because the registry already <i>is</i> one, and it takes the name the day function names arrive from "
+ "configuration. Visitor is not earned because the five node kinds sit under a <code>sealed</code> interface, so five "
+ "cases in one method are already exhaustive and the compiler says so; it earns its place when people outside this "
+ "file start adding node kinds. Singleton and Builder earn nothing here at all. A pattern without a move behind it is "
+ "decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "SOLID is not a list to recite; it is the check that the moves did their job. S came from move 2: the parser changes "
+ "when the grammar does, the evaluator when the semantics do, the graph when the edges do, the sheet when the "
+ "transaction does, and nobody does two of those. O is MEDIAN and IFERROR: a new file and one register line, never an "
+ "opened engine. L is that the evaluator calls <code>f.apply(args)</code> and never asks \"is this the IF one?\". I "
+ "is three seam interfaces with one method each, so a fake for a test is a lambda. D is why a test can evaluate a "
+ "formula against a HashMap with no sheet in sight, and pin NOW() to last Tuesday.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (MEDIAN, VLOOKUP, IFERROR) is a new class behind <code>SheetFunction</code> plus one register line. "
+ "Someone new who wants to know (a chart, an autosave, a collaborator's screen) is one more "
+ "<code>ChangeListener</code>; the lock and the graph do not change. A new step in a life (paint #CYCLE! on the loop "
+ "instead of refusing the edit) is a policy object over the loop the check already found &mdash; the detection is "
+ "identical, only the reaction differs. A new invariant across cells is the interesting one here, because inserting a "
+ "row is exactly that: forty formulas have to be rewritten together, so the rewrite and the writes belong inside the "
+ "<i>same</i> write lock, all or nothing, or a reader sees half a grid. State that "
+ "must outlive the process (persist it; two servers) is the cells behind a repository interface, and the write "
+ "becomes <code>UPDATE cells SET raw = ?, version = version + 1 WHERE a1 = ? AND version = ?</code>: the database "
+ "performing the same compare-then-write the lock did in memory. And the workbook twist &mdash; "
+ "<code>=Sales!A1+2</code> &mdash; is the cheapest of the lot, because the graph never mentions a cell, only keys: "
+ "widen the key from (row, col) to (sheet, row, col) and the cycle check, the dirty set and the topological order are "
+ "untouched. For all of them the parser, the graph and the tests stay as they are; that is the test that the "
+ "derivation was right. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, Splitwise) and the class diagram, the lock, the tests, "
+ "the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is "
+ "named before the move that produced it. On this problem moves 5 and 6 are the ones that decide whether you pass: the "
+ "two edge maps, and the order in which one edit parses, checks, commits and recomputes.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the callers, the seams, the value types
+put("main", 10, 20, 240, "Main", [], ["the demo, then the race"])
+put("listener", 10, 100, 240, "ChangeListener", [], ["onChange(CellChange)"], "interface")
+put("change", 10, 180, 240, "CellChange", ["ref: CellRef", "before / after: Value"], [])
+put("clock", 10, 280, 240, "Clock", [], ["nowMs(): long"], "interface")
+put("ref", 10, 360, 240, "CellRef", ["row: int", "col: int"], ["parse(\"B7\"): CellRef", "a1(): String"])
+put("cyc", 10, 500, 240, "CircularReferenceException", ["path: List&lt;CellRef&gt;"], [])
+put("vsrc", 10, 600, 240, "ValueSource", [], ["valueOf(CellRef): Value"], "interface")
+# centre: the aggregate root and what it owns
+put("sheet", 290, 20, 330, "Sheet",
+    ["cells: Map&lt;CellRef, Cell&gt;", "removed: Set&lt;CellRef&gt;", "graph: DependencyGraph",
+     "lock: ReentrantReadWriteLock", "evaluator: Evaluator", "clock: Clock",
+     "listeners: List&lt;ChangeListener&gt;"],
+    ["configure(functions, clock)", "set(a1, text): List&lt;String&gt;", "update(a1, f): List&lt;String&gt;",
+     "clear(a1) / deleteCell(a1)", "get(a1): Value / raw(a1)", "addresses(): List&lt;CellRef&gt;", "addListener(l)"])
+put("cell", 290, 300, 330, "Cell", ["ref: CellRef", "raw: String  (what was typed)", "expr: Expr  (parsed once)",
+                                    "value: Value  (cached)"], ["bind(raw, expr)", "setValue(v)"])
+put("graph", 290, 470, 330, "DependencyGraph",
+    ["precedents: Map&lt;ref, Set&lt;ref&gt;&gt;", "dependents: Map&lt;ref, Set&lt;ref&gt;&gt;"],
+    ["setPrecedents(cell, refs)", "affectedBy(ref): Set&lt;ref&gt;", "topoOrder(dirty): List&lt;ref&gt;",
+     "path(from, to) / edgeCount()"])
+# third column: the tree and the values
+put("expr", 660, 20, 245, "Expr", [], ["collectRefs(Set&lt;CellRef&gt;)"], "interface")
+put("nodes", 660, 100, 245, "Lit &middot; Ref &middot; RangeRef", ["Bin &middot; Call", "five records, sealed", "Ref carries its $ anchors"], ["collectRefs(out)"])
+put("value", 660, 225, 245, "Value", [], ["display(): String"], "interface")
+put("vals", 660, 300, 245, "Num &middot; Text &middot; Err &middot; Blank", ["a closed set of four", "an error is a VALUE"], ["display()"])
+put("parser", 660, 420, 245, "Parser", ["src: String,  i: int"], ["parseInput(raw): Expr", "recursive descent"])
+put("eval", 660, 535, 245, "Evaluator", ["functions: FunctionRegistry"], ["eval(Expr, ValueSource)", "  : Value"])
+# fourth column: the rules that are handed in
+put("fn", 945, 20, 275, "SheetFunction", [], ["name(): String", "apply(List&lt;Value&gt;): Value"], "interface")
+put("numfn", 945, 120, 275, "NumericFunction", [], ["apply(args): propagates Err", "reduce(List&lt;Double&gt;): Value"], abstract=True)
+put("concrete", 945, 235, 275, "Sum &middot; Average &middot; Min &middot; Max", ["they extend the base class"], ["reduce(nums)"])
+put("decline", 945, 350, 275, "Count &middot; If &middot; Now", ["they decline it: they must", "SEE errors and blanks"], ["apply(args)"])
+put("reg", 945, 480, 275, "FunctionRegistry", ["byName: Map&lt;String, fn&gt;"], ["register(f) / lookup(name)", "standard(clock)"])
+
+EDGES = [
+ # the sheet owns every touched cell and owns the graph
+ ln(B["sheet"]["b"], B["cell"]["t"], "compose", "every touched cell"),
+ ln((290, 200), (290, 539), "compose", "", [(266, 200), (266, 539)]),
+ # a cell points at its parsed tree and at its cached value
+ ln(B["cell"]["r"], B["nodes"]["l"], "assoc", ""),
+ ln((620, 400), B["vals"]["l"], "assoc", ""),
+ # the two sealed families
+ ln(B["nodes"]["t"], B["expr"]["b"], "inherit"),
+ ln(B["vals"]["t"], B["value"]["b"], "inherit"),
+ # text becomes a tree
+ ln(B["parser"]["l"], B["expr"]["l"], "assoc", "", [(646, 465), (646, 47)]),
+ # the function family: a base class most of them extend, and the three that decline it
+ ln(B["numfn"]["t"], B["fn"]["b"], "inherit"),
+ ln(B["concrete"]["t"], B["numfn"]["b"], "inherit"),
+ ln((945, 395), (945, 75), "inherit", "", [(935, 395), (935, 75)]),
+ ln((945, 525), (945, 40), "assoc", "", [(920, 525), (920, 40)]),
+ # the evaluator: it holds the registry, and it is handed a ValueSource instead of the sheet
+ ln(B["eval"]["r"], B["reg"]["l"], "assoc", ""),
+ ln((620, 145), B["eval"]["l"], "assoc", "", [(634, 145), (634, 580)]),
+ ln(B["eval"]["b"], B["vsrc"]["r"], "inject", "", [(782, 692), (262, 692), (262, 627)]),
+ _tx(470, 680, "the evaluator is handed a ValueSource, never the sheet", "var(--acc)", 10.5),
+ # the seams the sheet is handed, the one it announces to, and what it throws
+ ln((290, 60), B["listener"]["r"], "notify", ""),
+ ln((290, 100), B["change"]["r"], "assoc", ""),
+ ln((290, 140), B["clock"]["r"], "inject", ""),
+ ln((290, 180), B["ref"]["r"], "assoc", ""),
+ ln((290, 240), B["cyc"]["r"], "assoc", "", [(280, 240), (280, 525)]),
+ ln(B["main"]["r"], (290, 40), "assoc", ""),
+]
+UMLSVG = uml_svg(1230, 760, EDGES, legend_y=732)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; <i>italic</i> = abstract). '
+ 'Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = implements or '
+ 'extends. Filled diamond = owns: the sheet owns every cell and owns the graph. Plain arrow = references: a cell '
+ 'points at its tree and its cached value. Dashed green = handed in, which here means the evaluator is given a '
+ '<code>ValueSource</code> and never the sheet itself. Dotted blue = notifies. <b>Where state lives:</b> the sheet '
+ 'has the cells map, the graph, the one read-write lock, the handed-in registry and clock, and the listeners; a cell '
+ 'has its raw text, its parsed tree and its cached value; the graph has the two edge maps and nothing else, and it '
+ 'stores <i>addresses</i> rather than cells, which is why an edge to a cell nobody has typed into yet is perfectly '
+ 'legal. The tree hanging off each cell is not just read but rewritten: inserting a row walks it and moves every '
+ 'reference, which is the pay-off for parsing once instead of keeping the formula as a string. Notice what is <i>not</i> here: no Formula class separate from the tree, because the tree is the formula; no '
+ 'Grid or Row class, because the grid is sparse and a blank cell is the absence of a map entry; and no Recalculator, '
+ 'because recalculation is the second half of one method on the sheet.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does; read only those first for the shape, then the bodies for the mechanics. Each copy '
+ 'button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s reference code, with '
+ 'an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (nine blocks of claims proven; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (what a cell can hold, and what a circular reference '
+ 'does, first); then type in the order of Main.java: CellRef, the four Value records, the five Expr records, the '
+ 'Parser, the SheetFunction interface with NumericFunction, the four functions that extend it and the three that decline it, the FunctionRegistry, the '
+ 'ValueSource and the Evaluator, Cell, DependencyGraph, then Sheet with its read-write lock and the order inside '
+ '<code>set</code>, then a main with eight threads on one cell.</div></div>')
+
+FU = [
+("Add a MEDIAN function. Then add IFERROR, which has to swallow the error every other function propagates.", "functional", 10,
+ "MEDIAN is a class and one <code>register()</code> line. It extends NumericFunction, so the error propagation, the "
+ "blank-skipping and the text coercion are already written and it only supplies <code>reduce</code>: sort, take the "
+ "middle. IFERROR is the interesting half, because it is the one function that must <i>see</i> an error rather than "
+ "pass it on &mdash; so it implements SheetFunction directly and declines the base class, exactly as IF and COUNT do. "
+ "That is the whole point of putting propagation in a base class with a documented opt-out instead of in the "
+ "evaluator: a function that needs the other behaviour simply does not extend it. No engine file is opened for either. "
+ "VLOOKUP is in the same block, and it shows what the flattening of ranges costs: a function is handed a flat list of "
+ "values and never sees the rectangle, so the table's width has to be handed to it separately.",
+ X("a new function", "the cycle policy")),
+("Two collaborators type at the same instant. Prove you cannot lose an edit, with a test.", "non-functional", 10,
+ "The race lives between reading a cell and writing it back. <code>update()</code> does the whole read-modify-write "
+ "inside one write lock, so no other writer can run in the gap; <code>get()</code> then <code>set()</code> is two "
+ "lock acquisitions with a gap between them, and the test runs both to show the difference is the boundary of the "
+ "critical section and nothing else. Eight threads wait on one latch and each add one to the same cell two hundred "
+ "and fifty times: through <code>update()</code> the cell lands on exactly 2000, through get-then-set it lands "
+ "somewhere near 1100. The second half of the test is the other shape of the same race: fifty threads write fifty "
+ "different cells that all feed one SUM, and afterwards the total must equal the cells &mdash; a sheet where it does "
+ "not is arithmetically impossible, which is a stronger claim than \"no exception was thrown\".",
+ T("        // 1. fifty threads write fifty DIFFERENT cells", "        // 3. a circular reference is refused")),
+("One lock on the whole sheet. Have you just serialised the spreadsheet?", "non-functional", 8,
+ "No, and the answer is arithmetic. The locked part is one forward walk over the dependents map, one set lookup per "
+ "cell the new formula reads, a rewire of a few edges, Kahn's algorithm over the affected set and one evaluation per "
+ "affected cell: 0.9 microseconds for an edit that touches three cells and 11.5 for a hundred-cell column, both "
+ "printed by step 7 of Main.java. A person types five characters a second, so ten collaborators are fifty edits a "
+ "second, which is forty-five microseconds of lock in every second: five thousandths of one per cent. And it is a "
+ "read-write lock, so the repaints &mdash; most of what a grid actually does &mdash; never wait for each other at "
+ "all. If you ever needed more, the ladder is move 8, and the first rung is the code below: an immutable snapshot "
+ "behind one volatile reference, so a reader takes no lock whatsoever.",
+ X("lock-free readers", "volatile functions")),
+("Somebody types =A1 into A1, or builds a loop six cells long. What is the state of the sheet?", "functional", 10,
+ "Exactly what it was, and there is no rollback code anywhere. The order is the answer: the text is parsed outside "
+ "the lock, then the write lock is taken and the sheet walks forward from the edited cell over the dependents map to "
+ "collect everything that would have to recompute. If any cell the new formula reads is already in that set, then "
+ "that cell reads this one and this one is about to read it, so it throws &mdash; and at that moment not one edge has "
+ "been rewired and not one value has been written. The test asserts the strong version of that claim: after a refused "
+ "edit the cell's text is the same, every value is the same, and the cell count and the edge count are the same. The "
+ "walk is free, incidentally, because it is the same set the recalculation needs.",
+ sect(src, "private record Prepared", "/** The value at an address")),
+("I edit one cell of a sheet with a million cells. Show me you do not recompute the sheet.", "non-functional", 8,
+ "The recalculation walks the dependency graph, not the grid. <code>set</code> returns the addresses it recomputed, "
+ "in order, which is how the claim is checked rather than asserted: edit A1 in the demo sheet and the order comes back "
+ "<code>[A1, A3, C1, B1, C2, B2]</code> &mdash; A2 is not in it, because A2 does not read A1, nor anything that reads A1. The set is a "
+ "forward breadth-first walk over the dependents map, so it is proportional to what the edit affects and completely "
+ "independent of how big the sheet is. Kahn's algorithm restricted to that set then puts them in an order where every "
+ "cell comes after everything it reads, and each cell is evaluated exactly once, even in a diamond where two paths "
+ "reach the same cell.",
+ sect(src, "final class DependencyGraph", "final class CircularReferenceException")),
+("The screen asks \"what is in B7?\" a thousand times a second while somebody scrolls. Make it O(1).", "non-functional", 5,
+ "It already is. Every cell caches the value it was last computed to, and only a recalculation pass ever rewrites "
+ "that, so a read is one hash lookup that evaluates nothing: about 25 nanoseconds, printed by step 7 of Main.java. "
+ "That is the eager choice paying off &mdash; the sheet does the work once, while it already holds the write lock, "
+ "instead of once per read. The read lock costs almost nothing and lets every other reader in at the same time; it "
+ "exists only so that a reader cannot see a sheet halfway through a pass. If even that mattered, the snapshot "
+ "extension drops it: the sheet publishes an immutable map behind one volatile reference after each edit, and readers "
+ "follow the reference with no lock whatsoever, at most one edit behind.",
+ sect(src, "// ---------------- reads", "// ---------------- the one write path")),
+("=SUM(A1:A1000) is one formula and a thousand edges in your graph. Now put a hundred of those on the sheet.",
+ "non-functional", 8,
+ "A range is expanded into its cells today, so that formula really is a thousand precedent edges &mdash; the test "
+ "prints the number &mdash; and a hundred such formulas are a hundred thousand edges to build on every edit and walk "
+ "on every recalculation. The fix is to stop storing a range cell by cell. File each range once per 64-by-64 block of "
+ "the grid it overlaps: sixteen entries instead of a thousand for a column of that length, and \"who reads A500?\" "
+ "becomes one map lookup on that cell's block plus a containment test on the few rectangles filed there. An "
+ "interval tree or an R-tree is the same idea with a sharper lookup, and they are the names to say; blocks are what "
+ "real grid engines use, because a block id is a shift and a map get. Until then, the cap &mdash; twenty thousand "
+ "cells, checked before the lock is taken &mdash; is what stops a fat-fingered <code>=SUM(A1:Z10000)</code> from "
+ "stalling every typist on the sheet.",
+ X("a range is one edge", "Runs every extension")),
+("I copy =A1+B1 down the column. What does the copy say, and what is $A$1 for?",
+ "functional", 5,
+ "A copy is the same tree with every reference moved by the distance the formula moved: <code>=A1+B1</code> pasted "
+ "one row down is <code>=A2+B2</code>, and filling a column is that copy done n times. The dollars are the opt-out. "
+ "An anchored row or column does not move, which is how a whole column of formulas can point at one tax-rate cell. "
+ "They are two booleans on the reference node; the parser reads them and the printer puts them back, so a round trip "
+ "through the tree keeps them. Note what they do <i>not</i> do: an anchored reference still moves when a row is "
+ "inserted above it, because that box really did move. A copy and a structural edit are different questions, and they "
+ "are different methods in the code.",
+ X("copy a formula", "insert and delete a row")),
+("Insert a row above row 2. What happens to =SUM(A1:A3), and to a formula that pointed into the row I deleted?",
+ "twist", 10,
+ "This is the operation that is not a cell edit: the cells move and the formulas have to be rewritten in the same "
+ "breath, because a total that still says <code>=SUM(A1:A3)</code> after a row was inserted is adding the wrong three "
+ "boxes &mdash; quietly, which is the worst kind of wrong. The rewrite walks the tree and moves every reference in "
+ "it, then prints the tree back out as the new formula text; that is the pay-off for parsing once and keeping the "
+ "tree instead of the string. Two rules the interviewer is listening for. A range that merely <i>spanned</i> the "
+ "deleted row shrinks rather than breaking: <code>=SUM(A1:A10)</code> with row 5 gone is <code>=SUM(A1:A9)</code>. "
+ "Only a reference that pointed <i>into</i> the deleted row becomes <code>#REF!</code>, in the formula bar as well as "
+ "in the box &mdash; which is why the parser can read <code>#REF!</code> back: an error is a value, so it is also "
+ "something you can have in a formula. And because forty formulas move together, in a product this is one method on "
+ "the sheet holding the write lock for the whole rewrite, not the loop over the public API shown here.",
+ X("insert and delete a row", "a range is one edge")),
+("Undo and redo.", "twist", 8,
+ "Nothing in the sheet changes, because the sheet already keeps the raw text of every cell. An edit records the text "
+ "that was there before it; undo is a second <code>set()</code> with that old text, and every dependent recomputes "
+ "for free because it is an ordinary edit going through the ordinary path. Redo is the same with the new text. A "
+ "fresh edit clears the redo stack, as every editor does. That is the Command pattern arriving after the fact rather "
+ "than being designed in: the command object is a record of three strings, and the sheet never learns it exists. The "
+ "honest limit is that an undo of an edit that has since been overwritten by a collaborator replays over their work, "
+ "which is where a real product needs operational transforms.",
+ X("undo and redo", "lazy evaluation")),
+("Show #CYCLE! in every cell of the loop instead of refusing the edit, the way Google Sheets does.", "twist", 5,
+ "The detection does not change at all &mdash; the exception already carries the loop it found, cell by cell. What "
+ "changes is only the reaction, so that becomes a policy object: one implementation rethrows, which is Excel and the "
+ "sheet's own behaviour; the other records the loop and tells the caller to paint #CYCLE!. The editor the UI calls "
+ "picks one. The reason not to bake the second behaviour into the sheet is the invariant it would cost: the graph is "
+ "always acyclic today, which is exactly what lets the cycle check be one cheap walk instead of a full search. "
+ "Accepting cycles means the topological pass has to exclude the marked cells, and iterative-calculation mode &mdash; "
+ "where Excel deliberately runs a loop a hundred times &mdash; is a third policy over the same detected loop.",
+ X("the cycle policy", "undo and redo")),
+("Multiple sheets, and formulas like =Sales!A1+2.", "twist", 5,
+ "Widen the key. The dependency graph never mentions a cell, only addresses that can be compared for equality, so "
+ "cycles, dirty sets and topological order are untouched by going from (row, col) to (sheet, row, col) &mdash; the "
+ "extension proves that by running the identical algorithm over a workbook address. The parser learns one thing: a "
+ "<code>Name!</code> prefix before an address. The cells map takes the wider key. What does get harder is not the "
+ "engine but the product: one lock per sheet stops working the moment a formula crosses sheets, so either the "
+ "workbook takes one lock, or you lock sheets in a fixed order by name to avoid a deadlock.",
+ X("a workbook", "persistence")),
+("Recalculate lazily instead of eagerly. Which would you build, and why?", "design", 8,
+ "Eager, and here is the trade rather than a preference. Lazy means an edit only marks the affected cells dirty and "
+ "computes nothing; a read computes what it needs and memoises. It is cheaper when you edit a lot and read a little, "
+ "and the extension shows it: after an edit to the head of a twenty-cell chain, reading the fifth cell evaluates five "
+ "cells and not twenty. But a grid is the other shape &mdash; every scroll reads hundreds of cells and repaints them "
+ "&mdash; so lazy moves the cost onto exactly the operation that happens most, and it needs memoise-plus-invalidate, "
+ "which is the same graph with more moving parts and a harder thread-safety story (a read now mutates the cache). "
+ "Eager pays once, while the write lock is already held, and leaves reads as one hash lookup.",
+ X("lazy evaluation", "a workbook")),
+("Persist it. And now there are two servers.", "twist", 8,
+ "The cells go behind a repository interface and the sheet's code does not change, only what it was handed. The "
+ "interesting part is the write. In memory the lock makes read-check-write one step; across two servers the database "
+ "does the same job with a version column: <code>UPDATE cells SET raw = ?, version = version + 1 WHERE a1 = ? AND "
+ "version = ?</code>. A writer reads version 3, computes, and writes only if the row is still at version 3; if a "
+ "second server got there first the update affects zero rows and the caller re-reads and retries. That is optimistic "
+ "locking, and it is the same compare-then-write the lock performed, moved into the database. The recalculation "
+ "itself stays wherever the graph is, which is the real design question a follow-up would push on: one server owns a "
+ "sheet, or the graph lives in the database too.",
+ X("persistence", "lock-free readers")),
+("Where does time come from, and how do you test =NOW()?", "design", 3,
+ "The sheet is handed a <code>Clock</code>, and that is the only thing in the system that knows what time it is: "
+ "NOW() reads it, and every committed edit is stamped with it. A test hands in a clock that returns a fixed instant, "
+ "types <code>=NOW()</code> and can assert the exact number. The same seam answers the harder half of the question: a "
+ "volatile function's answer changes with no cell changing, so something has to re-post it &mdash; a tick that types "
+ "each volatile cell's own text back into it, which recomputes it and everything that reads it through the ordinary "
+ "path. Move the injected clock forward a minute, tick, and the dependents move.",
+ X("volatile functions", "Runs every extension")),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or a Builder earn its place?", "design", 8,
+ "None of the patterns was chosen up front; each is what a move produced. Composite is move 1: a formula nests, so a "
+ "node holds nodes. Interpreter is move 2: one case per node kind walking that tree. Strategy is move 3: which "
+ "functions exist is the rule that changes. Template Method is the same move's base class, with IF and COUNT "
+ "declining it because they must see the errors it swallows. Observer is move 4's rule that a screen is never inside "
+ "the lock. State is move 6, with REFUSED as a real state. Command did not earn a place in Main.java but is one line "
+ "away, because the raw text is already the undo. For SOLID: S is move 2 (parser, evaluator, graph, sheet, one job "
+ "each); O is MEDIAN and IFERROR, new files plus one line; L is that the evaluator calls <code>f.apply</code> and "
+ "never asks which function it got; I is three one-method seams; D is <code>configure()</code> plus the "
+ "<code>ValueSource</code>. Factory earns its place the day function names arrive from configuration, because the "
+ "registry is already the thing. Visitor earns its place the day someone outside this file adds a node kind; until "
+ "then <code>sealed</code> makes five cases in one method exhaustive and the compiler checks them. Builder earns "
+ "nothing here: a cell is three fields the sheet sets together, and a formula is built by a parser.",
+ "// Composite: a formula nests, so a node holds nodes\n"
+ "sealed interface Expr permits Lit, Ref, RangeRef, Bin, Call { void collectRefs(Set<CellRef> out); }\n\n"
+ "// Interpreter: one case per node kind, and no switch on formula text anywhere\n"
+ "Value eval(Expr e, ValueSource src) { if (e instanceof Bin b) return binary(b, src); /* ... */ }\n\n"
+ "// Strategy + the registry that will one day be a Factory\n"
+ "interface SheetFunction { String name(); Value apply(List<Value> args); }\n"
+ "new FunctionRegistry().register(new SumFunction()).register(new MedianFunction());\n\n"
+ "// Template Method: the shared plumbing, written once, with a documented opt-out\n"
+ "abstract class NumericFunction implements SheetFunction { protected abstract Value reduce(List<Double> nums); }\n"
+ "final class IfFunction implements SheetFunction { /* declines the base: it must SEE an error */ }\n\n"
+ "// Observer: announced after the unlock, in a try/catch, so a broken chart cannot undo an edit\n"
+ "private void publish(List<CellChange> changes) { /* for each listener: try { ... } catch (RuntimeException ignored) {} */ }\n\n"
+ "// State: the edit's life, with REFUSED as a real state rather than an accident\n"
+ "// TYPED -> PARSED -> (cycle check) -> COMMITTED, or REFUSED with nothing written\n\n"
+ "// Factory: not yet. The registry already is one; it earns the name when names come from config\n"
+ "Map<String, SheetFunction> fromConfig = Map.of(\"SUM\", new SumFunction(), \"MEDIAN\", new MedianFunction());\n\n"
+ "// Builder: never here. A cell is three fields the sheet sets together\n"
+ "cells.computeIfAbsent(ref, Cell::new).bind(text, tree);\n"),
+]
+
+build(dict(
+    slug="spreadsheet", title="Spreadsheet",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 9 failure-test blocks and two races pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

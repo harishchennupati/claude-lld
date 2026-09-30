@@ -1,0 +1,181 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+    /** Run something that must be refused, and report whether it was. */
+    static boolean refused(Runnable r) { try { r.run(); return false; } catch (RuntimeException e) { return true; } }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. fifty people upvote the SAME answer in the same instant, each of them twice. The score must be the
+        //    number of distinct voters, never 100 and never 49, and the author's reputation must match it exactly.
+        QaService so = new QaService();
+        so.register("alice", "Alice", 100);
+        so.register("bob", "Bob", 100);
+        Question hot = so.ask("alice", "Why is my loop slow?", "A tight loop over a linked list.", Set.of("java", "performance"));
+        Answer hotAnswer = so.answer(hot.id(), "bob", "Random access on a linked list is O(n) per step.");
+        long bobBefore = so.user("bob").reputation();
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> votes = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            String voter = "v" + i;
+            so.register(voter, "Voter " + i, 200);
+            votes.add(pool.submit(() -> {
+                go.await();
+                so.vote(hotAnswer.id(), voter, VoteType.UP);
+                so.vote(hotAnswer.id(), voter, VoteType.UP);      // the same vote again: must be a no-op
+                return null;
+            }));
+        }
+        go.countDown();
+        for (Future<?> f : votes) f.get();
+        pool.shutdown();
+        Post voted = hot.post(hotAnswer.id());
+        check(voted.voterCount() == 50, "50 distinct voters are in the ledger, not 49 and not 100");
+        check(voted.score() == 50, "the score is exactly 50 after 100 concurrent vote calls");
+        check(so.user("bob").reputation() - bobBefore == 500, "bob's reputation moved by exactly 50 x 10 = 500");
+
+        // 2. cast, flip, retract. new-minus-old must bring the score AND the reputation back to exactly where
+        //    they started -- not "about right", and with no unearned points left behind.
+        QaService s2 = new QaService();
+        s2.register("asker", "Asker", 100);
+        s2.register("answerer", "Answerer", 100);
+        s2.register("voter", "Voter", 200);
+        Question q2 = s2.ask("asker", "How do I reverse a string?", "Without a StringBuilder.", Set.of("java"));
+        Answer a2 = s2.answer(q2.id(), "answerer", "new StringBuilder(s).reverse().toString().");
+        long repStart = s2.user("answerer").rawReputation();
+        s2.vote(a2.id(), "voter", VoteType.UP);
+        check(q2.post(a2.id()).score() == 1 && s2.user("answerer").rawReputation() - repStart == 10, "an upvote is +1 score, +10 reputation");
+        s2.vote(a2.id(), "voter", VoteType.DOWN);
+        check(q2.post(a2.id()).score() == -1 && s2.user("answerer").rawReputation() - repStart == -2, "the flip is a net -2 score and -12 reputation, in one step");
+        s2.retractVote(a2.id(), "voter");
+        check(q2.post(a2.id()).score() == 0 && s2.user("answerer").rawReputation() == repStart, "after retracting, score and reputation are back to exactly zero");
+        check(q2.post(a2.id()).voterCount() == 0, "and the retracted voter is out of the ledger, not stored as null");
+
+        // 3. the guards: you cannot vote on your own post, and you cannot vote on a post that does not exist.
+        //    Neither may write anything at all.
+        int scoreBefore = q2.post(a2.id()).score();
+        long repBefore = s2.user("answerer").rawReputation();
+        check(refused(() -> s2.vote(a2.id(), "answerer", VoteType.UP)), "voting on your own answer is refused");
+        check(refused(() -> s2.vote("a999", "voter", VoteType.UP)), "voting on a post that does not exist is refused");
+        check(q2.post(a2.id()).score() == scoreBefore && s2.user("answerer").rawReputation() == repBefore,
+              "and neither refusal changed a score or a reputation");
+
+        // 4. accepting: only the asker, exactly one, and re-accepting MOVES the +15 instead of handing out a second one.
+        QaService s4 = new QaService();
+        s4.register("asker", "Asker", 100);
+        s4.register("first", "First", 100);
+        s4.register("second", "Second", 100);
+        Question q4 = s4.ask("asker", "Which map should I use?", "Concurrent reads, rare writes.", Set.of("java"));
+        Answer first = s4.answer(q4.id(), "first", "ConcurrentHashMap.");
+        Answer second = s4.answer(q4.id(), "second", "Map.copyOf if it never changes.");
+        check(refused(() -> s4.accept(first.id(), "second")), "a non-asker cannot accept an answer");
+        check(q4.acceptedAnswerId() == null, "and nothing was accepted by that attempt");
+        long askerBefore = s4.user("asker").reputation();
+        s4.accept(first.id(), "asker");
+        check(q4.acceptedAnswerId().equals(first.id()) && s4.user("first").reputation() == 115, "the asker accepts: the answer's author gains 15");
+        check(s4.user("asker").reputation() - askerBefore == 2, "and the asker gains the 2 for accepting");
+        s4.accept(first.id(), "asker");
+        check(s4.user("first").reputation() == 115, "accepting the same answer twice is a no-op");
+        s4.accept(second.id(), "asker");
+        check(q4.acceptedAnswerId().equals(second.id()), "re-accepting moves the flag to the second answer");
+        check(s4.user("first").reputation() == 100 && s4.user("second").reputation() == 115, "the first author's 15 is taken back and given to the second");
+        check(s4.user("asker").reputation() - askerBefore == 2, "the asker is paid the accept bonus once, not once per change of mind");
+
+        // 5. the life cycle: a closed question takes no new answers or comments, but its posts stay votable;
+        //    a deleted one refuses everything.
+        QaService s5 = new QaService();
+        s5.register("asker", "Asker", 100);
+        s5.register("mod", "Mod", 900);
+        s5.register("bob", "Bob", 200);
+        Question q5 = s5.ask("asker", "Is this opinion based?", "Which framework is best?", Set.of("java"));
+        Answer a5 = s5.answer(q5.id(), "bob", "Depends on the team.");
+        s5.close(q5.id(), "mod", "opinion based");
+        check(q5.state() == QuestionState.CLOSED, "a user with the close privilege closed the question");
+        check(refused(() -> s5.answer(q5.id(), "bob", "Another answer")), "a closed question refuses a new answer");
+        check(refused(() -> s5.comment(q5.id(), "bob", "a comment")), "a closed question refuses a new comment");
+        s5.vote(a5.id(), "mod", VoteType.UP);
+        check(q5.post(a5.id()).score() == 1, "but an existing answer on a closed question is still votable");
+        check(refused(() -> s5.close(q5.id(), "bob", "me too")), "a user below the close threshold cannot close");
+        s5.reopen(q5.id(), "mod");
+        check(q5.state() == QuestionState.OPEN, "and a moderator can reopen it");
+        s5.delete(q5.id(), "mod");
+        check(refused(() -> s5.vote(a5.id(), "asker", VoteType.UP)), "a deleted question refuses even a vote");
+
+        // 6. search: the inverted index finds by tag, by word and by author, and a deleted question leaves it.
+        QaService s6 = new QaService();
+        s6.register("alice", "Alice", 100);
+        s6.register("mod", "Mod", 900);
+        Question keep = s6.ask("alice", "How do I parse a date in Java?", "The format keeps throwing.", Set.of("java", "datetime"));
+        Question drop = s6.ask("alice", "How do I parse a date in Python?", "strptime is confusing.", Set.of("python", "datetime"));
+        check(s6.byTag("datetime").size() == 2, "two questions carry the datetime tag");
+        check(s6.byWord("parse").size() == 2 && s6.byWord("strptime").size() == 1, "the word index finds both, and one");
+        check(s6.byAuthor("alice").size() == 2, "and the author index finds both");
+        s6.delete(drop.id(), "mod");
+        check(s6.byTag("datetime").size() == 1 && s6.byWord("strptime").isEmpty(), "a deleted question is out of every posting list");
+        check(s6.byTag("datetime").get(0).id().equals(keep.id()), "and the survivor is the one that was kept");
+
+        // 7. the reputation floor is a display rule. Storing a clamped value would hand out points for a
+        //    downvote that no longer exists, so the true value is stored and the floor lives on the read.
+        QaService s7 = new QaService();
+        s7.register("newbie", "Newbie", 1);
+        s7.register("critic", "Critic", 200);
+        s7.register("asker", "Asker", 100);
+        Question q7 = s7.ask("asker", "Is this a good pattern?", "Singleton everywhere.", Set.of("design"));
+        Answer a7 = s7.answer(q7.id(), "newbie", "Yes, use it for everything.");
+        s7.vote(a7.id(), "critic", VoteType.DOWN);
+        check(s7.user("newbie").rawReputation() == -1, "the true value went below zero and was stored");
+        check(s7.user("newbie").reputation() == 0, "but the profile shows zero: the floor is on the read path");
+        s7.retractVote(a7.id(), "critic");
+        check(s7.user("newbie").rawReputation() == 1, "retracting the downvote returns exactly the original 1, not 3");
+
+        // 8. privileges are a threshold table, and a listener that throws cannot break a vote or lose a delta.
+        QaService s8 = new QaService();
+        s8.register("asker", "Asker", 100);
+        s8.register("author", "Author", 100);
+        s8.register("rookie", "Rookie", 14);
+        s8.register("regular", "Regular", 15);
+        s8.register("trusted", "Trusted", 125);
+        List<String> heard = new ArrayList<>();
+        s8.configure(new DefaultRules(),
+            e -> { throw new IllegalStateException("this listener is broken"); },
+            e -> heard.add(e.kind() + ":" + e.repDelta()));
+        Question q8 = s8.ask("asker", "Why does this throw?", "A NullPointerException on line 3.", Set.of("java"));
+        Answer a8 = s8.answer(q8.id(), "author", "Something on that line is null.");
+        check(refused(() -> s8.vote(a8.id(), "rookie", VoteType.UP)), "14 reputation is not enough to upvote (15 needed)");
+        check(q8.post(a8.id()).score() == 0, "and the refused vote wrote nothing");
+        s8.vote(a8.id(), "regular", VoteType.UP);
+        check(q8.post(a8.id()).score() == 1 && s8.user("author").reputation() == 110, "15 reputation is enough, and the vote landed despite the broken listener");
+        check(refused(() -> s8.vote(a8.id(), "regular", VoteType.DOWN)), "but 15 is not enough to downvote (125 needed)");
+        s8.vote(a8.id(), "trusted", VoteType.DOWN);
+        check(q8.post(a8.id()).score() == 0 && s8.user("author").reputation() == 108, "125 reputation can downvote, and the reputation moved");
+        check(heard.contains("VOTED:10") && heard.contains("VOTED:-2"), "the second listener heard every event the broken one threw on");
+
+        // 9. deleting a thread. A stranger cannot; the asker can; and when it goes, every reputation point the
+        //    thread ever paid out comes back -- exactly once, even if the DELETED event is replayed.
+        QaService s9 = new QaService();
+        s9.register("asker", "Asker", 100);
+        s9.register("author", "Author", 100);
+        s9.register("voter", "Voter", 200);
+        RepReversal undo = new RepReversal(s9);
+        s9.configure(new DefaultRules(), undo);
+        Question q9 = s9.ask("asker", "Why does this compile?", "A generic method with a wildcard.", Set.of("java"));
+        Answer a9 = s9.answer(q9.id(), "author", "The wildcard is captured into a type variable.");
+        s9.vote(a9.id(), "voter", VoteType.UP);                  // author +10
+        s9.accept(a9.id(), "asker");                             // author +15, asker +2
+        check(s9.user("author").reputation() == 125 && s9.user("asker").reputation() == 102, "an upvote and an acceptance paid out 25 and 2");
+        check(refused(() -> s9.delete(q9.id(), "voter")), "a stranger with 200 reputation cannot delete somebody else's question");
+        check(q9.state() == QuestionState.OPEN, "and the refused delete left the thread open");
+        s9.delete(q9.id(), "asker");                             // the asker may delete their own
+        check(s9.user("author").reputation() == 100 && s9.user("asker").reputation() == 100, "deleting the thread hands every point back, from the ledger");
+        undo.onEvent(new QaEvent(EventKind.DELETED, q9.id(), q9.id(), "asker", "asker", 0, 0));
+        check(s9.user("author").reputation() == 100, "and a replayed DELETED event takes nothing a second time");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

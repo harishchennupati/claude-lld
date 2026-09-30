@@ -1,0 +1,185 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.time.*;
+
+// ---- ext: time is injected, so pricing is testable and replayable
+interface Clock2 { long nowMs(); }                           // in production: Clock2 c = System::currentTimeMillis
+class FixedClock implements Clock2 {
+    long t; FixedClock(long t) { this.t = t; }
+    public long nowMs() { return t; }
+    void advance(long ms) { t += ms; }
+}
+
+// ---- ext: pricing decorators stack; a cap wraps a surge wraps a flat rule
+interface Pricing2 { double price(long minutes, SpotType type); }
+class FlatHourly2 implements Pricing2 {
+    static final Map<SpotType, Integer> RATE = Map.of(SpotType.SMALL, 10, SpotType.COMPACT, 20, SpotType.LARGE, 40);
+    public double price(long m, SpotType t) { return Math.max(1, (long) Math.ceil(m / 60.0)) * RATE.get(t); }
+}
+class Surge2 implements Pricing2 {
+    private final Pricing2 base; private final double factor; private final Clock2 clock;
+    Surge2(Pricing2 base, double factor, Clock2 clock) { this.base = base; this.factor = factor; this.clock = clock; }
+    public double price(long m, SpotType t) {
+        DayOfWeek d = Instant.ofEpochMilli(clock.nowMs()).atZone(ZoneOffset.UTC).getDayOfWeek();
+        boolean weekend = d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY;
+        return weekend ? base.price(m, t) * factor : base.price(m, t);
+    }
+}
+class DailyCap2 implements Pricing2 {
+    private final Pricing2 base; private final double cap;
+    DailyCap2(Pricing2 base, double cap) { this.base = base; this.cap = cap; }
+    public double price(long m, SpotType t) { return Math.min(cap, base.price(m, t)); }
+}
+
+// ---- ext: a second assignment strategy proves the interface (nearest to exit, min-heap by distance)
+class NearestToExit implements SpotAssignmentStrategy {
+    private final Map<String, Integer> distance;                   // spotId -> metres from exit, from config
+    NearestToExit(Map<String, Integer> distance) { this.distance = distance; }
+    public ParkingSpot find(ParkingFloor floor, VehicleType type) {
+        PriorityQueue<ParkingSpot> pq = new PriorityQueue<>(Comparator.comparingInt(s -> distance.getOrDefault(s.id, Integer.MAX_VALUE)));
+        for (SpotType st : Fit.ORDER.get(type)) { ParkingSpot s = floor.peekFree(st); if (s != null) pq.add(s); }
+        return pq.peek();                                          // best of the heads; full version scans each deque
+    }
+}
+
+// ---- ext: ticket lifecycle as an explicit transition table (illegal transitions throw, never silently pass)
+enum TicketState {
+    ISSUED, PAID, LOST, CLOSED;
+    private static final Map<TicketState, Set<TicketState>> ALLOWED = Map.of(
+        ISSUED, EnumSet.of(PAID, LOST), PAID, EnumSet.of(CLOSED), LOST, EnumSet.of(CLOSED), CLOSED, EnumSet.noneOf(TicketState.class));
+    TicketState to(TicketState next) {
+        if (!ALLOWED.get(this).contains(next)) throw new IllegalStateException(this + " -> " + next + " not allowed");
+        return next;
+    }
+}
+
+// ---- ext: lock per floor -- gates on different floors never wait for each other
+class FloorLocked {
+    private final List<ParkingFloor> floors; private final Map<ParkingFloor, ReentrantLock> locks = new HashMap<>();
+    private final SpotAssignmentStrategy assignment; private final Map<String, Ticket> active = new ConcurrentHashMap<>();
+    FloorLocked(List<ParkingFloor> floors, SpotAssignmentStrategy a) { this.floors = floors; this.assignment = a; for (ParkingFloor f : floors) locks.put(f, new ReentrantLock()); }
+    Ticket park(Vehicle v) {
+        if (active.containsKey(v.plate)) throw new IllegalStateException("Already parked: " + v.plate);
+        for (ParkingFloor floor : floors) {
+            ReentrantLock l = locks.get(floor);
+            l.lock();                                              // only this floor is serialised
+            try {
+                ParkingSpot spot = assignment.find(floor, v.type);
+                if (spot != null) { floor.occupy(spot); spot.assign(v); Ticket t = new Ticket(spot, floor, v, System.currentTimeMillis()); active.put(v.plate, t); return t; }
+            } finally { l.unlock(); }
+        }
+        throw new IllegalStateException("Lot full for " + v.type);
+    }
+}
+
+// ---- ext: lock-free spot -- claim by compare-and-set; losers move to the next candidate
+class CasSpot {
+    final String id; final SpotType type;
+    private final AtomicReference<Vehicle> occupant = new AtomicReference<>();
+    CasSpot(String id, SpotType type) { this.id = id; this.type = type; }
+    boolean tryClaim(Vehicle v) { return occupant.compareAndSet(null, v); }   // exactly one caller wins
+    void release() { occupant.set(null); }
+    boolean isFree() { return occupant.get() == null; }
+}
+class CasFloor {
+    private final Map<SpotType, List<CasSpot>> spots = new EnumMap<>(SpotType.class);
+    CasFloor() { for (SpotType st : SpotType.values()) spots.put(st, new ArrayList<>()); }
+    void add(CasSpot s) { spots.get(s.type).add(s); }
+    CasSpot claim(Vehicle v) {
+        for (SpotType st : Fit.ORDER.get(v.type))
+            for (CasSpot s : spots.get(st))
+                if (s.tryClaim(v)) return s;                           // no lock anywhere; a loser just keeps scanning
+        return null;
+    }
+}
+
+// ---- ext: a truck needs two adjacent spots -- all-or-nothing under the lock
+class AdjacentAssignment {
+    private final Map<String, String> next;                        // spotId -> the spot physically beside it
+    AdjacentAssignment(Map<String, String> next) { this.next = next; }
+    List<ParkingSpot> findRun(ParkingFloor floor, Map<String, ParkingSpot> byId) {
+        for (ParkingSpot a : byId.values()) {
+            String nid = next.get(a.id);                       // a spot with no neighbour has no run
+            ParkingSpot b = nid == null ? null : byId.get(nid);
+            if (a.type == SpotType.LARGE && a.occupant() == null && b != null && b.type == SpotType.LARGE && b.occupant() == null) return List.of(a, b);
+        }
+        return List.of();
+    }
+}
+class MultiSpotTicket {                                            // Ticket holds a List<Spot>; reserved all or none
+    final List<ParkingSpot> spots; final Vehicle vehicle;
+    MultiSpotTicket(List<ParkingSpot> spots, Vehicle vehicle) { this.spots = spots; this.vehicle = vehicle; }
+}
+class TruckParking {                                               // the whole reservation under ONE lock: find the run, take both, or take nothing
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Map<ParkingSpot, Boolean> taken = new HashMap<>();
+    private final AdjacentAssignment adjacent; private final Map<String, ParkingSpot> byId;
+    TruckParking(AdjacentAssignment adjacent, Map<String, ParkingSpot> byId) { this.adjacent = adjacent; this.byId = byId; }
+    MultiSpotTicket park(Truck t, ParkingFloor floor) {
+        lock.lock();
+        try {
+            List<ParkingSpot> run = adjacent.findRun(floor, byId);
+            if (run.isEmpty()) return null;                           // no pair: nothing was touched
+            for (ParkingSpot s : run) s.assign(t);                     // both, inside the same lock: a second truck cannot take half
+            return new MultiSpotTicket(run, t);
+        } finally { lock.unlock(); }
+    }
+    void release(MultiSpotTicket mt) { lock.lock(); try { for (ParkingSpot s : mt.spots) s.release(); } finally { lock.unlock(); } }
+}
+
+// ---- ext: persistence seam -- the maps become a repository; services do not change
+interface TicketRepository { Optional<Ticket> byPlate(String plate); void save(Ticket t); Ticket remove(String plate); }
+class InMemoryTicketRepository implements TicketRepository {
+    private final Map<String, Ticket> m = new ConcurrentHashMap<>();
+    public Optional<Ticket> byPlate(String p) { return Optional.ofNullable(m.get(p)); }
+    public void save(Ticket t) { if (m.putIfAbsent(t.vehicle.plate, t) != null) throw new IllegalStateException("Already parked: " + t.vehicle.plate); }
+    public Ticket remove(String p) { return m.remove(p); }
+}
+
+// ---- ext: exit-time failure path -- payment fails: ticket stays ISSUED, spot stays held, nothing half-done
+class ExitFlow {
+    // the same order unpark() uses, written against the transition table: pay first; then PAID; then free; then CLOSED. Runs inside the lot's lock.
+    static double checkout(Ticket t, Pricing2 pricing, PaymentProcessor pay, Clock2 clock, Runnable freeSpot) {
+        if (t.status != TicketStatus.ISSUED) throw new IllegalStateException("ticket is " + t.status);   // a second checkout is refused, not paid twice
+        long minutes = (long) Math.ceil((clock.nowMs() - t.entryMs) / 60000.0);                          // any started minute counts
+        double fee = pricing.price(Math.max(1, minutes), t.spot.type);
+        if (!pay.pay(fee)) return -1;                                  // no state changed; driver retries or pays cash
+        t.status = TicketStatus.valueOf(TicketState.ISSUED.to(TicketState.PAID).name());               // the REAL ticket moves, through the table
+        freeSpot.run();                                                // only after payment succeeded
+        t.status = TicketStatus.valueOf(TicketState.PAID.to(TicketState.CLOSED).name());
+        return fee;
+    }
+}
+
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        FixedClock clock = new FixedClock(Instant.parse("2026-09-05T10:00:00Z").toEpochMilli());   // a Saturday
+        Pricing2 p = new DailyCap2(new Surge2(new FlatHourly2(), 1.5, clock), 500);
+        System.out.println("weekend 2.5h compact = " + p.price(150, SpotType.COMPACT) + " (3h*20*1.5=90)");
+        System.out.println("weekend 30h large capped = " + p.price(1800, SpotType.LARGE) + " (cap 500)");
+        System.out.println("ISSUED->PAID->CLOSED ok; ISSUED->CLOSED: " + tryIt(() -> TicketState.ISSUED.to(TicketState.CLOSED)));
+        CasFloor cf = new CasFloor(); cf.add(new CasSpot("C1", SpotType.COMPACT));
+        ExecutorService pool = Executors.newFixedThreadPool(8); CountDownLatch go = new CountDownLatch(1); AtomicInteger wins = new AtomicInteger();
+        for (int i = 0; i < 50; i++) { String pl = "P" + i; pool.submit(() -> { go.await(); if (cf.claim(new Car(pl)) != null) wins.incrementAndGet(); return null; }); }
+        go.countDown(); pool.shutdown(); pool.awaitTermination(5, TimeUnit.SECONDS);
+        System.out.println("CAS race: 50 cars, 1 spot, winners = " + wins.get());
+        if (wins.get() != 1) throw new AssertionError();
+        ParkingFloor f = new ParkingFloor("F2"); ParkingSpot a = new ParkingSpot("L1", SpotType.LARGE), b = new ParkingSpot("L2", SpotType.LARGE); f.addSpot(a); f.addSpot(b);
+        System.out.println("adjacent run for a truck: " + new AdjacentAssignment(Map.of("L1", "L2")).findRun(f, Map.of("L1", a, "L2", b)).size() + " spots; with no neighbour mapped: " + new AdjacentAssignment(Map.of()).findRun(f, Map.of("L1", a, "L2", b)).size());
+        InMemoryTicketRepository repo = new InMemoryTicketRepository(); repo.save(new Ticket(a, f, new Truck("T1"), clock.nowMs()));
+        System.out.println("repo dedupe: " + tryIt(() -> repo.save(new Ticket(b, f, new Truck("T1"), clock.nowMs()))));
+        // exit flow: payment fails -> nothing changes; retry pays; a third checkout is refused
+        Ticket et = new Ticket(a, f, new Car("E1"), clock.nowMs()); clock.advance(61 * 60_000L);
+        System.out.println("exit, card declined: " + ExitFlow.checkout(et, new FlatHourly2(), amt -> false, clock, () -> {}) + "  status=" + et.status);
+        System.out.println("exit, cash: " + ExitFlow.checkout(et, new FlatHourly2(), amt -> true, clock, () -> {}) + "  status=" + et.status + "  (61 min large = 2h x 40 = 80)");
+        System.out.println("exit again: " + tryIt(() -> ExitFlow.checkout(et, new FlatHourly2(), amt -> true, clock, () -> {})));
+        // a truck needs two adjacent spots: reserved as one unit or not at all
+        ParkingFloor f3 = new ParkingFloor("F3"); ParkingSpot l1 = new ParkingSpot("L1", SpotType.LARGE), l2 = new ParkingSpot("L2", SpotType.LARGE), l3 = new ParkingSpot("L3", SpotType.LARGE); f3.addSpot(l1); f3.addSpot(l2); f3.addSpot(l3);
+        TruckParking tp = new TruckParking(new AdjacentAssignment(Map.of("L1", "L2")), Map.of("L1", l1, "L2", l2, "L3", l3));
+        MultiSpotTicket mt = tp.park(new Truck("TR1"), f3);
+        System.out.println("truck 1 got " + (mt == null ? "nothing" : mt.spots.size() + " spots") + "; truck 2 got " + (tp.park(new Truck("TR2"), f3) == null ? "nothing (no free pair left)" : "a pair?!"));
+    }
+    static String tryIt(Runnable r) { try { r.run(); return "allowed"; } catch (RuntimeException e) { return "rejected: " + e.getMessage(); } }
+}

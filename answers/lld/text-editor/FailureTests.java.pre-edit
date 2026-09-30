@@ -1,0 +1,146 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. eight threads type two thousand characters at the same instant: the buffer AND the history must survive.
+        //    Two thousand characters with the wrong history is still a bug, so the test winds the whole document back.
+        Editor race = new Editor(new GapBuffer(4096), 4096, new NoMergePolicy());
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int t = 0; t < 8; t++) {
+            fs.add(pool.submit(() -> { go.await(); for (int i = 0; i < 250; i++) race.append("x"); return null; }));
+        }
+        go.countDown();
+        for (Future<?> f : fs) f.get();
+        pool.shutdown();
+        check(race.text().length() == 2000, "2000 concurrent appends landed: length is exactly 2000, nothing torn");
+        check(race.undoDepth() == 2000, "the history agrees with the buffer: 2000 undo steps, not 1997");
+        check(race.version() == 2000, "the version counter agrees too: 2000");
+        int undone = 0;
+        while (race.undo()) undone++;
+        check(undone == 2000 && race.text().isEmpty(), "2000 undos wind it back to an empty document");
+
+        // 2. the everyday sequence: insert, delete in the middle, undo, redo -- the text must be restored exactly
+        Editor ed = new Editor(new GapBuffer(), 200, new NoMergePolicy());
+        ed.type("hello brave new world");
+        String full = ed.text();
+        ed.deleteRange(6, 6);                                   // take out "brave "
+        check(ed.text().equals("hello new world"), "delete removed exactly the range asked for");
+        ed.undo();
+        check(ed.text().equals(full), "undo put back the exact characters the delete removed, in the right place");
+        ed.redo();
+        check(ed.text().equals("hello new world"), "redo is execute() again: the same delete, the same result");
+        ed.undo();
+        check(ed.text().equals(full) && ed.canRedo(), "undo again, and redo is still available");
+
+        // 3. a new edit clears the redo branch: forgetting this is the bug that later re-applies an edit at a
+        //    vanished offset and corrupts the buffer
+        ed.moveTo(ed.text().length());                          // undo left the caret where the delete was
+        ed.type("!");
+        check(!ed.canRedo() && ed.redoDepth() == 0, "a new edit cleared the redo stack: history is linear on purpose");
+        check(!ed.redo(), "redo after a new edit returns false rather than throwing");
+        check(ed.text().equals(full + "!"), "the document is the new branch, not a mix of both");
+
+        // 4. the gap buffer must give the same answers as the obvious buffer, however the caret jumps about
+        TextBuffer gap = new GapBuffer(8), plain = new StringBuilderBuffer();
+        int[][] script = { {0, 0}, {0, 1}, {1, 2}, {0, 3}, {2, 4}, {1, 5} };   // (kind, arg): a walk of inserts and deletes
+        boolean same = true;
+        for (String word : List.of("alpha", "beta", "gamma", "delta", "epsilon")) {
+            for (int[] step : script) {
+                int at = Math.min(step[1] * 3, gap.length());
+                if (step[0] == 0) { gap.insert(at, word); plain.insert(at, word); }
+                else if (gap.length() > at + 2) { gap.delete(at, 2); plain.delete(at, 2); }
+                if (!gap.text().equals(plain.text())) same = false;
+            }
+        }
+        check(same, "the gap buffer matches a StringBuilder through 30 edits with the caret jumping backwards and forwards");
+        check(gap.indexOf("psilon", 0) == plain.indexOf("psilon", 0), "find across the gap gives the same offset");
+        check(gap.substring(3, 9).equals(plain.substring(3, 9)), "substring across the gap gives the same characters");
+        GapBuffer moved = new GapBuffer(8);
+        moved.insert(0, "abcdef");
+        moved.moveGap(0);                                        // jump the caret to the front
+        moved.insert(0, "Z");
+        moved.moveGap(moved.length());                           // and to the very end
+        moved.insert(moved.length(), "Q");
+        check(moved.text().equals("Zabcdef" + "Q"), "an explicit gap move to each end leaves the text intact");
+
+        // 5. forty replacements are ONE ctrl+Z, and the redo replays them instead of searching again
+        Editor doc = new Editor(new GapBuffer(), 200, new NoMergePolicy());
+        StringBuilder src = new StringBuilder();
+        for (int i = 0; i < 40; i++) src.append("the cat number ").append(i).append("\n");
+        doc.type(src.toString());
+        String beforeReplace = doc.text();
+        int depth = doc.undoDepth();
+        int hits = doc.replaceAll("cat", "dog");
+        check(hits == 40, "replace-all found all 40 occurrences");
+        check(doc.undoDepth() == depth + 1, "40 replacements added exactly ONE undo step");
+        check(!doc.text().contains("cat") && doc.text().split("dog", -1).length == 41, "every hit was replaced");
+        doc.undo();
+        check(doc.text().equals(beforeReplace), "one ctrl+Z undid all 40, in reverse order, back to the exact original");
+        doc.redo();
+        check(!doc.text().contains("cat"), "redo replayed the same 40 children: no second search, no drifted offsets");
+
+        // 6. an edit that throws must leave the buffer, the history and the version exactly as they were
+        Editor safe = new Editor(new GapBuffer(), 200, new NoMergePolicy());
+        safe.type("stable");
+        String text = safe.text();
+        long v = safe.version();
+        int steps = safe.undoDepth();
+        try { safe.insertAt(500, "boom"); check(false, "an insert past the end must throw"); }
+        catch (IndexOutOfBoundsException e) { check(true, "an insert past the end throws: " + e.getMessage()); }
+        check(safe.text().equals(text) && safe.version() == v && safe.undoDepth() == steps,
+              "the failed insert changed no text, no version and added no undo step");
+        try {
+            safe.apply(new CompositeCommand("half-legal macro", EditKind.MACRO,
+                List.of(new InsertCommand(0, "AAA", EditKind.MACRO, 0L), new DeleteCommand(900, 1, EditKind.MACRO))));
+            check(false, "a composite whose second child is illegal must throw");
+        } catch (IndexOutOfBoundsException e) { check(true, "the composite threw on its second child"); }
+        check(safe.text().equals(text) && safe.undoDepth() == steps,
+              "the composite rolled its first child back: no half-applied macro, and nothing on the undo stack");
+        check(safe.selection().caret() == text.length(), "the rollback put the caret back too: nothing half-done");
+        safe.type("!");
+        check(safe.text().equals(text + "!"), "the editor still works after both failures: the caller just retries");
+
+        // 7. a listener that throws is not allowed to break an edit, and it must be told AFTER the unlock
+        Editor pub = new Editor(new GapBuffer(), 200, new NoMergePolicy());
+        int[] good = { 0 };
+        boolean[] sawLockFree = { true };
+        pub.addListener(e -> { throw new IllegalStateException("a broken view"); });
+        pub.addListener(e -> { good[0]++; if (!pub.text().equals(e.text())) sawLockFree[0] = false; });
+        pub.type("survives");
+        check(pub.text().equals("survives"), "the edit landed even though the first listener threw");
+        check(good[0] == 1, "the listener after the broken one was still called");
+        check(sawLockFree[0], "a listener can read the editor while being notified: it is called after the unlock");
+
+        // 8. the grouping rule: typing collapses into words, a paste never collapses, and the cap evicts the oldest
+        long[] now = { 1_000_000L };
+        Editor keys = new Editor(new GapBuffer(), 3, new TypingBurstMergePolicy(600, 40));
+        keys.setClock(() -> now[0]);
+        for (char c : "hello".toCharArray()) { keys.type(String.valueOf(c)); now[0] += 40; }
+        check(keys.undoDepth() == 1, "five keystrokes 40 ms apart are ONE undo step");
+        now[0] += 5000;                                          // a long pause ends the burst
+        keys.type("x");
+        check(keys.undoDepth() == 2, "a five-second pause starts a new undo step");
+        keys.type("[a 4 KB paste]");
+        check(keys.undoDepth() == 3, "a paste is its own step: the wrapper refuses to merge it, whatever the rule says");
+        keys.undo();
+        check(keys.text().equals("hellox"), "one ctrl+Z took the whole paste out and nothing else");
+        keys.configure(new NoMergePolicy());
+        now[0] += 10;
+        keys.type("a"); keys.type("b");
+        check(keys.undoDepth() == 3 && keys.historyEvicted(),
+              "the rule was swapped at run time, the cap of 3 held, and the oldest step was evicted");
+        check(!keys.text().isEmpty(), "with a step evicted the document can no longer wind back to empty: "
+              + "\"unsaved\" must come from the version, not from an empty stack");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures > 0) System.exit(1);
+    }
+}

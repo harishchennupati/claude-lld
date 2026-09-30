@@ -1,0 +1,493 @@
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+// Reference code for every follow-up on page 05. Each block is self-contained and is exercised by ExtDemo at the
+// bottom, so none of it can rot. Compile with: javac Main.java Extensions.java FailureTests.java
+
+// ---- ext: symlinks -- a third kind of node, and the only method that changes is the path walk
+/**
+ * A name that points at another path instead of at bytes. Nothing else in the system learns about it: ls, find,
+ * the guards and the watchers keep treating it as a node with a name and a size.
+ */
+final class SymlinkNode extends FsNode {
+    private final FsPath target;
+    SymlinkNode(String name, String target, long now) { super(name, now); this.target = FsPath.of(target); }
+    FsPath target() { return target; }
+    @Override boolean isDirectory() { return false; }
+    /** A link is a name, not bytes; its own size is the length of the target string, as on a real file system. */
+    @Override long sizeBytes() { return target.toString().length(); }
+}
+
+/**
+ * The changed path walk. When a segment resolves to a link, the walk restarts from the link's target, counting
+ * hops; after MAX_HOPS it gives up, which is how a symlink loop (/a -> /b, /b -> /a) becomes an error instead
+ * of a hang. This is the only method symlinks touch.
+ */
+final class SymlinkResolver {
+    static final int MAX_HOPS = 40;
+    /** Resolve a path through any number of links. Caller holds the namespace read lock. */
+    static FsNode resolve(DirNode root, FsPath p) {
+        int hops = 0;
+        FsPath cur = p;
+        outer:
+        while (true) {
+            FsNode node = root;
+            for (int i = 0; i < cur.depth(); i++) {
+                if (!node.isDirectory()) throw new NotADirectoryException(cur.toString());
+                FsNode next = ((DirNode) node).child(cur.segment(i));
+                if (next == null) throw new NotFoundException(cur.toString());
+                if (next instanceof SymlinkNode link) {
+                    if (++hops > MAX_HOPS) throw new FsException("too many levels of symbolic links: " + p);
+                    FsPath rest = ((SymlinkNode) next).target();
+                    for (int j = i + 1; j < cur.depth(); j++) rest = rest.child(cur.segment(j));
+                    cur = rest;
+                    continue outer;                                  // restart the walk from the target
+                }
+                node = next;
+            }
+            return node;
+        }
+    }
+}
+
+// ---- ext: hard links -- two names, one set of bytes, one refcount
+/**
+ * The bytes, split out from the name. A hard link is a second directory entry pointing at the same inode; the
+ * bytes die when the last name goes, which is what the refcount counts.
+ */
+final class Inode {
+    private final ReentrantLock lock = new ReentrantLock();
+    private byte[] content;
+    private int links = 0;
+    Inode(byte[] content) { this.content = content; }
+    void link() { lock.lock(); try { links++; } finally { lock.unlock(); } }
+    /** Drop one name. Returns true when that was the last one and the bytes were released. */
+    boolean unlink() {
+        lock.lock();
+        try { if (--links == 0) { content = new byte[0]; return true; } return false; }
+        finally { lock.unlock(); }
+    }
+    int links() { lock.lock(); try { return links; } finally { lock.unlock(); } }
+    byte[] read() { lock.lock(); try { return content.clone(); } finally { lock.unlock(); } }
+    long size() { lock.lock(); try { return content.length; } finally { lock.unlock(); } }
+}
+
+/** A directory entry that shares its bytes with any other entry pointing at the same inode. */
+final class LinkedFile extends FsNode {
+    private final Inode inode;
+    LinkedFile(String name, Inode inode, long now) { super(name, now); this.inode = inode; inode.link(); }
+    Inode inode() { return inode; }
+    @Override boolean isDirectory() { return false; }
+    @Override long sizeBytes() { return inode.size(); }
+    /** du must count shared bytes once, so a real du folds over a set of inode identities, not over names. */
+    static long du(Collection<LinkedFile> entries) {
+        Set<Inode> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        long total = 0;
+        for (LinkedFile f : entries) if (seen.add(f.inode())) total += f.inode().size();
+        return total;
+    }
+}
+
+// ---- ext: users and permissions -- the rule that changes, behind one interface, checked before the call
+/** Who is asking. Threaded through the API rather than read from a thread local, so a test can be any user. */
+record Principal(String user, Set<String> groups) {
+    static Principal of(String user) { return new Principal(user, Set.of()); }
+}
+
+/** What they want to do with the path. Two verbs is enough for the owner/mode model. */
+enum Access { READ, WRITE }
+
+/** The permission rule. One method, so it composes with the other rules and a test hands in a lambda. */
+@FunctionalInterface
+interface AccessPolicy {
+    void check(Principal who, String path, Access what);
+    AccessPolicy ALLOW_ALL = (who, path, what) -> {};
+}
+
+/**
+ * Owner plus mode bits, the Unix model in twenty lines: each path has an owner and two booleans (may others
+ * read, may others write). Anything more elaborate -- groups, ACLs, inherited permissions -- is a different
+ * implementation of the same interface.
+ */
+final class OwnerMode implements AccessPolicy {
+    private record Entry(String owner, boolean otherRead, boolean otherWrite) {}
+    private final Map<String, Entry> table = new ConcurrentHashMap<>();
+    /** Record who owns a path and what everybody else may do with it. */
+    void chown(String path, String owner, boolean otherRead, boolean otherWrite) { table.put(path, new Entry(owner, otherRead, otherWrite)); }
+    @Override public void check(Principal who, String path, Access what) {
+        Entry e = table.get(path);
+        if (e == null || e.owner().equals(who.user())) return;                       // unowned or mine
+        boolean ok = what == Access.READ ? e.otherRead() : e.otherWrite();
+        if (!ok) throw new FsException("permission denied: " + who.user() + " cannot " + what + " " + path);
+    }
+}
+
+/**
+ * A thin wrapper over the file system that asks the policy first and then delegates. The file system itself does
+ * not change at all; it does not know what a user is.
+ */
+final class SecureFs {
+    private final FileSystem fs;
+    private final AccessPolicy policy;
+    SecureFs(FileSystem fs, AccessPolicy policy) { this.fs = fs; this.policy = policy; }
+    void putFile(Principal who, String path, String content) { policy.check(who, path, Access.WRITE); fs.putFile(path, content); }
+    String read(Principal who, String path) { policy.check(who, path, Access.READ); return fs.readString(path); }
+    void delete(Principal who, String path, boolean recursive) { policy.check(who, path, Access.WRITE); fs.delete(path, recursive); }
+}
+
+// ---- ext: trash and restore -- delete grows a life cycle, built out of move
+/**
+ * "Make delete recoverable" means a file has states, not a boolean. Deleting becomes a move into a hidden
+ * directory: the name leaves the visible tree, the bytes survive, restoring is the move back, and purging is the
+ * only thing that actually frees memory. Every step reuses a method that already exists.
+ */
+final class Trash {
+    private record Item(String originalPath, long deletedAtMs) {}
+    private final FileSystem fs;
+    private final Map<String, Item> items = new LinkedHashMap<>();
+    private final AtomicLong ids = new AtomicLong();
+    Trash(FileSystem fs) { this.fs = fs; fs.mkdirs("/.trash"); }
+
+    /** LIVE -> TRASHED: the name moves out of the visible tree and the bytes stay exactly where they were. */
+    String delete(String path, long nowMs) {
+        String id = "t" + ids.incrementAndGet();
+        fs.move(path, "/.trash/" + id);
+        items.put(id, new Item(path, nowMs));
+        return id;
+    }
+    /** TRASHED -> LIVE: the same move, backwards. */
+    void restore(String id) {
+        Item it = items.remove(id);
+        if (it == null) throw new NotFoundException("/.trash/" + id);
+        fs.move("/.trash/" + id, it.originalPath());
+    }
+    /** TRASHED -> PURGED: the only step that frees bytes. A sweeper calls this on a timer. */
+    int purge(long olderThanMs, long nowMs) {
+        int n = 0;
+        for (String id : new ArrayList<>(items.keySet())) {
+            if (nowMs - items.get(id).deletedAtMs() < olderThanMs) continue;
+            fs.delete("/.trash/" + id, true);
+            items.remove(id);
+            n++;
+        }
+        return n;
+    }
+    List<String> ids() { return new ArrayList<>(items.keySet()); }
+}
+
+// ---- ext: random access and big files -- one byte[] becomes a list of chunks
+/**
+ * Replace a file's single array with a list of fixed chunks and three costs change: append stops copying the
+ * whole file (amortised O(1) instead of O(n)), a write at an offset touches one chunk, and a ten-megabyte file
+ * stops needing ten contiguous megabytes. Read, size and version keep their meaning, so nothing above notices.
+ */
+final class ChunkedContent {
+    private final int chunkSize;
+    private final List<byte[]> chunks = new ArrayList<>();
+    private long size = 0;
+    ChunkedContent(int chunkSize) { this.chunkSize = chunkSize; }
+
+    long size() { return size; }
+    /** Amortised O(1): fill the tail chunk, then add chunks. No copy of what is already there. */
+    void append(byte[] b) {
+        int off = 0;
+        while (off < b.length) {
+            int inTail = (int) (size % chunkSize);
+            if (inTail == 0) chunks.add(new byte[chunkSize]);
+            byte[] tail = chunks.get(chunks.size() - 1);
+            int n = Math.min(chunkSize - inTail, b.length - off);
+            System.arraycopy(b, off, tail, inTail, n);
+            off += n; size += n;
+        }
+    }
+    /** A write at an offset inside the file: find the chunk, write into it. O(bytes written), not O(file). */
+    void writeAt(long offset, byte[] b) {
+        if (offset + b.length > size) throw new FsException("write past the end of the file");
+        int off = 0;
+        while (off < b.length) {
+            long pos = offset + off;
+            byte[] chunk = chunks.get((int) (pos / chunkSize));
+            int in = (int) (pos % chunkSize);
+            int n = Math.min(chunkSize - in, b.length - off);
+            System.arraycopy(b, off, chunk, in, n);
+            off += n;
+        }
+    }
+    /** Read a window. The caller never learns how many chunks it crossed. */
+    byte[] read(long offset, int len) {
+        byte[] out = new byte[(int) Math.min(len, size - offset)];
+        for (int i = 0; i < out.length; i++) {
+            long pos = offset + i;
+            out[i] = chunks.get((int) (pos / chunkSize))[(int) (pos % chunkSize)];
+        }
+        return out;
+    }
+}
+
+// ---- ext: many readers, one writer -- and the optimistic write for a human in the loop
+/**
+ * A file whose bytes are under a ReadWriteLock instead of a plain lock: any number of readers at once, one
+ * writer alone. Worth it when reads dominate; the plain lock in Main is the simpler default.
+ *
+ * compareAndWrite is the other half. You cannot hold a lock across a human editing a config for thirty seconds,
+ * so the caller reads a version, edits at leisure, and writes back only if nobody else got there first.
+ */
+final class RwFile {
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    private byte[] content = new byte[0];
+    private final AtomicLong version = new AtomicLong();
+
+    /** Many of these run at the same time. */
+    byte[] read() { lock.readLock().lock(); try { return content.clone(); } finally { lock.readLock().unlock(); } }
+    long version() { return version.get(); }
+    /** Optimistic: false means somebody else wrote while you were thinking, so re-read and try again. */
+    boolean compareAndWrite(long expectedVersion, byte[] bytes) {
+        lock.writeLock().lock();
+        try {
+            if (version.get() != expectedVersion) return false;
+            content = bytes.clone(); version.incrementAndGet();
+            return true;
+        } finally { lock.writeLock().unlock(); }
+    }
+}
+
+// ---- ext: persistence -- a write-ahead journal, and a replay that rebuilds the tree
+/** The mutations worth replaying. Reads are not in the list, which is why the journal stays small. */
+enum OpKind { MKDIRS, PUT, APPEND, MOVE, DELETE }
+
+/** One line of the journal: what was done, to what, with what. Ordered by seq. */
+record JournalEntry(long seq, OpKind op, String path, String arg) {}
+
+/** Where the journal lives. In memory here; a file, then a replicated log, later. */
+interface Journal {
+    void append(JournalEntry e);
+    List<JournalEntry> replay();
+}
+
+/** The in-memory journal, which is enough to prove the replay is correct. */
+final class InMemoryJournal implements Journal {
+    private final List<JournalEntry> lines = new CopyOnWriteArrayList<>();
+    @Override public void append(JournalEntry e) { lines.add(e); }
+    @Override public List<JournalEntry> replay() { return List.copyOf(lines); }
+}
+
+/**
+ * The file system with a write-ahead log in front of it. Every mutation is written to the journal and then
+ * applied, under one lock so the journal's order is the order things really happened. Crash, restart, replay the
+ * journal into a fresh file system and you are exactly where you were.
+ */
+final class JournaledFs {
+    private final FileSystem fs;
+    private final Journal journal;
+    private final AtomicLong seq = new AtomicLong();
+    private final ReentrantLock order = new ReentrantLock();
+    JournaledFs(FileSystem fs, Journal journal) { this.fs = fs; this.journal = journal; }
+
+    void mkdirs(String path) { run(OpKind.MKDIRS, path, null, () -> fs.mkdirs(path)); }
+    void putFile(String path, String content) { run(OpKind.PUT, path, content, () -> fs.putFile(path, content)); }
+    void append(String path, String more) { run(OpKind.APPEND, path, more, () -> fs.append(path, more)); }
+    void move(String from, String to) { run(OpKind.MOVE, from, to, () -> fs.move(from, to)); }
+    void delete(String path, boolean recursive) { run(OpKind.DELETE, path, String.valueOf(recursive), () -> fs.delete(path, recursive)); }
+
+    /** Journal first, then apply. A crash between the two replays one extra op, and every op here is idempotent. */
+    private void run(OpKind op, String path, String arg, Runnable body) {
+        order.lock();
+        try { journal.append(new JournalEntry(seq.incrementAndGet(), op, path, arg)); body.run(); }
+        finally { order.unlock(); }
+    }
+
+    /** Rebuild a file system from the log. This is what "survive a restart" means. */
+    static FileSystem replay(Journal journal) {
+        FileSystem out = new FileSystem();
+        for (JournalEntry e : journal.replay()) {
+            switch (e.op()) {
+                case MKDIRS -> out.mkdirs(e.path());
+                case PUT -> out.putFile(e.path(), e.arg());
+                case APPEND -> out.append(e.path(), e.arg());
+                case MOVE -> out.move(e.path(), e.arg());
+                case DELETE -> out.delete(e.path(), Boolean.parseBoolean(e.arg()));
+            }
+        }
+        return out;
+    }
+}
+
+// ---- ext: a slow watcher must not freeze the namespace
+/**
+ * Events are produced in order inside the write path and handed to this wrapper after the unlock; it queues them
+ * onto its own thread. A subscriber that takes two seconds now delays only itself.
+ */
+final class AsyncWatcher implements FsWatcher {
+    private final ExecutorService pool;
+    private final FsWatcher delegate;
+    AsyncWatcher(ExecutorService pool, FsWatcher delegate) { this.pool = pool; this.delegate = delegate; }
+    @Override public void onEvent(FsEvent e) {
+        pool.submit(() -> { try { delegate.onEvent(e); } catch (RuntimeException ignored) { } });
+    }
+}
+
+// ---- ext: millions of files -- a page of names, and top-N without sorting the tree
+/**
+ * The read APIs a big tree forces. ls returns a page and a cursor instead of two hundred thousand names, and
+ * "the ten biggest files under /var" is the same single walk folded into a bounded heap -- never a sort of
+ * everything.
+ */
+final class BigTree {
+    /** One page of a directory listing: the names after the cursor, plus the next cursor or null. */
+    record Page(List<String> names, String next) {}
+    static Page page(FileSystem fs, String dir, String after, int n) {
+        List<String> all = fs.ls(dir);
+        int from = 0;
+        if (after != null) while (from < all.size() && all.get(from).compareTo(after) <= 0) from++;
+        List<String> names = all.subList(from, Math.min(from + n, all.size()));
+        String next = from + n < all.size() ? names.get(names.size() - 1) : null;
+        return new Page(List.copyOf(names), next);
+    }
+
+    /**
+     * The n biggest files under a path, in one walk and n slots of memory. The predicate is called once per node
+     * under the read lock, so a predicate that records instead of answering is a fold over the walk; if that
+     * feels like abuse, the honest version makes walk() public and takes a visitor.
+     */
+    static List<String> topNBySize(FileSystem fs, String from, int n) {
+        PriorityQueue<Map.Entry<String, Long>> heap = new PriorityQueue<>(Map.Entry.comparingByValue());
+        fs.find(from, (path, node) -> {
+            if (node.isDirectory()) return false;
+            heap.add(Map.entry(path, node.sizeBytes()));
+            if (heap.size() > n) heap.poll();                       // the heap never holds more than n
+            return false;
+        });
+        List<String> out = new ArrayList<>();
+        while (!heap.isEmpty()) out.add(0, heap.poll().getKey());
+        return out;
+    }
+}
+
+// ---- ext: one namespace lock is the bottleneck -- stripe it, parent first
+/**
+ * Rung two of the ladder. Replace the single namespace write lock with a lock per directory, always taken from
+ * the root downwards, so two threads that lock a chain can never hold them in opposite orders and deadlock. Two
+ * mkdirs in unrelated subtrees now overlap; the cost is a longer, more fragile rule to keep in your head, which
+ * is why the single lock comes first and this comes only when the arithmetic says so.
+ */
+final class StripedNamespace {
+    private final Map<String, ReentrantLock> locks = new ConcurrentHashMap<>();
+    private ReentrantLock lockFor(String path) { return locks.computeIfAbsent(path, p -> new ReentrantLock()); }
+
+    /** Take every lock from the root down to this path, in that order, run the body, release in reverse. */
+    void withChainLocked(String path, Runnable body) {
+        FsPath p = FsPath.of(path);
+        List<ReentrantLock> held = new ArrayList<>();
+        FsPath cur = FsPath.ROOT;
+        try {
+            held.add(lockFor(cur.toString()));
+            for (int i = 0; i < p.depth(); i++) { cur = cur.child(p.segment(i)); held.add(lockFor(cur.toString())); }
+            for (ReentrantLock l : held) l.lock();                  // parent first, always
+            body.run();
+        } finally {
+            for (int i = held.size() - 1; i >= 0; i--) if (held.get(i).isHeldByCurrentThread()) held.get(i).unlock();
+        }
+    }
+}
+
+/** Runs every extension above so that none of them can quietly rot. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        long now = 1_700_000_000_000L;
+
+        // symlinks, and a loop that ends in an error instead of a hang
+        DirNode root = new DirNode("", now);
+        DirNode real = new DirNode("real", now); root.put(real);
+        FileNode note = new FileNode("note.txt", now); note.lock();
+        try { note.setContentLocked("through a link".getBytes(StandardCharsets.UTF_8), now); } finally { note.unlock(); }
+        real.put(note);
+        root.put(new SymlinkNode("shortcut", "/real", now));
+        System.out.println("symlink: /shortcut/note.txt -> \""
+            + new String(((FileNode) SymlinkResolver.resolve(root, FsPath.of("/shortcut/note.txt"))).read(), StandardCharsets.UTF_8) + "\"");
+        root.put(new SymlinkNode("a", "/b", now));
+        root.put(new SymlinkNode("b", "/a", now));
+        try { SymlinkResolver.resolve(root, FsPath.of("/a/x")); }
+        catch (FsException e) { System.out.println("symlink loop: " + e.getMessage()); }
+
+        // hard links: two names, one set of bytes
+        Inode shared = new Inode("one copy of the bytes".getBytes(StandardCharsets.UTF_8));
+        LinkedFile n1 = new LinkedFile("original.txt", shared, now), n2 = new LinkedFile("backup.txt", shared, now);
+        System.out.println("hard links: " + shared.links() + " names, du counts " + LinkedFile.du(List.of(n1, n2))
+            + " bytes once (not " + (n1.sizeBytes() + n2.sizeBytes()) + ")");
+        System.out.println("unlink one: bytes freed=" + shared.unlink() + ", unlink the other: bytes freed=" + shared.unlink());
+
+        // permissions: the same call, two users
+        FileSystem fs = new FileSystem();
+        fs.mkdirs("/etc");
+        fs.putFile("/etc/passwd", "root:x:0");
+        OwnerMode mode = new OwnerMode();
+        mode.chown("/etc/passwd", "root", true, false);
+        SecureFs secure = new SecureFs(fs, mode);
+        System.out.println("permissions: harish may read -> \"" + secure.read(Principal.of("harish"), "/etc/passwd") + "\"");
+        try { secure.putFile(Principal.of("harish"), "/etc/passwd", "harish:x:0"); }
+        catch (FsException e) { System.out.println("permissions: " + e.getMessage()); }
+
+        // trash, restore, purge
+        fs.mkdirs("/home/h");
+        fs.putFile("/home/h/report.txt", "quarterly numbers");
+        Trash trash = new Trash(fs);
+        String id = trash.delete("/home/h/report.txt", now);
+        System.out.println("trash: visible=" + fs.exists("/home/h/report.txt") + ", bytes still there=" + fs.exists("/.trash/" + id));
+        trash.restore(id);
+        System.out.println("restore: \"" + fs.readString("/home/h/report.txt") + "\" back at its old path");
+        trash.delete("/home/h/report.txt", now);
+        System.out.println("purge after a day: " + trash.purge(86_400_000L, now + 2 * 86_400_000L) + " item freed, trash now " + trash.ids());
+
+        // chunked content: append without copying the file, and a write at an offset
+        ChunkedContent big = new ChunkedContent(8);
+        for (int i = 0; i < 5; i++) big.append("abcdefgh".getBytes(StandardCharsets.UTF_8));
+        big.writeAt(10, "ZZ".getBytes(StandardCharsets.UTF_8));
+        System.out.println("chunked: size=" + big.size() + ", bytes 8..16 = \""
+            + new String(big.read(8, 8), StandardCharsets.UTF_8) + "\"");
+
+        // many readers one writer, and the optimistic write
+        RwFile cfg = new RwFile();
+        cfg.compareAndWrite(0, "timeout=30".getBytes(StandardCharsets.UTF_8));
+        long seen = cfg.version();
+        cfg.compareAndWrite(seen, "timeout=60".getBytes(StandardCharsets.UTF_8));           // somebody else got there first
+        System.out.println("compareAndWrite with a stale version: " + cfg.compareAndWrite(seen, "timeout=90".getBytes(StandardCharsets.UTF_8))
+            + ", the file still says \"" + new String(cfg.read(), StandardCharsets.UTF_8) + "\"");
+
+        // persistence: journal, crash, replay
+        Journal journal = new InMemoryJournal();
+        JournaledFs jfs = new JournaledFs(new FileSystem(), journal);
+        jfs.mkdirs("/var/log");
+        jfs.putFile("/var/log/app.log", "started");
+        jfs.append("/var/log/app.log", " | ready");
+        jfs.move("/var/log/app.log", "/var/log/app.1.log");
+        FileSystem rebuilt = JournaledFs.replay(journal);
+        System.out.println("replayed " + journal.replay().size() + " journal lines -> \"" + rebuilt.readString("/var/log/app.1.log") + "\"");
+
+        // a slow watcher delays only itself
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch heard = new CountDownLatch(1);
+        rebuilt.watch("/var", new AsyncWatcher(pool, e -> { try { Thread.sleep(50); } catch (InterruptedException ignored) { } heard.countDown(); }));
+        long t0 = System.nanoTime();
+        rebuilt.putFile("/var/log/slow.txt", "x");
+        long writeUs = (System.nanoTime() - t0) / 1000;
+        heard.await(2, TimeUnit.SECONDS);
+        pool.shutdown();
+        System.out.println("async watcher: the write returned in " + writeUs + " us although the subscriber sleeps 50 ms");
+
+        // big trees: a page of names, and the biggest files in one walk
+        FileSystem farm = new FileSystem();
+        farm.mkdirs("/var/data");
+        for (int i = 0; i < 12; i++) farm.putFile("/var/data/f" + (char) ('a' + i) + ".bin", "x".repeat(i + 1));
+        BigTree.Page p1 = BigTree.page(farm, "/var/data", null, 5);
+        System.out.println("page 1 of ls: " + p1.names() + " next cursor=" + p1.next());
+        System.out.println("page 2 of ls: " + BigTree.page(farm, "/var/data", p1.next(), 5).names());
+        System.out.println("3 biggest under /var: " + BigTree.topNBySize(farm, "/var", 3));
+
+        // striped locks, parent first
+        StripedNamespace striped = new StripedNamespace();
+        striped.withChainLocked("/var/data", () -> System.out.println("striped: held /, /var and /var/data, in that order"));
+    }
+}

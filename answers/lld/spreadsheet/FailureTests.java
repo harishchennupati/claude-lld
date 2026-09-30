@@ -1,0 +1,207 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Targeted failure tests: each block proves one claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+    static double numOf(Sheet s, String a1) { Double d = Evaluator.num(s.get(a1)); return d == null ? Double.NaN : d; }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. fifty threads write fifty DIFFERENT cells that all feed one total: no edit may be lost, and
+        //    when the dust settles the total must equal the cells, or the sheet is arithmetically impossible.
+        Sheet grid = Sheet.standard();
+        for (int i = 1; i <= 50; i++) grid.set("A" + i, "0");
+        grid.set("B1", "=SUM(A1:A50)");
+        grid.set("B2", "=B1*2");
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int i = 1; i <= 50; i++) {
+            final int n = i;
+            fs.add(pool.submit(() -> { go.await(); return grid.set("A" + n, String.valueOf(n)); }));
+        }
+        go.countDown();
+        int landed = 0;
+        for (Future<?> f : fs) { f.get(); landed++; }
+        check(landed == 50, "50 concurrent edits to 50 different cells all landed");
+        double sum = 0;
+        for (int i = 1; i <= 50; i++) sum += numOf(grid, "A" + i);
+        check(sum == 1275, "every individual cell holds what its thread wrote: 1 + 2 + ... + 50 = " + (long) sum);
+        check(numOf(grid, "B1") == 1275, "the total is consistent with the cells it reads: B1 = " + grid.get("B1").display());
+        check(numOf(grid, "B2") == 2550, "and the formula that reads the total is consistent too: B2 = " + grid.get("B2").display());
+
+        // 2. eight typists on ONE cell. get() then set() is two steps with a gap; update() is one step
+        //    under one write lock. Only the boundary of the critical section changes.
+        check(increments(true) == 2000, "update(): 8 threads x 250 increments = exactly 2000");
+        long lossy = increments(false);
+        check(lossy <= 2000, "get() then set(): " + lossy + " of 2000 (the gap between the two calls loses edits)");
+        pool.shutdown();
+
+        // 3. a circular reference is refused, and the sheet is byte-identical afterwards: same text, same
+        //    values, same number of cells, same number of edges. A rejected edit leaves no trace at all.
+        Sheet s = Sheet.standard();
+        s.set("A1", "10"); s.set("A2", "20"); s.set("A3", "=A1+A2"); s.set("B1", "=SUM(A1:A3)");
+        String rawBefore = s.raw("A1");
+        String valuesBefore = s.get("A1").display() + "|" + s.get("A3").display() + "|" + s.get("B1").display();
+        int cellsBefore = s.cellCount(), edgesBefore = s.edgeCount();
+        try { s.set("A1", "=A3"); check(false, "an edit that makes a loop must be refused"); }
+        catch (CircularReferenceException e) { check(e.path().size() >= 3, "cycle refused and named: " + e.getMessage()); }
+        check(s.raw("A1").equals(rawBefore), "the refused edit did not change the cell's text");
+        check(valuesBefore.equals(s.get("A1").display() + "|" + s.get("A3").display() + "|" + s.get("B1").display()),
+                "the refused edit did not change a single value");
+        check(s.cellCount() == cellsBefore && s.edgeCount() == edgesBefore,
+                "and it did not leave a stray cell or a stray edge: " + s.cellCount() + " cells, " + s.edgeCount() + " edges");
+        try { s.set("A9", "=A9"); check(false, "a cell that reads itself must be refused too"); }
+        catch (CircularReferenceException e) { check(true, "a self-reference is refused: " + e.getMessage()); }
+
+        // 4. one edit recomputes the affected subgraph only, each cell exactly once, after its inputs.
+        s.set("C1", "=A1/2"); s.set("C2", "=C1+1"); s.set("B2", "=IF(B1>50,\"BIG\",\"SMALL\")");
+        List<String> order = s.set("A1", "25");
+        check(order.get(0).equals("A1"), "the edited cell comes first: " + order);
+        check(new HashSet<>(order).size() == order.size(), "every cell appears exactly once: " + order);
+        check(!order.contains("A2"), "A2 does not read A1, so it never re-evaluated");
+        Map<String, List<String>> reads = Map.of("A3", List.of("A1", "A2"), "B1", List.of("A1", "A2", "A3"),
+                "B2", List.of("B1"), "C1", List.of("A1"), "C2", List.of("C1"));
+        check(inDependencyOrder(order, reads), "every cell was recomputed after everything it reads: " + order);
+        check(numOf(s, "A3") == 45 && numOf(s, "B1") == 90 && numOf(s, "C2") == 13.5,
+                "and the answers are right: A3=" + s.get("A3").display() + " B1=" + s.get("B1").display() + " C2=" + s.get("C2").display());
+
+        // 5. a range: SUM over it, blanks skipped, COUNT counts only numbers -- and a range past the cap is
+        //    refused before the lock is taken, so a fat-fingered =SUM(A1:Z10000) cannot stall the sheet.
+        Sheet r = Sheet.standard();
+        r.set("A1", "5"); r.set("A2", "7"); r.set("A4", "hello");
+        r.set("B1", "=SUM(A1:A5)"); r.set("B2", "=COUNT(A1:A5)"); r.set("B3", "=AVERAGE(A1:A2)");
+        check(numOf(r, "B1") == 12, "SUM over a five-cell range with blanks and a label in it = 12");
+        check(numOf(r, "B2") == 2, "COUNT sees the blanks and the text and counts neither: " + r.get("B2").display());
+        check(numOf(r, "B3") == 6, "AVERAGE of 5 and 7 = " + r.get("B3").display());
+        int before = r.cellCount();
+        try { r.set("C1", "=SUM(A1:Z10000)"); check(false, "a range past the cap must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "a 260,000-cell range is refused: " + e.getMessage()); }
+        check(r.cellCount() == before, "and the refused monster range wrote nothing");
+
+        // 6. an error is a value: it caches, it propagates, it does not abort the recalculation of unrelated
+        //    cells in the same pass, and it heals the moment its precedent is fixed.
+        Sheet e = Sheet.standard();
+        e.set("A1", "10");
+        e.set("C1", "=A1/B9"); e.set("C2", "=SUM(C1,1)"); e.set("D1", "=A1+1");
+        check(e.get("C1").display().equals("#DIV/0!"), "dividing by a blank cell is #DIV/0!, a value, not an exception");
+        check(e.get("C2").display().equals("#DIV/0!"), "and it propagates into everything that reads it");
+        List<String> pass = e.set("A1", "20");
+        check(numOf(e, "D1") == 21, "the unrelated cell in the SAME pass still recomputed: D1 = " + e.get("D1").display());
+        check(pass.contains("C1") && pass.contains("D1"), "the error cell did not abort the pass: " + pass);
+        e.set("B9", "2");
+        check(numOf(e, "C1") == 10 && numOf(e, "C2") == 11, "fixing the precedent heals both cells: C1=" + e.get("C1").display());
+
+        // 7. deleting a referenced cell gives #REF! and typing into it again heals; and a rewired formula
+        //    really drops its old edge, so the classic leak -- recomputing forever off a cell you no longer read.
+        Sheet d = Sheet.standard();
+        d.set("A1", "5"); d.set("B1", "=A1*2"); d.set("D1", "=A1");
+        check(numOf(d, "B1") == 10, "B1 reads A1 and is 10");
+        d.deleteCell("A1");
+        check(d.get("B1").display().equals("#REF!"), "deleting the cell they point at gives #REF!, not a silent zero");
+        d.set("A1", "7");
+        check(numOf(d, "B1") == 14, "typing into that address again heals every dependent: B1 = " + d.get("B1").display());
+        d.set("D1", "=Z9");                                        // D1 no longer reads A1
+        List<String> after = d.set("A1", "9");
+        check(!after.contains("D1"), "the old edge is gone: editing A1 no longer recomputes D1. Order = " + after);
+        check(after.contains("B1"), "and the edge that is still real survived: B1 recomputed");
+
+        // 8. a listener that throws cannot break an edit that already happened, and text where a number
+        //    belongs is a #VALUE! cell rather than an exception out of the engine.
+        Sheet n = Sheet.standard();
+        List<String> heard = Collections.synchronizedList(new ArrayList<>());
+        n.addListener(c -> { throw new RuntimeException("a chart that blew up"); });
+        n.addListener(c -> heard.add(c.ref().a1()));
+        n.set("A1", "3");
+        n.set("A2", "=A1*2");
+        check(numOf(n, "A2") == 6, "the edits landed although the first listener threw every time");
+        check(heard.contains("A1") && heard.contains("A2"), "and the second listener still heard them: " + heard);
+        n.set("A1", "hello");
+        check(n.get("A2").display().equals("#VALUE!"), "text where a number belongs is a #VALUE! cell, not a crash");
+        check(n.get("A1").display().equals("hello"), "and the text cell itself is perfectly fine");
+        n.set("A1", "4");
+        check(numOf(n, "A2") == 8, "and it heals: A2 = " + n.get("A2").display());
+        long[] fixed = { 1_700_000_000_000L };
+        Sheet t = Sheet.standard(() -> fixed[0]);
+        t.set("A1", "=NOW()");
+        t.set("A2", "=A1+0");
+        check(numOf(t, "A1") == 1_700_000_000_000L, "time is injected: NOW() is whatever the test's clock says");
+        check(t.lastEditMs() == fixed[0], "and the edit stamp comes from the same injected clock");
+        fixed[0] += 60_000;
+        t.set("A1", "=NOW()");
+        check(numOf(t, "A2") == 1_700_000_060_000L, "re-posting a volatile cell a minute later moves it and its dependents");
+
+        // 9. a structural edit: inserting a row must rewrite every formula below it, or the sheet quietly
+        //    prints the wrong total; deleting a row must shrink a range that spanned it and say #REF! only
+        //    where a formula really pointed INTO it. And a copied formula moves its relative references only.
+        Sheet g = Sheet.standard();
+        g.set("A1", "10"); g.set("A2", "20"); g.set("A3", "30");
+        g.set("B1", "=SUM(A1:A3)"); g.set("C1", "=A2*10");
+        check(numOf(g, "B1") == 60 && numOf(g, "C1") == 200, "before: B1 = 60 and C1 = 200");
+        GridEditor.insertRow(g, 2);
+        check(g.raw("B1").equals("=SUM(A1:A4)"), "inserting a row grew the range with it: B1 is now " + g.raw("B1"));
+        check(g.raw("C1").equals("=A3*10"), "and the single reference followed the cell it pointed at: C1 is now " + g.raw("C1"));
+        check(numOf(g, "B1") == 60 && numOf(g, "C1") == 200, "so both values are exactly what they were: no silent wrong total");
+        check(g.raw("A2").isEmpty(), "and the inserted row really is blank");
+        GridEditor.deleteRow(g, 2);
+        check(g.raw("B1").equals("=SUM(A1:A3)") && numOf(g, "B1") == 60, "deleting the blank row put it back: " + g.raw("B1"));
+        GridEditor.deleteRow(g, 2);                                // now delete a row that had a cell in it
+        check(g.raw("B1").equals("=SUM(A1:A2)") && numOf(g, "B1") == 40,
+                "a range that merely spanned the deleted row shrinks: " + g.raw("B1") + " = " + g.get("B1").display());
+        check(g.raw("C1").equals("=#REF!*10") && g.get("C1").display().equals("#REF!"),
+                "a formula that pointed INTO it says #REF! in the bar and in the box: " + g.raw("C1"));
+
+        Sheet cp = Sheet.standard();
+        cp.set("A1", "2"); cp.set("B1", "3"); cp.set("A2", "20"); cp.set("B2", "30");
+        cp.set("C1", "=A1+B1"); cp.set("D1", "=$A$1+B1"); cp.set("E1", "=(A1+B1)*2");
+        GridEditor.copy(cp, "C1", "C2"); GridEditor.copy(cp, "D1", "D2"); GridEditor.copy(cp, "E1", "E2");
+        check(cp.raw("C2").equals("=A2+B2") && numOf(cp, "C2") == 50, "a copied formula moves its references: " + cp.raw("C2"));
+        check(cp.raw("D2").equals("=$A$1+B2") && numOf(cp, "D2") == 32, "an anchored reference does not move: " + cp.raw("D2"));
+        check(cp.raw("E2").equals("=(A2+B2)*2") && numOf(cp, "E2") == 100, "and the brackets survive the round trip: " + cp.raw("E2"));
+
+        Sheet wide = Sheet.standard();
+        wide.set("B1", "=SUM(A1:A1000)");
+        BlockRangeIndex idx = new BlockRangeIndex();
+        idx.add(CellRef.parse("B1"), new Rect(0, 0, 999, 0));
+        check(wide.edgeCount() == 1000, "one edge per cell: a 1000-cell range is " + wide.edgeCount() + " edges in the plain graph");
+        check(idx.entries() == 16, "as 64-cell blocks it is " + idx.entries() + " entries, and the lookup is still one map get");
+        check(idx.readersOf(CellRef.parse("A500")).contains(CellRef.parse("B1")), "and B1 is still found as a reader of A500");
+        check(idx.readersOf(CellRef.parse("B500")).isEmpty(), "while B500, which the range does not cover, has no readers");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+
+    /** Eight threads adding 1 to D1, 250 times each: as one locked update(), or as get() then set(). */
+    static long increments(boolean atomic) throws Exception {
+        Sheet s = Sheet.standard();
+        s.set("D1", "0");
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> fs = new ArrayList<>();
+        for (int t = 0; t < 8; t++) fs.add(pool.submit(() -> {
+            go.await();
+            for (int k = 0; k < 250; k++) {
+                if (atomic) s.update("D1", v -> v + 1);
+                else s.set("D1", new Num(Evaluator.num(s.get("D1")) + 1).display());
+            }
+            return null;
+        }));
+        go.countDown();
+        for (Future<?> f : fs) f.get();
+        pool.shutdown();
+        return (long) (double) Evaluator.num(s.get("D1"));
+    }
+
+    /** Did every cell in the recalculation order come after every cell it reads that is also in the order? */
+    static boolean inDependencyOrder(List<String> order, Map<String, List<String>> reads) {
+        for (int i = 0; i < order.size(); i++)
+            for (String p : reads.getOrDefault(order.get(i), List.of())) {
+                int j = order.indexOf(p);
+                if (j > i) return false;
+            }
+        return true;
+    }
+}

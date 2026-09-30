@@ -1,0 +1,816 @@
+# Read-Write Lock LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"mt-rwlock/Main.java").read_text()
+ext   = (H/"mt-rwlock/Extensions.java").read_text()
+tests = (H/"mt-rwlock/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED  = "#ff6b6b"
+WARN = "var(--warn)"
+
+# ---------- small helpers for the thread-and-time pictures (moves 4, 6, 7)
+def axis(x0, x1, y, ticks):
+    s = '<path d="M%s %s H%s" stroke="var(--line)" stroke-width="1.2"/>' % (x0, y, x1)
+    for tx, lab in ticks:
+        s += '<path d="M%s %s V%s" stroke="var(--line)"/>' % (tx, y, y + 5)
+        s += _tx(tx, y + 19, lab, "var(--muted)", 10)
+    return s
+
+def band(x, y, w, h, label, kind="work", fs=10):
+    fill   = {"work": "var(--bg3)", "hold": "#12302a", "wait": "none", "excl": "#2d2116"}[kind]
+    stroke = {"work": "var(--line)", "hold": "var(--acc)", "wait": "var(--muted)", "excl": WARN}[kind]
+    dash   = ' stroke-dasharray="4 3"' if kind == "wait" else ''
+    g = '<rect x="%s" y="%s" width="%s" height="%s" rx="3" fill="%s" stroke="%s" stroke-width="1.2"%s/>' % (
+        x, y, w, h, fill, stroke, dash)
+    if label:
+        col = "var(--muted)" if kind == "wait" else "var(--text)"
+        g += _tx(x + w / 2, y + h / 2 + 3.5, label, col, fs)
+    return g
+
+def lane(x, y, t, col="var(--acc2)"):
+    return _tx(x, y, t, col, 11, "end")
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("read", 30, [("a thread wants to read", "many of them, at once"),
+                      ("must I wait? ask the rule", "readers, writer, who is queued"),
+                      ("no: readers++ and go in", "under the mutex, as one step"),
+                      ("read; then readers--", "the last one out wakes a writer")]),
+        ("write", 165, [("a thread wants to write", "one at a time, alone"),
+                        ("must I wait? ask the rule", "any reader inside? any writer?"),
+                        ("no: the writer is me", "and nobody else is inside"),
+                        ("change it; then wake both", "both sides re-test and decide")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y + 31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k * 260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x + 240, y + 27, x + 260), True)
+pf += _ar("M555 84 V92", dash=True) + _bx(435, 92, 240, 44, "yes: park on okToRead", "woken when a writer releases", dash=True)
+pf += _ar("M555 219 V227", dash=True) + _bx(435, 227, 240, 44, "yes: park on okToWrite", "woken when readers hits zero", dash=True)
+pf += _tx(88, 300, "ask", "var(--acc)", 13)
+pf += _tx(175, 300, "at any moment, without touching the guarded data: how many readers are inside?  is a writer inside?  who is waiting, and who arrived first?",
+          "var(--text)", 12, "start")
+pf += _tx(615, 330, "many readers at the same time, OR one writer alone -- never both, whatever fairness rule is in force", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 345, pf)
+
+# one second, replayed
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("0.000s  six readers arrive", ["all six are admitted, ~65 ns each", "readers = 6, nobody is parked"], True),
+      ("0.002s  a writer arrives", ["six readers are inside, so it parks", "and new readers queue behind it"], False),
+      ("0.004s  the last reader leaves", ["readers hits 0: now a writer wakes", "it re-tests, then goes in alone"], True),
+      ("0.006s  the writer releases", ["both conditions are signalled", "the queued readers go in together"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k * 290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x + 125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x + 125)
+    pe += _card(x, 60, 250, 100, t, lines, acc=acc)
+P_EX = _mv(1230, 175, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Two handles, <code>readLock()</code> and <code>writeLock()</code>, each with <code>lock()</code> and <code>unlock()</code>, paired in a <code>finally</code>.</li>
+<li>Many readers inside at the same time; a writer inside alone.</li>
+<li>The fairness rule is chosen when the lock is built: readers first, writers first, or arrival order.</li>
+<li>Both sides are reentrant, and a writer may downgrade to a reader without letting anybody in between.</li>
+<li>A read-to-write upgrade is refused with an exception, because it is a deadlock waiting to happen.</li>
+<li><code>tryLock()</code> and <code>tryLock(timeout)</code> for a caller that will not wait.</li>
+<li>A parked thread can be interrupted, and leaves the lock exactly as it found it.</li>
+<li>The counters can be read for metrics and tests without guessing.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>The invariant, whatever rule is in force: never a reader beside a writer, never two writers.</li>
+<li>Acquire and release are O(1): a few field updates and one predicate call.</li>
+<li>No busy-waiting: a thread that cannot go in parks, and costs no CPU while it waits.</li>
+<li>No lost and no spurious wakeups: the predicate is tested and the parking done under one mutex, every predicate is re-tested in a <code>while</code> loop, and every change that could admit somebody signals.</li>
+<li>The fairness rule is swappable without touching one line of the blocking machinery.</li>
+<li>One source of truth: one <code>Sync</code>; the two handles own nothing at all.</li>
+<li>Nothing half-done: a thread that gives up leaves the counters exactly as they were.</li>
+<li>In memory, one JVM, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Write a read-write lock. Many threads read one document and a few change it; readers should not block '
+          'each other, a writer needs it to itself. Build it from a lock and conditions &mdash; no '
+          '<code>ReentrantReadWriteLock</code> &mdash; and make the fairness rule something I can change. I want '
+          'working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>Two kinds of thread want the same piece of data. Some '
+ 'only read it; some change it. Two reads never disagree with each other, so any number of them can happen at '
+ 'once. A change disagrees with everything, so it has to happen alone. That one sentence is the whole '
+ 'specification, and it tells you exactly what state you have to keep: how many readers are inside right now, and '
+ 'whether a writer is inside. Everything else is deciding who waits. The invariant is small and absolute: at any '
+ 'instant the data has many readers and no writer, or one writer and no readers, and never anything in between. '
+ 'Break it once and a reader sees a half-finished change &mdash; a torn read &mdash; which is the bug the lock '
+ 'exists to prevent.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: a class that compiles, with a '
+ '<code>main</code> that starts real threads and shows the invariant holding. The interviewer is watching for, in '
+ 'this order: the questions you ask before typing (reentrant? upgradable? may writers starve?); which classes '
+ 'exist and which one owns the counters; a read and a write end to end; the race &mdash; and notice the race here '
+ 'is in the lock\'s own bookkeeping, because <code>readers++</code> from two threads is itself a read-modify-write; '
+ 'the wait protocol, which is where most candidates lose the round (<code>while</code> not <code>if</code>, signal '
+ 'after the change, wake the side that can actually move); where the rule that will change lives; and what happens '
+ 'to a thread that is interrupted or times out while parked. Then the twists: fairness, reentrancy, downgrade, '
+ 'upgrade, timeouts, conditions, and when not to write this at all.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Reentrant? Can a thread that holds it take it again?</td><td>Yes on both sides; a writer may downgrade to a reader</td><td>An owner thread, a hold count, and a per-thread read count (moves 5, 6)</td></tr>'
+ '<tr><td>Is writer starvation acceptable?</td><td>No: a queued writer makes new readers wait</td><td>The fairness rule lives behind an interface (move 3)</td></tr>'
+ '<tr><td>May a reader upgrade to a writer?</td><td>No &mdash; refuse it loudly</td><td>A per-thread read count and an exception instead of a deadlock (move 6)</td></tr>'
+ '<tr><td>Blocking only, or also tryLock and timeouts?</td><td>Both, and the wait is interruptible</td><td>Three acquire modes and a deadline from an injected clock (moves 6, 9)</td></tr>'
+ '<tr><td>From scratch, or may I use <code>ReentrantReadWriteLock</code> or AQS?</td><td>From scratch: one <code>ReentrantLock</code> and two <code>Condition</code>s</td><td>The whole shape of the file; the <code>synchronized</code> build is a follow-up (moves 4, 8)</td></tr>'
+ '<tr><td>One JVM, or shared across processes?</td><td>One JVM, in memory</td><td>No store, no lease, no fencing token yet (move 12)</td></tr>'
+ '<tr><td>Read-heavy or write-heavy, and how long is a critical section?</td><td>Read-heavy; reads of about a millisecond; writes rare</td><td>Whether a read-write lock beats a plain mutex at all (move 8)</td></tr>'
+ '<tr><td>What is the lock actually guarding?</td><td>A document the caller owns; the lock never touches it</td><td>The lock has no opinion about the data, which is why it is reusable (move 1)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One second, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> many readers or one writer, never both; built on one '
+ '<code>ReentrantLock</code> with two conditions, not on <code>synchronized</code> and not on AQS; both sides '
+ 'reentrant, downgrade allowed, upgrade refused with an exception; the fairness rule handed in, with '
+ 'writers-first as the default; blocking waits are interruptible and there is a timed variant. Named as out of '
+ 'scope: strict FIFO with a real waiter queue, lock-free reads, anything across processes &mdash; each is a '
+ 'follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "many READERS share the DATA; one WRITER has it alone; a LOCK counts who is inside; a RULE decides who waits; a TICKET says who arrived first",
+          "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 170, "Reader / Writer", "threads, not classes", 0),
+                          (226, 186, "Sync", "readers, writer, queues", 1),
+                          (438, 204, "ReadLock / WriteLock", "handles: no state", 0),
+                          (668, 156, "AdmissionPolicy", "a rule: no state", 0),
+                          (850, 150, "ticket: long", "just a number", 0),
+                          (1026, 174, "the guarded data", "the caller's, not ours", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w / 2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a thread, a handle, an interface, a number, or somebody else's data", "var(--muted)", 11)
+m1 += _tx(615, 210, "exactly one box here is solid, and that is the point: a lock is three numbers and the discipline around them", "var(--acc)", 11)
+MV[1] = _mv(1230, 225, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("get in as a reader", "Sync  (owns the counters)", "sync.acquireRead(mode, timeoutMs)"),
+                                       ("get in as a writer, alone", "Sync  (owns the counters)", "sync.acquireWrite(mode, timeoutMs)"),
+                                       ("should this thread wait?", "AdmissionPolicy  (owns nothing)", "policy.readerMustWait(state, ticket)"),
+                                       ("let the next one in", "Sync  (owns the two conditions)", "okToRead / okToWrite.signalAll()")]):
+    y = 24 + k * 56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y + 22), True)
+    m2 += _bx(430, y, 420, 44, cls, "the class whose state it touches", acc=True) + _ar("M850 %s H890" % (y + 22), True)
+    m2 += _bx(890, y, 320, 44, meth, "the method")
+m2 += _tx(615, 268, "the rule is asked, never obeyed blindly: it returns true or false, and Sync does all the parking and all the waking", "var(--muted)", 11)
+m2 += _tx(615, 288, "notice what has no method of its own: the data. A lock that touched the data would only work for that one document", "var(--muted)", 11)
+MV[2] = _mv(1230, 302, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 70, 230, 90, "RwLock", "configure(rule, listeners)", acc=True)
+for k, (t, sub, impl) in enumerate([("AdmissionPolicy", "who waits when both want in", "ReaderPreference / WriterPreference / FairOrder"),
+                                    ("LockObserver", "metrics, logs, a starvation alarm", "Metrics, StarvationMeter, a lambda"),
+                                    ("Clock", "where a deadline comes from", "System::currentTimeMillis, or a test's fake")]):
+    y = 24 + k * 66
+    m3 += _ar("M260 115 H330 V%s H400" % (y + 22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 440, 44, impl, "the classes that can be handed in") + _ar("M760 %s H700" % (y + 22))
+m3 += _tx(615, 240, "dashed green = handed in. Sync never builds a rule, so \"make writers win\" is a different object, not an edited method", "var(--muted)", 11)
+m3 += _tx(615, 262, "and one rule wraps every other rule: SafePolicy(rule) adds \"never a reader beside a writer\" on top of whatever fairness says", "var(--acc)", 11)
+MV[3] = _mv(1230, 276, m3)
+
+# move 4: the race, on a time axis -- two threads, one counter
+m4 = _D
+m4 += _tx(615, 22, "two readers arrive at the same instant, and the counter they both change is the lock's OWN state", "var(--text)", 12.5)
+m4 += lane(150, 62, "thread A")
+m4 += lane(150, 112, "thread B")
+m4 += band(170, 46, 180, 26, "read readers = 3", "work")
+m4 += band(560, 46, 180, 26, "write readers = 4", "excl")
+m4 += band(365, 96, 180, 26, "read readers = 3", "work")
+m4 += band(755, 96, 180, 26, "write readers = 4", "excl")
+m4 += axis(160, 955, 140, [(260, "t1"), (455, "t2"), (650, "t3"), (845, "t4")])
+m4 += '<rect x="552" y="36" width="400" height="130" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(747, 182, "two readers came in and the count says 4, not 5", RED, 11)
+m4 += _tx(747, 200, "one of them is invisible: the last one out will think the lock is free", RED, 11)
+m4 += _tx(747, 218, "and let a writer in while somebody is still reading", RED, 11)
+m4 += _bx(980, 46, 230, 76, "one mutex", "read and write as ONE step", acc=True)
+m4 += _tx(1095, 142, "the fix is not a volatile int:", "var(--muted)", 10.5)
+m4 += _tx(1095, 160, "++ is read, add, write -- three steps.", "var(--muted)", 10.5)
+m4 += _tx(1095, 178, "volatile makes each step visible,", "var(--muted)", 10.5)
+m4 += _tx(1095, 196, "not the three of them one step.", "var(--muted)", 10.5)
+m4 += _tx(615, 244, "so the lock's own three numbers live behind one ReentrantLock, and every acquire and release takes it for about forty nanoseconds", "var(--muted)", 11)
+MV[4] = _mv(1230, 258, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("how many readers are inside?", "int readers", "O(1)"),
+                                      ("is a writer inside, and is it me?", "int writerHolds + Thread writerOwner", "O(1)"),
+                                      ("who is parked, and who arrived first?", "ArrayDeque&lt;Long&gt; per side, in arrival order", "O(1) peek"),
+                                      ("do I already hold the read side?", "ThreadLocal&lt;int[]&gt; readHolds", "O(1)"),
+                                      ("which fairness rule is this?", "EnumMap&lt;Policy, AdmissionPolicy&gt;", "O(1)")]):
+    y = 20 + k * 46
+    m5 += _bx(30, y, 360, 38, q, "") + _ar("M390 %s H450" % (y + 19), True)
+    m5 += _bx(450, y, 540, 38, shape, "", acc=True) + _ar("M990 %s H1030" % (y + 19), True) + _bx(1030, y, 170, 38, cost, "")
+m5 += _tx(615, 272, "the per-thread read count is not bookkeeping for its own sake: it is how a reentrant read is let straight in, and how an upgrade is caught", "var(--muted)", 11)
+m5 += _tx(615, 292, "the one step that is not O(1): pulling a cancelled waiter out of the middle of a queue, O(waiters). AQS keeps a linked node per waiter so even that is O(1)", "var(--muted)", 11)
+MV[5] = _mv(1230, 306, m5)
+
+# move 6: the life cycle, and the wait protocol drawn on a time axis
+m6 = _D
+m6 += _tx(615, 22, "the wait protocol, drawn: what happens between \"I cannot go in\" and \"I am in\"", "var(--text)", 12.5)
+m6 += lane(150, 62, "writer W")
+m6 += lane(150, 132, "reader R")
+# writer lane
+m6 += band(160, 46, 120, 28, "take mutex", "hold")
+m6 += band(284, 46, 150, 28, "readers = 2: wait", "excl")
+m6 += band(438, 46, 96, 28, "register", "hold")
+m6 += band(538, 46, 300, 28, "await(): the MUTEX IS RELEASED", "wait")
+m6 += band(842, 46, 120, 28, "woken, re-test", "hold")
+m6 += band(966, 46, 244, 28, "writer = me, unlock mutex", "hold")
+# reader lane
+m6 += band(160, 116, 378, 28, "R1 and R2 are inside, reading", "work")
+m6 += band(542, 116, 150, 28, "R1 releases: 2 -> 1", "hold")
+m6 += band(696, 116, 142, 28, "R2 releases: 1 -> 0", "hold")
+m6 += _ar("M767 144 V164", True)
+m6 += _tx(767, 182, "readers hits zero -> signal okToWrite, and only okToWrite: no reader's answer changed", "var(--acc)", 10.5)
+m6 += axis(160, 1210, 202, [(220, "take"), (613, "parked: costs nothing"), (900, "re-test"), (1088, "inside")])
+# the state machine
+m6 += '<rect x="20" y="244" width="560" height="168" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(300, 266, "three states, and the edge that is missing", "var(--text)", 12)
+m6 += _bx(40, 284, 140, 44, "FREE", "0 readers, no writer")
+m6 += _bx(240, 284, 150, 44, "READING", "n >= 1, no writer", acc=True)
+m6 += _bx(240, 352, 150, 44, "WRITING", "exclusive", acc=True)
+m6 += _ar("M180 300 H240", True) + _ar("M240 318 H180", True)
+m6 += _ar("M180 312 V374 H240", True)
+m6 += _tx(430, 294, "READING -> WRITING", RED, 10.5, "start") + _tx(430, 310, "has no edge: an upgrade", RED, 10.5, "start")
+m6 += _tx(430, 326, "must go through FREE", RED, 10.5, "start")
+m6 += _tx(430, 356, "WRITING -> READING is", "var(--acc)", 10.5, "start")
+m6 += _tx(430, 372, "legal: the downgrade,", "var(--acc)", 10.5, "start")
+m6 += _tx(430, 388, "same thread, nobody", "var(--acc)", 10.5, "start")
+m6 += _tx(430, 404, "gets in between", "var(--acc)", 10.5, "start")
+# the order
+m6 += '<rect x="610" y="244" width="600" height="168" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(910, 266, "the order inside acquire, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1 take the mutex -- nothing below is safe to read without it",
+                       "2 already holding? go straight in: a parked holder is a deadlock with itself",
+                       "3 take a ticket, then ask the rule: must I wait?",
+                       "4 if yes: register the ticket, then await IN A WHILE LOOP",
+                       "5 on waking, re-test -- the state may have moved again since the signal",
+                       "6 only now change readers / writer, and only then release the mutex",
+                       "7 tell the observers afterwards, outside the mutex, in a try/catch"]):
+    m6 += _tx(625, 290 + k * 17, l, "var(--text)" if k < 6 else "var(--muted)", 10.5, "start")
+MV[6] = _mv(1230, 426, m6)
+
+# move 7: what is inside the lock, for how long, and eight threads at once
+m7 = _D
+m7 += _tx(615, 22, "six readers and one writer on one document, over ten milliseconds of real time", "var(--text)", 12.5)
+def sliver(x, y, h=15):
+    return '<rect x="%s" y="%s" width="3" height="%s" fill="var(--acc)"/>' % (x, y, h)
+for i in range(6):
+    y = 40 + i * 22
+    w1, w2 = 300 - i * 6, 420 - i * 8
+    x2 = 626 + i * 5
+    m7 += lane(146, y + 12, "reader %d" % (i + 1), "var(--muted)")
+    m7 += band(160, y, w1, 15, "", "work") + sliver(160, y) + sliver(157 + w1, y)
+    m7 += band(x2, y, w2, 15, "", "work") + sliver(x2, y) + sliver(x2 + w2 - 3, y)
+m7 += lane(146, 194, "writer", "var(--warn)")
+m7 += band(500, 182, 118, 15, "exclusive", "excl", fs=9) + sliver(500, 182) + sliver(615, 182)
+m7 += band(470, 182, 26, 15, "", "wait")
+m7 += axis(160, 1200, 214, [(160, "0 ms"), (264, "1"), (472, "3"), (576, "4"), (784, "6"), (1096, "9")])
+m7 += _tx(300, 258, "the green sliver at each end of every band: the mutex, held about 40 nanoseconds", "var(--acc)", 11, "start")
+m7 += _tx(300, 276, "the band itself: the caller's read, one to three milliseconds -- a hundred thousand times longer", "var(--muted)", 11, "start")
+m7 += _tx(300, 294, "the six read bands overlap completely; the writer's band is alone, and every reader is out of the picture", "var(--muted)", 11, "start")
+m7 += _card(30, 312, 580, 116, "inside the mutex: about 40 nanoseconds",
+            ["three field reads and one call to the rule", "one increment, or one queue peek",
+              "no allocation, no I/O, no user code, nothing that can block"], acc=True)
+m7 += _card(630, 312, 580, 116, "outside the mutex: everything else",
+            ["the caller's read or write: microseconds to milliseconds",
+             "the observers: told after the unlock, inside a try/catch",
+             "a parked thread: asleep, costing nothing at all"])
+m7 += _tx(615, 448, "so \"is everything one at a time now?\" has a precise answer: the bookkeeping is, for forty nanoseconds; the reading is not, and that is the whole point of the lock", "var(--muted)", 11)
+MV[7] = _mv(1230, 462, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="590" height="206" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(315, 42, "is one mutex a bottleneck? measure it (OpenJDK 21, M-series laptop)", "var(--text)", 12)
+for k, l in enumerate(["one uncontended read lock + unlock: about 65 nanoseconds",
+                       "one uncontended write lock + unlock: about 25 nanoseconds",
+                       "the read path is the slower one -- it pays for a ThreadLocal lookup",
+                       "a service reading a config object 200,000 times a second:",
+                       "   200,000 x 40 ns = 8 ms of mutex per second = 0.8% busy",
+                       "eight threads doing nothing but acquire: 7.6 million a second,",
+                       "   and THAT is the ceiling where the mutex itself starts to hurt"]):
+    m8 += _tx(35, 66 + k * 23, l, "var(--muted)", 11, "start")
+m8 += _tx(920, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 keep everything slow outside the mutex", "done: only counters inside, observers after the unlock"),
+                              ("2 one compare-and-set on a packed int", "reader count in the top half, write holds in the bottom: that is AQS"),
+                              ("3 stop taking a lock on the read path", "StampedLock optimistic reads, a per-thread counter, or ConcurrentHashMap")]):
+    m8 += _bx(640, 58 + k * 56, 570, 48, t, sub, acc=(k == 0))
+m8 += _tx(615, 248, "the honest ending: the JDK's ReentrantReadWriteLock does that same read in 8 nanoseconds, and you should normally use it", "var(--acc)", 11)
+MV[8] = _mv(1230, 262, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("readers++ from two threads at once", "one mutex around read-and-write; test 3: 24,000 reads and 800 writes, no torn read"),
+                                ("if (mustWait) wait();", "while, not if -- re-test after every wake; test 9: 200 spurious wakes admit nobody"),
+                                ("notify() wakes the wrong side", "two conditions, signalAll on release; test 1: six readers wake and go in together"),
+                                ("a parked writer is interrupted", "drop its ticket in a finally, then wake both; test 7: readers get in again"),
+                                ("a rule written next year forgets exclusion", "SafePolicy wraps every rule; test 8: a reckless rule, still no overlap"),
+                                ("a reader asks for the write lock", "refused at once with an exception; test 6: 0 ms, not a silent deadlock"),
+                                ("unlock without lock, or a listener that throws", "IllegalMonitorStateException; observers after the unlock; test 8"),
+                                ("a stream of readers starves the writer", "writer preference, and a meter that says so; tests 4 and 5: the grant order")]):
+    y = 16 + k * 40
+    m9 += _bx(30, y, 360, 36, bad, "") + _ar("M390 %s H430" % (y + 18), True) + _bx(430, y, 770, 36, fix, "", acc=True)
+m9 += _tx(615, 358, "every claim on this page has a test: FailureTests.java runs 36 checks in under a second and must print ALL PASS", "var(--muted)", 11)
+m9 += _tx(615, 378, "and every one of them has a timeout, because a concurrency test that can hang is not a test -- it is a coin flip", "var(--acc)", 11)
+MV[9] = _mv(1230, 392, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 850)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface AdmissionPolicy { boolean readerMustWait(s, ticket); ... }", None), ("\"make writers win\" is a class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("this.policy = new SafePolicy(rule) inside configure()", None), ("no rule can put a reader beside a writer", None)],
+          [("Observer", "var(--text)"), ("move 3", None), ("publish(kind, ...) after the mutex is released, in a try/catch", None), ("metrics that cost the lock nothing", None)],
+          [("State", "var(--text)"), ("move 6", None), ("FREE / READING / WRITING, and the edge that is missing", None), ("the invariant IS the missing edge", None)],
+          [("Facade", "var(--muted)"), ("move 2", None), ("ReadLock and WriteLock: two methods each, one shared Sync", "var(--muted)"), ("callers never see a counter", "var(--muted)")],
+          [("Singleton", "var(--muted)"), ("not here", None), ("one lock per thing guarded; a test builds a fresh RwLock", "var(--muted)"), ("two documents never wait for each other", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("the EnumMap from Policy to rule IS the registry, one line each", "var(--muted)"), ("it earns the name when rules come from config", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("never", None), ("a lock has a rule, a clock and listeners: that is configure()", "var(--muted)"), ("three optional things is not a builder", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 305, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 320, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Sync parks and counts. A rule decides fairness. A handle exposes two methods.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("FairOrder was added without opening Sync: a class and one registry line", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("moves 2, 3", None), ("policy.readerMustWait(this, ticket);  never \"is this the writer-first one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces; show only what is needed", None), ("move 5", None), ("LockState gives a rule the six counters and none of the mutators", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 9", None), ("configure(rule, listeners) and setClock(c): a test hands in a reckless rule and a fake clock", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "cap the readers, priority bands", "a new AdmissionPolicy class plus one registry line", "", "move 3"),
+        ("someone new wants to know", "a latency histogram, an alarm", "one more observer, told after the unlock", "", "move 3"),
+        ("a new step in a life", "a lock that can be drained for maintenance", "one more state and one more checked transition", "", "move 6"),
+        ("a new invariant across items", "two documents that must move together", "lock them in a fixed order, or put one lock over both", "", "move 4"),
+        ("state that must outlive the process", "two servers share the document", "the three numbers become a row changed by compare-and-set,", "with a lease so a dead holder lets go, and a fencing token", "moves 5 + 12")]):
+    y = 24 + k * 54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y + 22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y + 27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five, Sync's parking and waking do not change one line; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: many <b>readers</b> share the <b>data</b>; one <b>writer</b> has it alone; something "
+ "<b>counts</b> who is inside; a <b>rule</b> decides who waits; a <b>ticket</b> remembers who arrived first. Readers "
+ "and writers are threads, not classes &mdash; they are the callers, and a lock that had a Reader class would be a "
+ "lock that owned its users. The counting thing has real state that changes: how many readers are inside, whether a "
+ "writer is inside and which thread it is, and who is parked. That is the one class, and this file calls it "
+ "<code>Sync</code>. The two handles callers hold, <code>ReadLock</code> and <code>WriteLock</code>, own nothing at "
+ "all: each is a reference to the same <code>Sync</code>, which is exactly why the two sides see one set of "
+ "counters instead of two. The rule has no state either, so it is an interface. The ticket is a <code>long</code>. "
+ "And the guarded data is not in the diagram at all: the lock never touches it, which is the only reason the same "
+ "lock works for a document, a routing table and a cache.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Get in as a reader\" and \"get in as a writer\" both touch the counters, so both belong to <code>Sync</code>: "
+ "<code>acquireRead</code> and <code>acquireWrite</code>. \"Should this thread wait?\" touches nothing &mdash; it "
+ "reads the counters and returns true or false &mdash; so it belongs to a pure rule, "
+ "<code>policy.readerMustWait(state, ticket)</code>. \"Let the next one in\" touches the two conditions, which only "
+ "<code>Sync</code> has, so the signalling lives there too. Notice the shape that falls out: the rule is "
+ "<i>asked</i>, never obeyed blindly, and it never parks anybody. Asking and parking are different jobs, and "
+ "keeping them apart is what lets you swap the fairness rule in one line without touching a single "
+ "<code>await</code>. And notice what gets no method at all: the data. A lock that read or wrote the document would "
+ "only ever work for that document.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Three things will change. Who waits when both sides want in &mdash; readers first (fast, and a writer can starve "
+ "forever), writers first (a queued writer makes new readers wait), or arrival order &mdash; and the interviewer "
+ "will change it mid-round, which is the single most likely twist on this problem. Who wants to know what happened "
+ "&mdash; a latency histogram today, a starvation alarm next week. And where a deadline comes from, because a test "
+ "must be able to make thirty seconds pass. Each becomes a small interface the lock is <i>given</i> in "
+ "<code>configure()</code> and never builds. This is where the patterns come from, not the other way round: a "
+ "swappable rule behind an interface is <b>Strategy</b>; a rule that wraps another rule and adds to it is "
+ "<b>Decorator</b>, and here it is the one that matters &mdash; <code>SafePolicy</code> wraps every rule the lock "
+ "is handed and adds \"never a reader beside a writer\" on top, so a rule written next year can get fairness wrong "
+ "and still cannot corrupt the data. A lock that announces what happened without knowing what a metrics box is, is "
+ "<b>Observer</b>. I do them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Here is the joke at the centre of this problem: the lock's own bookkeeping has a race. Two readers arrive at the "
+ "same instant, both read <code>readers</code> as 3, both write 4, and one of them has become invisible &mdash; so "
+ "the last one out will see the count reach zero while somebody is still reading, and will happily let a writer in. "
+ "So the three "
+ "numbers live behind one <code>ReentrantLock</code>, and every acquire and release takes it for about forty "
+ "nanoseconds. That internal mutex is doing a second job you should mention out loud: it is also what publishes a "
+ "writer's changes to the next reader. A hand-rolled lock built on spinning and plain fields would be safe against "
+ "races and still let a reader see stale data, because nothing would have established a happens-before.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"How many readers are inside?\" is an <code>int</code>. \"Is a writer inside, and is it me?\" is a hold count "
+ "plus the owner thread &mdash; the owner is what makes reentrancy and the downgrade possible, because both are "
+ "really the question \"is this thread already in?\". \"Who is parked, and who arrived first?\" is one "
+ "<code>ArrayDeque</code> of tickets per side; because tickets only go up, the head of each queue is the oldest "
+ "waiter, so \"is a writer ahead of me?\" is a peek. \"Do I already hold the read side?\" is a "
+ "<code>ThreadLocal</code> count, and it earns its place twice over: a reentrant read is let straight in, and a "
+ "read holder asking for the write lock is caught and refused instead of deadlocking. \"Which rule is this?\" is an "
+ "<code>EnumMap</code>. It needs one line of hygiene an interviewer asks for if their services run on thread "
+ "pools: when a thread's read count drops to zero the entry is <code>remove()</code>d, because a pooled thread "
+ "lives for months and an entry left on it is a leak. One step is not O(1), and you should say so before you are asked: pulling a cancelled waiter "
+ "out of the middle of a queue is O(waiters). It happens once per timeout or interrupt, and a linked node per "
+ "waiter &mdash; which is what AQS keeps &mdash; makes even that constant.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "The lock has three states: FREE, READING (one or more readers, no writer) and WRITING (exactly one writer, no "
+ "readers). The design is not in the three boxes; it is in the edge that is <i>missing</i>. There is no arrow from "
+ "READING straight to WRITING, which is why a read-to-write upgrade is refused: two threads both holding a read "
+ "hold and both asking to write would each be waiting for the other to let go. WRITING to READING, on the other "
+ "hand, is legal and useful &mdash; the same thread keeps its place, publishes its change and goes on reading it. "
+ "Then the order inside <code>acquire</code>, which is where rounds are lost. Take the mutex first, because nothing "
+ "below is safe to read without it. If this thread already holds something, let it straight in, because parking a "
+ "holder is a deadlock with itself. Take a ticket, ask the rule, and if the answer is wait, register the ticket and "
+ "<code>await</code> <i>in a while loop</i>. Two accidents make that loop compulsory, and an interviewer will ask "
+ "you to name both. A <b>spurious wakeup</b> is <code>await</code> returning when nobody signalled at all &mdash; "
+ "the JVM is allowed to do that, so a thread that trusted the wake would walk in on a writer. A <b>lost wakeup</b> "
+ "is the mirror image: a signal sent while the thread is not yet parked, and therefore thrown away. That is why the "
+ "predicate is tested and the parking is done under the same mutex, with no gap between them for a signal to fall "
+ "into. The loop covers a third and commoner case too: the wake was real, but somebody else took the lock between "
+ "the signal and your turn to look. So a wake always means \"look again\", never \"it is your turn\" &mdash; and "
+ "test 9 proves it, with two hundred wakes that change nothing and admit nobody. Only after the loop ends do you "
+ "change the counters, and only then release the mutex. Observers are told last, outside the mutex, in a "
+ "try/catch.", 6),
+("Move 7: yes, the bookkeeping happens one at a time. Ask for how long, and what is inside.",
+ "The question you will be asked, and should ask yourself: if every reader takes an internal mutex, have you just "
+ "built a slower <code>synchronized</code> block? No, and the picture is the answer. The mutex is held for about "
+ "forty nanoseconds &mdash; three field reads, one call to the rule, one increment &mdash; and then it is gone. The "
+ "caller's actual read runs with the mutex released and overlaps completely with every other reader's, for as long "
+ "as the caller likes. So the "
+ "serialised part is a hundred thousand times shorter than the shared part, which is the entire economic case for a "
+ "read-write lock. The corollary is the rule for what may go inside the mutex: field reads, field writes and the "
+ "rule's predicate. No allocation, no I/O, no user code, nothing that can block &mdash; an observer called inside "
+ "the mutex would hand a stranger the power to freeze every reader in the process.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "The numbers are in the box; the one worth remembering is the surprise. The read path is the <i>slower</i> of the "
+ "two, because every read acquire pays for a <code>ThreadLocal</code> lookup to spot an upgrade and a write acquire "
+ "does not. The number to quote when asked whether one mutex is enough: a service reading a config object "
+ "two hundred thousand times a second keeps the mutex busy for eight milliseconds out of every second, and it takes "
+ "eight threads doing nothing else at all to reach the ceiling. Then the ladder, in the order you would climb it. Keep everything slow "
+ "outside the mutex, which this code already does. Replace the mutex with a single compare-and-set on one packed "
+ "integer &mdash; reader count in the top half, write holds in the bottom &mdash; and put the waiters in an "
+ "explicit queue so a release wakes exactly one node instead of everybody: that is <code>AbstractQueuedSynchronizer</code>, "
+ "and it is what <code>ReentrantReadWriteLock</code> is made of. Above that, stop taking a lock on the read path at "
+ "all: <code>StampedLock</code>'s optimistic read, or a per-thread counter, or a data structure that does not need "
+ "the lock. The honest ending is that the JDK's lock does that same read in eight nanoseconds, and in real code you "
+ "use it.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "The table is the list; two of its rows deserve more than a row. The first is the interrupted writer. Its ticket "
+ "has to come out of the queue in a <code>finally</code>, and both conditions have to be signalled on the way out, "
+ "because under writer preference a ghost ticket that nobody owns makes every reader wait forever. That is the "
+ "subtlest bug on this page, it never shows up in a happy-path demo, and it has a test to itself. The second is "
+ "the reckless rule: the test hands the lock a fairness rule that says nobody ever waits, pushes eight thousand "
+ "reads and six hundred writes through it, and proves that no reader ever sat beside a writer &mdash; the whole job of "
+ "<code>SafePolicy</code>. And the discipline that makes the file usable at all: every wait in it has a timeout, "
+ "because a concurrency test that can hang is a coin flip, not a test.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "The table is the answer. Here is what it cannot hold. Decorator is the one that matters: <code>SafePolicy</code> "
+ "adds \"never a reader beside a writer\" to whatever fairness rule it is handed, instead of trusting each rule to "
+ "remember the check, so a rule written next year that gets fairness wrong produces a slow lock and not a corrupted "
+ "document. Say that out loud; it is the difference between a performance bug and a data bug. State is move 6, and "
+ "its point is not the three boxes but the edge missing between two of them. Factory is \"not yet\" because the "
+ "<code>EnumMap</code> from <code>Policy</code> to rule is already the registry; it earns the name the day rules "
+ "arrive as strings from configuration. Builder is \"never\" here: a rule, a clock and some listeners is exactly "
+ "what <code>configure()</code> is for. And name each one only after the move that produced it, so every name "
+ "comes with a one-sentence defence instead of a label.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "The table is the check; two of the five letters are worth saying out loud. I is <code>LockState</code>: a "
+ "fairness rule is handed the six counters and none of the mutators, so it can decide who waits and cannot touch "
+ "who is inside. The interface is small on purpose, and here the smallness is a safety property rather than a taste "
+ "in style. D is what makes the tests possible: the rule and the clock arrive through <code>configure()</code> and "
+ "<code>setClock()</code>, which is exactly how a test hands in a deliberately reckless rule, and a clock that "
+ "jumps thirty seconds between two calls. The other three are the ordinary kind &mdash; one job per class, a new "
+ "rule is a new class, and the lock never asks which rule it got.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (cap the readers at sixty-four, priority bands, a read that may be a little stale) is a new "
+ "<code>AdmissionPolicy</code> class plus one registry line &mdash; with one caveat worth saying out loud, because "
+ "it is the only place the rule and the machinery touch: the cheap wake rule here is that the last reader out wakes "
+ "only writers, which is correct for any rule whose reader-wait condition needs a writer to be active or queued. A "
+ "rule that makes readers wait for something else, like a cap, must also be woken by a departing reader. Someone "
+ "new who wants to know is one more observer, told after the unlock. A new step in a life (a lock that can be "
+ "drained and closed for maintenance) is one more state and one more checked transition. A new invariant across "
+ "items (two documents that must move together) is a fixed lock order, or one lock over both &mdash; the same move "
+ "4 answer as every other LLD. And state that must outlive the process is the three numbers becoming a row changed "
+ "by compare-and-set, with a lease so a dead holder eventually lets go and a fencing token so its late write is "
+ "rejected. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("The same twelve moves as every other LLD on this site, applied to a problem with almost no nouns. "
+ "That is what makes it a good exercise: with only three numbers to design, the moves that usually get waved through "
+ "&mdash; the race, the order of operations, what is inside the lock &mdash; are the entire problem, and the answer "
+ "to every twist falls out of them.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# column A: the root, the two handles, the interface, and the data that is NOT ours
+put("rwlock", 10, 20, 250, "RwLock", ["sync: Sync", "read: Lock", "write: Lock"],
+    ["configure(rule, listeners)", "setClock(c)", "readLock() / writeLock()", "stats(): LockStats"])
+put("readlk", 10, 195, 250, "ReadLock", ["sync: Sync"],
+    ["lock() &rarr; acquireRead", "unlock() &rarr; releaseRead"])
+put("lockif", 10, 315, 250, "Lock", [],
+    ["lock()", "tryLock()", "tryLock(timeoutMs)", "unlock()"], "interface")
+put("writelk", 10, 447, 250, "WriteLock", ["sync: Sync"],
+    ["lock() &rarr; acquireWrite", "unlock() &rarr; releaseWrite"])
+put("doc", 10, 570, 250, "SharedDocument", ["cells: int[]"], ["readAll() / bumpAll()"])
+# column B: the one class with state
+put("sync", 300, 20, 340, "Sync",
+    ["mutex: ReentrantLock", "okToRead / okToWrite: Condition", "readers: int", "writerHolds: int",
+     "writerOwner: Thread", "readerQueue / writerQueue: Deque&lt;Long&gt;", "readHolds: ThreadLocal&lt;int[]&gt;",
+     "nextTicket: long", "policy: AdmissionPolicy", "clock: Clock", "observers: List&lt;LockObserver&gt;"],
+    ["acquireRead(mode, timeoutMs)", "releaseRead()", "acquireWrite(mode, timeoutMs)", "releaseWrite()",
+     "configure(rule, listeners)", "snapshot(): LockStats", "publish(kind, started, readers)"])
+# column C: what a rule may see, and the rules themselves
+put("lockstate", 680, 20, 250, "LockState", [],
+    ["readers()", "writerActive()", "waitingReaders() / Writers()", "earliestWaiting..Ticket()"], "interface")
+put("policyif", 680, 150, 250, "AdmissionPolicy", [],
+    ["readerMustWait(s, ticket)", "writerMustWait(s, ticket)"], "interface")
+put("safe", 680, 250, 250, "SafePolicy", ["base: AdmissionPolicy"],
+    ["adds: never a reader", "beside a writer"])
+put("rpref", 680, 370, 250, "ReaderPreference", [], ["wait only while a", "writer is inside"])
+put("wpref", 680, 470, 250, "WriterPreference", [], ["also wait while a", "writer is queued"])
+put("fair", 680, 570, 250, "FairOrder", [], ["nobody overtakes an", "earlier ticket"])
+# column D: the registry, the values, the things handed in
+put("penum", 970, 20, 250, "Policy", ["READER_PREFERENCE", "WRITER_PREFERENCE", "FAIR"], [], "enum")
+put("policies", 970, 130, 250, "Policies", ["REGISTRY: EnumMap"], ["of(Policy): AdmissionPolicy"])
+put("event", 970, 230, 250, "LockEvent", ["kind: EventKind", "threadName: String", "waitedMs: long", "readersAfter: int"], [])
+put("stats", 970, 350, 250, "LockStats", ["readers, writerActive", "waitingReaders / Writers"], [])
+put("clock", 970, 445, 250, "Clock", [], ["nowMs(): long"], "interface")
+put("obs", 970, 525, 250, "LockObserver", [], ["onEvent(LockEvent)"], "interface")
+put("metrics", 970, 605, 250, "Metrics", ["counts: EnumMap"], ["count(kind) / longestWaitMs()"])
+put("ekind", 942, 690, 278, "EventKind", ["READ_ACQUIRED, READ_RELEASED", "WRITE_ACQUIRED, WRITE_RELEASED"], [], "enum")
+
+# the waiting parties, at one instant
+WAIT_INSET = (
+  '<rect x="296" y="372" width="348" height="236" rx="8" fill="var(--bg)" stroke="var(--line)" stroke-dasharray="4 3"/>'
+  + _tx(470, 394, "one instant: who is inside, who is parked", "var(--acc)", 11.5)
+  + _card(306, 404, 160, 92, "inside", ["readers = 3", "R1  R2  R3", "writer: none"], acc=True)
+  + _card(478, 404, 156, 92, "parked: okToWrite", ["W1, ticket 7", "wakes when", "readers hits 0"])
+  + _card(306, 508, 328, 80, "parked: okToRead", ["R4 ticket 8, R5 ticket 9 -- they arrived after W1",
+                                                  "woken when W1 releases the write side"])
+)
+
+def stub(y, x1, x2):
+    return '<path d="M%s %s L%s %s" fill="none" stroke="var(--muted)" stroke-width="1.3"/>' % (x1, y, x2, y)
+
+EDGES = [
+ WAIT_INSET,
+ ln((470, 350), (470, 372), "assoc", ""),
+ # the two handles implement Lock, and RwLock owns all three pieces
+ ln(B["readlk"]["b"], B["lockif"]["t"], "inherit"),
+ ln(B["writelk"]["t"], B["lockif"]["b"], "inherit"),
+ ln(B["rwlock"]["b"], B["readlk"]["t"], "compose", "owns both views"),
+ ln((260, 97), (260, 492), "compose", "", [(272, 97), (272, 492)]),
+ ln((260, 130), (300, 185), "compose", "", [(286, 130), (286, 185)]),
+ # each handle points at the ONE Sync
+ ln((260, 240), (300, 240), "assoc", ""),
+ ln((260, 492), (300, 300), "assoc", "", [(292, 492), (292, 300)]),
+ # Sync implements LockState and is handed a rule, a clock and listeners
+ ln((640, 100), (680, 71), "inherit", "", [(660, 100), (660, 71)]),
+ ln((640, 185), (680, 185), "inject", ""),
+ ln((680, 300), (680, 205), "assoc", "", [(662, 300), (662, 205)]),
+ ln((640, 348), (970, 472), "inject", "", [(948, 348), (948, 472)]),
+ ln((640, 136), (970, 552), "notify", "", [(960, 136), (960, 552)]),
+ # the three rules implement the policy interface, on one bus up the gutter
+ ln(B["fair"]["r"], (930, 185), "inherit", "", [(936, 605), (936, 185)]),
+ stub(405, 930, 936), stub(505, 930, 936),
+ ln(B["safe"]["t"], B["policyif"]["b"], "inherit"),
+ ln(B["metrics"]["t"], B["obs"]["b"], "inherit"),
+ ln(B["policies"]["t"], B["penum"]["b"], "assoc", "keyed by"),
+ _tx(930, 672, "every rule is stateless: Policies.REGISTRY holds one instance of each", "var(--muted)", 10.5, "end"),
+ _tx(12, 662, "the data the lock guards. The lock never touches it, which is", "var(--muted)", 10.5, "start"),
+ _tx(12, 678, "why the same lock works for a routing table or a cache.", "var(--muted)", 10.5, "start"),
+]
+UMLSVG = uml_svg(1230, 800, EDGES, legend_y=776)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements. Filled diamond = owns: <code>RwLock</code> owns the one <code>Sync</code> and the two handles over it. '
+ 'Plain arrow = references: both handles point at the <i>same</i> <code>Sync</code>, which is what makes the two '
+ 'sides share one set of counters. Dashed green = handed in through <code>configure()</code> and '
+ '<code>setClock()</code>. Dotted blue = notifies, after the unlock. <b>Where state lives:</b> one box has state and '
+ 'the rest do not. <code>Sync</code> holds the mutex, the two conditions, the reader count, the writer hold count '
+ 'and owner, the two ticket queues and the per-thread read count; every fairness rule is stateless, so one instance '
+ 'of each serves the whole process; <code>ReadLock</code> and <code>WriteLock</code> hold a reference and nothing '
+ 'else. <b>The dashed panel</b> is not a class: it is the lock at one instant, showing the two waiting parties, and '
+ 'it is the picture to draw on the whiteboard before you write a line. Notice what is <i>not</i> here: no Reader or '
+ 'Writer class, because those are threads; no queue of waiter objects, because the two conditions are the queue; and '
+ 'no Balance-style derived value, because "is a writer inside" is a field, not a calculation.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above '
+ 'each class and method says what it does and what it guarantees; read only those first for the shape, then the two '
+ 'acquire methods for the mechanics &mdash; they are the file. Each copy button copies that whole file for your IDE. '
+ 'Below Main.java: Extensions.java (every follow-up\'s reference code, with an <code>ExtDemo</code> main that runs '
+ 'all of it) and FailureTests.java (36 checks, every one with a timeout; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS in '
+ 'under a second).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (reentrant, upgradable, may writers starve &mdash; in '
+ 'that order); then type in the order of Main.java: the <code>Clock</code> and <code>Lock</code> interfaces, the '
+ '<code>Policy</code> enum, <code>LockState</code> and <code>AdmissionPolicy</code>, the three rules and the '
+ '<code>SafePolicy</code> wrapper, then <code>Sync</code> &mdash; the mutex, the two conditions, the counters, and '
+ '<code>acquireRead</code> with its while loop &mdash; then <code>releaseRead</code>, the two write methods, the two '
+ 'thin handles, <code>RwLock</code>, and a main that starts six readers and one writer and prints who was inside '
+ 'when.</div></div>')
+
+FU = [
+("They change the rule mid-round: \"a writer must never be starved by a stream of readers.\" Do it without touching the lock.", "twist", 10,
+ "One class and one line. The fairness rule is already an interface the lock is handed, so writer preference is a "
+ "class whose reader test also returns true while any writer is queued, and <code>configure()</code> takes it. "
+ "Nothing in the parking or waking machinery changes, and neither do the tests. The reader side now waits behind a "
+ "queued writer, which is exactly the trade being asked for: fewer reads per second, and a bounded wait for the "
+ "writer. Arrival order is a third class: it compares this waiter's ticket with the oldest ticket on the other "
+ "side, so nobody overtakes anybody. The one seam that is not free is the <code>Policy</code> enum, so a "
+ "brand-new constant is the single extra edit; key the registry by String and even that disappears.",
+ sect(src, "final class ReaderPreference", "final class SafePolicy")),
+("You shipped reader preference by accident. How would you find out that writers are starving?", "design", 3,
+ "Not from the lock: from an observer. Every acquire publishes an event after the mutex is released, carrying how "
+ "long that thread waited, measured on the injected clock. A starvation meter is a dozen lines on top of that: it "
+ "keeps the worst wait on each side and counts the waits over a threshold, and one line of its report goes on a "
+ "dashboard or into a log. Under reader preference a read storm shows up at once &mdash; in the demo the worst "
+ "writer wait is about a hundred milliseconds against a worst reader wait of one. That gap is what you alarm on, "
+ "and the fix is a different <code>AdmissionPolicy</code> handed to <code>configure()</code>, not a change inside "
+ "the lock. Measuring costs the lock nothing, because observers are told after the unlock, and a meter that throws "
+ "is caught and ignored.",
+ X("a starvation meter", "a distributed read-write lock")),
+("Prove that many readers really are inside at once, and that a writer is alone. With a test.", "non-functional", 10,
+ "Two tests, and neither of them sleeps and hopes. The first starts six readers that each take the read lock and "
+ "then wait on a latch until all six are in: if the lock were an expensive mutex the latch would never reach zero "
+ "and the five-second timeout would fail the test. It also asks the lock for its own count and checks it says six. "
+ "The second holds the write lock in one thread and proves from another thread that a reader's "
+ "<code>tryLock</code> returns false, that a second writer's does too, and that a reader willing to wait two "
+ "hundred milliseconds still gives up &mdash; then that a reader gets in the moment the writer leaves. The stress "
+ "test behind them does twenty-four thousand reads and eight hundred writes and counts torn reads, which is the "
+ "claim in its strongest form.",
+ T("        // 1. many readers", "        // 3. the stress")),
+("One mutex for the whole lock. Have you just built a slower synchronized block?", "non-functional", 5,
+ "No, and the answer is arithmetic rather than opinion: the mutex is held for about forty nanoseconds &mdash; "
+ "three field reads, one call to the fairness rule, one increment &mdash; and is released before the caller's "
+ "read begins, so the shared part of a read is roughly a hundred thousand times longer than the serialised part. "
+ "Two costs are worth admitting before you are asked. The first: a read acquire costs sixty-five nanoseconds "
+ "against a write acquire\'s twenty-five, because the read path looks up a <code>ThreadLocal</code> every time to "
+ "spot an upgrade. The second is in the release, not the acquire &mdash; <code>signalAll()</code> wakes every "
+ "parked thread at once, and they all re-take the mutex one after another, and all but the ones that can move "
+ "park again. That is the thundering herd, and it makes a release cost one mutex handoff per waiter instead of "
+ "one. Both are why the ladder\'s second rung is an explicit queue of waiter nodes: AQS wakes exactly the one "
+ "node that can proceed.",
+ sect(src, "boolean acquireRead(int mode", "void releaseRead()")
+ + "\n" + sect(src, "void releaseRead()", "// ---------------- the write side")),
+("A thread waiting for the write lock is interrupted, or its timeout expires. What is the state of the lock?", "functional", 10,
+ "Exactly what it was. A waiter registers a ticket before it parks, and that ticket is removed in a "
+ "<code>finally</code>, so a thread that leaves by interruption, by timeout or by being admitted never leaves a "
+ "ghost in the queue. That matters more than it sounds: under writer preference a ghost waiting writer makes every "
+ "reader wait forever, so this one <code>finally</code> is the difference between a lock and a deadlock. A "
+ "cancelled waiter also signals both conditions on its way out, because its departure can be what admits somebody "
+ "else &mdash; under arrival order, a waiter behind it may now be the oldest. The interrupt itself is passed on as "
+ "<code>InterruptedException</code> rather than swallowed, so a cancelled task really is cancelled, and the test "
+ "proves a reader gets in again afterwards.",
+ T("        // 7. a waiter that gives up", "        // 8. the safety wrapper")),
+("Why while and not if around the wait? Define a lost wakeup and a spurious wakeup, and prove your loop survives both.", "non-functional", 8,
+ "A <b>spurious wakeup</b> is <code>await</code> returning when nobody signalled at all. The JVM is allowed to do "
+ "that, so a thread that treated a wake as its turn would walk straight in on a writer; the <code>while</code> "
+ "loop is what makes it harmless, because the thread simply re-tests and parks again. A <b>lost wakeup</b> is the "
+ "mirror image: a signal sent while the thread has decided to wait but is not yet on the condition, so the signal "
+ "is thrown away and the thread sleeps forever. Testing the predicate and parking happen under the same mutex, "
+ "which is what closes that gap &mdash; there is no instant when this thread is committed to waiting and not yet "
+ "reachable by a signal. The third case is the common one and needs no bug at all: the wake was real, and "
+ "somebody else took the lock before you looked. The test proves it instead of hoping: "
+ "<code>wakeWaitersForTest()</code> signals both conditions under the mutex without changing one counter, which "
+ "is exactly what a spurious wakeup looks like from inside <code>await</code>. Two hundred of them, while a "
+ "reader is still inside, admit nobody and leave the parked writer\'s ticket exactly where it was.",
+ T("        // 9. the wait protocol", "        // 10. the same lock built")),
+("\"Who arrived first?\" every time somebody asks to go in. Make it O(1).", "non-functional", 5,
+ "Each waiter takes a ticket, a <code>long</code> that only goes up, and parks itself in the queue for its own "
+ "side. Because tickets only go up, arrival order <i>is</i> queue order, so the oldest waiting writer is the head "
+ "of the writer queue: one peek. The fairness rule is handed a read-only view with six O(1) questions on it and "
+ "nothing that can change anything, so it can decide who waits and cannot corrupt who is inside. The honest "
+ "caveat, which you should say before you are asked: removing a cancelled waiter from the middle of a queue is "
+ "O(waiters). It happens once per timeout or interrupt, and the fix &mdash; a linked node per waiter that can "
+ "unlink itself &mdash; is precisely what AbstractQueuedSynchronizer keeps.",
+ sect(src, "interface LockState", "interface AdmissionPolicy")
+ + "\n" + sect(src, "public int readers()", "/** A copy of the counters")),
+("Downgrade and upgrade: a writer that wants to keep reading, and a reader that decides it needs to write.", "twist", 10,
+ "Downgrade is legal and useful, so the lock supports it: a thread holding the write side takes the read side and "
+ "is admitted immediately without consulting the fairness rule, then drops the write side. Nobody got in between, "
+ "so it now reads exactly what it just wrote. That immediate admission is not a shortcut: parking a thread that "
+ "already holds something would be a deadlock with itself, and the same rule is what makes a reentrant read safe "
+ "under writer preference. Upgrade is the trap. Two readers that both want to write would each be waiting for the "
+ "other's read hold to disappear, forever, so the lock refuses it with an exception the moment it sees the caller "
+ "already holds a read hold &mdash; a loud failure in zero milliseconds instead of a silent hang. The safe shape "
+ "is in Extensions.java: let go of the read hold, take the write hold, and <i>re-check</i>, because the world "
+ "moved while you had nothing.",
+ T("        // 6. downgrade is allowed", "        // 7. a waiter that gives up")
+ + "\n" + X("upgrading safely", "a starvation meter")),
+("Add tryLock, and tryLock with a timeout.", "functional", 5,
+ "Both fall out of one parameter instead of two more methods. The acquire methods take a mode: park until "
+ "admitted, do not park at all, or park until a deadline. Non-blocking asks the fairness rule once and returns "
+ "false without ever registering a ticket, so there is nothing to clean up. Timed computes its deadline from the "
+ "injected clock, then on each turn of the while loop works out what is left and calls the timed "
+ "<code>await</code>; when nothing is left it gives up, drops its ticket and wakes both sides. The loop shape is "
+ "the important part: recomputing the remaining time on every wake is what stops a thread that is woken ten times "
+ "from waiting ten timeouts.",
+ sect(src, "final class ReadLock", "final class WriteLock")),
+("Where does time come from, and how do you test a thirty-second deadline?", "design", 3,
+ "The lock is handed a <code>Clock</code> and never reads the wall clock itself. Deadlines are computed from it "
+ "and so is the waited-for time on every event, which is what a starvation meter reads. So a test injects a clock "
+ "whose every call is thirty seconds later than the last, holds the write lock in another thread, and asks for a "
+ "read with a thirty-second timeout: the loop computes its remaining time, finds it is already past, and gives up "
+ "&mdash; in under a millisecond of real time. The assertion is on the real clock, so the test proves both that "
+ "the deadline was honoured and that no wall-clock time was spent.",
+ T("            // the injected clock", "        }\n\n        // 8. the safety wrapper")),
+("Now I want a condition on top: \"wait until the document is not empty.\"", "twist", 10,
+ "The parking is the easy half. The hard half is that <code>await</code> has to give the write hold up &mdash; "
+ "otherwise nobody can ever change the thing being waited for &mdash; and take it back before returning, or the "
+ "caller comes back holding less than it had. The reference code hands each waiter a latch, drops the write lock, "
+ "waits with a timeout, and re-acquires in a loop that ignores interruption and restores the interrupt flag "
+ "afterwards: you may be cancelled, but you never come back without your lock. Callers still use the same "
+ "<code>while</code> loop around the predicate that the lock itself uses internally, for the same reason. Worth "
+ "knowing out loud: the JDK refuses this on the read side. "
+ "<code>ReentrantReadWriteLock.readLock().newCondition()</code> throws "
+ "<code>UnsupportedOperationException</code>, because a waiting reader would have to give up a hold it shares "
+ "with other readers, and there is no way to hand exactly that back. Only the write side has conditions, which is "
+ "the same restriction this code lives under.",
+ X("a condition variable", "the same lock from a semaphore")),
+("Two servers now share the document.", "twist", 5,
+ "The three numbers become one row in a store, and the mutex becomes compare-and-set: read the row, work out what "
+ "it should be, and replace it only if nobody changed it in between. Everything above that is the same design. "
+ "What you lose is the part this page is about: there is no condition to park on, so a waiter polls, and every "
+ "acquire is a network round trip instead of forty nanoseconds. What you must add is a lease &mdash; an expiry "
+ "stamped on the row, so a holder that dies does not own the lock forever &mdash; and a fencing token, so a "
+ "resurrected holder's late write is rejected by the storage it was writing to. That last one is what makes a "
+ "distributed lock genuinely hard, and it is worth saying out loud that a lock is usually the wrong answer "
+ "across machines.",
+ X("a distributed read-write lock", "the JDK's answer")),
+("Make the read path faster than the lock itself.", "twist", 5,
+ "Stop taking the lock on the read path. A <code>StampedLock</code> hands out a stamp instead of a hold: the "
+ "reader reads the fields with no lock at all, then asks whether a writer moved in the meantime, and only a "
+ "reader that lost the race pays for a real read lock. The hand-rolled version is a version counter that is odd "
+ "while a writer is inside &mdash; a seqlock &mdash; and it shows why the trick has rules: the optimistic body "
+ "must be short, free of side effects and safe to run twice, because it can be thrown away. Writers are still "
+ "serialised by something; it is only the readers that go free.",
+ X("optimistic reads", "a condition variable")),
+("Which pattern is where, which SOLID letter is where, and where would a Factory earn its place?", "design", 8,
+ "None of them was chosen up front; each is the residue of a move. Strategy is move 3, because who waits is a "
+ "rule that will change. Decorator is the same move's <code>SafePolicy</code> wrapper. Observer is move 3's rule "
+ "that a metrics box must never run inside the mutex. State is move 6, whose point is the missing edge from "
+ "READING to WRITING. For SOLID, two letters carry real weight here: I is <code>LockState</code> &mdash; six "
+ "counters, no mutators, so a rule can decide who waits and cannot touch who is inside &mdash; and D is "
+ "<code>configure()</code> and <code>setClock()</code>, which is exactly why a test can hand in a reckless rule "
+ "and a clock that jumps thirty seconds. Factory earns its place the day rules arrive as strings from "
+ "configuration, because the enum-to-rule map is already the registry. Builder never does.",
+ sect(src, "final class SafePolicy", "final class Policies")
+ + "\n" + sect(src, "interface LockObserver", "interface Lock {")),
+("Now do it with synchronized, wait and notifyAll. And tell me when notify() would be safe.", "twist", 8,
+ "The same design with a smaller toolbox. The counters move inside the object's own monitor, <code>wait()</code> "
+ "replaces <code>await()</code>, <code>notifyAll()</code> replaces the two <code>signalAll()</code> calls, and "
+ "the <code>while</code> loop does not change at all, because <code>wait()</code> also returns spuriously. What "
+ "you lose is what the two <code>Condition</code>s bought: a monitor has exactly one wait set, so readers and "
+ "writers park together and every wake is a wake for everybody. <code>notify()</code> is not the fix &mdash; it "
+ "may pick a reader that still cannot move while the writer that could move stays asleep, and that is a lost "
+ "wakeup you will never reproduce on your laptop. <code>notify()</code> is only safe when every waiter is waiting "
+ "for the same condition and any one of them can use the wake. You also lose timeouts unless you recompute the "
+ "remaining time around <code>wait(ms)</code> yourself. Test 10 pushes six thousand reads and four hundred writes "
+ "through this version and gets the same invariant, which is the point: the design is the design, not the API.",
+ X("the same lock from synchronized", "a guarded map")),
+("When would you not write this at all?", "design", 5,
+ "Most of the time. If the thing you are guarding is a map, a ConcurrentHashMap beats any lock you can write, "
+ "because it locks one bin instead of the whole map and readers take nothing at all. If you do want a read-write "
+ "lock, ReentrantReadWriteLock does the same read in eight nanoseconds against this file's sixty-five, because it "
+ "is one compare-and-set on a packed integer with an explicit waiter queue, so a release wakes exactly one node "
+ "instead of everybody &mdash; and it makes the same three decisions this page made: reentrant on both sides, "
+ "downgrade allowed, upgrade forbidden. A read-write lock is also the wrong shape when writes are common: below "
+ "roughly a ninety-to-ten read ratio, or when the guarded section is a few nanoseconds long, a plain mutex wins "
+ "because it does less bookkeeping. Write it from scratch to show you know what is underneath; ship the JDK's.",
+ X("the JDK's answer", "Runs every extension")
+ + "\n" + sect(ext, "final class GuardedMap", "// ---- ext: upgrading safely")),
+]
+
+build(dict(
+    slug="mt-rwlock", title="Read-Write Lock",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 36 failure checks and a 12-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

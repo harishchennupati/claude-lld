@@ -1,0 +1,407 @@
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: consumer groups -- competing consumers, where each message is handled by exactly ONE member
+/**
+ * Fan-out gives every subscriber every message. A consumer group is the other shape: three workers share the
+ * load and each message is handled once. It needs no new broker code at all — a group member is a normal
+ * subscription with a filter that accepts only its own slice of the key space. Messages with the same key
+ * always land on the same member, so per-key order survives.
+ */
+final class ConsumerGroup {
+    /** Start `members` subscriptions on one topic, each taking one slice. Returns them so a caller can stop one. */
+    static List<Subscription> join(Broker broker, String groupId, String topic, int members, Handler handler) {
+        List<Subscription> out = new ArrayList<>();
+        for (int i = 0; i < members; i++) {
+            final int slot = i;
+            out.add(broker.subscribe(groupId + "#" + i, topic, handler,
+                SubscribeOptions.opts().fromEarliest().filter(m -> slotOf(m, members) == slot)));
+        }
+        return out;
+    }
+    /** Which member owns this message: by key if there is one, else round-robin by offset. */
+    static int slotOf(Message m, int members) {
+        long h = m.key() == null ? m.offset() : (m.key().hashCode() & 0x7fffffffL);
+        return (int) Math.floorMod(h, members);
+    }
+    // the honest price of doing it with filters: every member walks the whole log and skips 2 messages in 3.
+    // Kafka gives each member its OWN partition log instead, which is the partitions extension below — the
+    // same idea one level down, and the reason real consumer groups rebalance partitions rather than keys.
+}
+
+// ---- ext: never retry a message that can never work -- one decorator, no change to any policy or to Subscription
+/** A failure that will fail identically forever: a malformed payload, a schema mismatch, a deleted account. */
+class PermanentFailure extends Exception {
+    PermanentFailure(String message) { super(message); }
+}
+
+/**
+ * Wraps ANY retry policy and refuses to retry a permanent failure: "exponential backoff, but never five times
+ * on a message that can never work". A new class and one line at the subscribe call; ExponentialBackoff,
+ * Subscription, Topic and Broker are all untouched, which is the whole point of the interface.
+ */
+final class NoRetryFor implements RetryPolicy {
+    private final RetryPolicy base;
+    private final Class<? extends Exception> permanent;
+    NoRetryFor(RetryPolicy base, Class<? extends Exception> permanent) { this.base = base; this.permanent = permanent; }
+    public long backoffMs(int attempt, Exception failure) {
+        if (permanent.isInstance(failure)) return -1;                    // straight to the dead-letter sink
+        return base.backoffMs(attempt, failure);
+    }
+}
+
+// ---- ext: a dead-letter TOPIC -- park failures where a human tool can subscribe to them and replay them
+/**
+ * The sink that a production broker ships with: instead of a list nobody reads, a message nobody could process
+ * is published to "<topic>.dlq" with why-it-failed in the headers. The dead-letter queue is then just another
+ * topic, so the repair tool is just another subscriber and a replay is just another publish.
+ */
+final class DeadLetterTopic implements DeadLetterSink {
+    private final Broker broker;
+    private final String suffix;
+    DeadLetterTopic(Broker broker, String suffix) { this.broker = broker; this.suffix = suffix; }
+    public void park(Dead d) {
+        Message m = d.message();
+        broker.publish(m.topic() + suffix, m.key(), m.payload(),
+            Map.of("dlq.reason", d.reason(),
+                   "dlq.attempts", String.valueOf(d.attempts()),
+                   "dlq.subscription", d.subscriptionId(),
+                   "dlq.origin", m.topic() + "@" + m.offset()));
+    }
+    /** Replay one parked message back onto its original topic, once it is fixed. */
+    static long replay(Broker broker, Message parked) {
+        String origin = parked.headers().get("dlq.origin");
+        String topic = origin == null ? parked.topic() : origin.substring(0, origin.indexOf('@'));
+        return broker.publish(topic, parked.key(), parked.payload());
+    }
+}
+
+// ---- ext: exactly-once for the handler -- at-least-once plus a memory of ids, which is the only honest version
+/**
+ * At-least-once means duplicates, so the handler must be idempotent. This decorator is the cheapest way to get
+ * there when the business code is not naturally idempotent: remember the ids already processed and skip a
+ * repeat. Only the subscription's own thread calls this, so the set needs no lock; it is bounded, because an
+ * unbounded memory of ids is a slow leak.
+ */
+final class IdempotentHandler implements Handler {
+    private final Handler base;
+    private final AtomicLong duplicates = new AtomicLong();
+    private final LinkedHashMap<String, Boolean> seen;
+    IdempotentHandler(Handler base, int remember) {
+        this.base = base;
+        this.seen = new LinkedHashMap<>(16, 0.75f, false) {
+            @Override protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) { return size() > remember; }
+        };
+    }
+    public void onMessage(Message m) throws Exception {
+        String id = m.headers().getOrDefault("id", m.topic() + "@" + m.offset());
+        if (seen.put(id, Boolean.TRUE) != null) { duplicates.incrementAndGet(); return; }   // already done: ack it again
+        try { base.onMessage(m); }
+        catch (Exception e) { seen.remove(id); throw e; }                // a failure is not "done": let the retry happen
+    }
+    /** How many repeats were swallowed. The number that tells you at-least-once is doing its job. */
+    long duplicates() { return duplicates.get(); }
+}
+
+// ---- ext: back-pressure -- the publisher waits when the slowest subscriber is too far behind
+/**
+ * Publishing never blocks in the base design, which is right until a burst outruns every consumer and the
+ * retained log becomes the memory limit. Back-pressure is a gate in front of publish, not a change to the
+ * broker: wait while the slowest subscriber on that topic is more than `highWater` messages behind, and give
+ * up loudly rather than quietly buffering forever.
+ */
+final class BackPressure {
+    /** The worst lag on a topic right now. O(number of subscriptions), each lag being one subtraction. */
+    static long maxLag(Broker broker, String topic) {
+        long worst = 0;
+        for (String id : broker.subscribersOf(topic)) worst = Math.max(worst, broker.lag(id));
+        return worst;
+    }
+    /** Publish once the slowest consumer is within the high-water mark, or fail after the budget. */
+    static long publishWhenReady(Broker broker, String topic, String key, String payload,
+                                 long highWater, long budgetMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        while (maxLag(broker, topic) >= highWater) {
+            if (System.currentTimeMillis() >= deadline)
+                throw new IllegalStateException("back-pressure: slowest subscriber on " + topic
+                    + " is " + maxLag(broker, topic) + " behind");
+            Thread.sleep(1);
+        }
+        return broker.publish(topic, key, payload);
+    }
+    // the three real options, in the order a system usually grows through them: drop the oldest (what retention
+    // already does), block the publisher (this), or shed load by refusing the publish. Kafka picks the first
+    // and monitors lag; an in-process bus usually wants the third, because blocking a request thread is worse.
+}
+
+// ---- ext: lag metrics and an alarm -- the observer earning its keep
+/**
+ * A listener that counts what the broker does, plus the alarm a dashboard actually needs: which subscribers are
+ * falling behind. The counts come from events; the lag comes from the O(1) numbers the subscriptions already
+ * keep, so nothing is scanned and no counter can drift from the truth.
+ */
+final class LagMonitor implements BrokerListener {
+    private final EnumMap<EventType, AtomicLong> counts = new EnumMap<>(EventType.class);
+    LagMonitor() { for (EventType t : EventType.values()) counts.put(t, new AtomicLong()); }
+    public void onEvent(Event e) { counts.get(e.type()).incrementAndGet(); }
+    /** How many of this kind of event the broker has emitted. */
+    long count(EventType t) { return counts.get(t).get(); }
+    /** Every subscription more than `threshold` messages behind, worst first. */
+    static List<String> alarming(Broker broker, long threshold) {
+        List<Map.Entry<String, Long>> over = new ArrayList<>();
+        broker.lagReport().forEach((id, lag) -> { if (lag > threshold) over.add(Map.entry(id, lag)); });
+        over.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+        List<String> out = new ArrayList<>();
+        for (Map.Entry<String, Long> e : over) out.add(e.getKey() + " (" + e.getValue() + " behind)");
+        return out;
+    }
+}
+
+// ---- ext: partitions -- N logs behind one name, so N publishers never meet, and order still holds per key
+/**
+ * Rung 2 of the ladder from move 8. One topic is one log and one lock; a partitioned topic is N logs and N
+ * locks, with the key deciding which. Two publishers using different keys never wait for each other, and
+ * per-key order survives because a key always lands in the same partition, which has one subscription and one
+ * thread. What is lost is total order across the topic — exactly the trade Kafka makes.
+ */
+final class PartitionedTopic {
+    private final Broker broker;
+    private final String name;
+    private final int partitions;
+    PartitionedTopic(Broker broker, String name, int partitions) {
+        this.broker = broker; this.name = name; this.partitions = partitions;
+    }
+    /** The partition this key belongs to, forever. Changing the count reshuffles keys, which is why it is fixed. */
+    int partitionOf(String key) { return key == null ? 0 : (int) Math.floorMod(key.hashCode() & 0x7fffffffL, partitions); }
+    /** The name of one underlying topic. */
+    String partitionName(int p) { return name + "-p" + p; }
+    /** Publish into the key's partition. One lock per partition, so N publishers scale linearly. */
+    long publish(String key, String payload) { return broker.publish(partitionName(partitionOf(key)), key, payload); }
+    /** One subscription per partition, all running the same handler: per-key order, N threads. */
+    List<Subscription> subscribeAll(String subId, Handler h) {
+        List<Subscription> out = new ArrayList<>();
+        for (int p = 0; p < partitions; p++)
+            out.add(broker.subscribe(subId + "-p" + p, partitionName(p), h, SubscribeOptions.opts().fromEarliest()));
+        return out;
+    }
+}
+
+// ---- ext: persistence -- the log on disk, and the cursors too, so a restart resumes instead of starting over
+/** The seam. The topic's ArrayList becomes a cache of the tail of this; nothing else in the design changes. */
+interface MessageStore {
+    /** Append one message durably, AFTER the topic assigned its offset, so a replay reproduces the same offsets. */
+    void append(Message m) throws IOException;
+    /** Every stored message for one topic, oldest first. A segment file read, sequential and cheap. */
+    List<Message> replay(String topic) throws IOException;
+}
+
+/** One append-only text file: offset, topic, key, payload, timestamp. A real one uses fixed-size segments. */
+final class FileStore implements MessageStore {
+    private final Path file;
+    FileStore(Path file) throws IOException { this.file = file; if (!Files.exists(file)) Files.createFile(file); }
+    public synchronized void append(Message m) throws IOException {
+        String line = m.offset() + "\t" + m.topic() + "\t" + (m.key() == null ? "" : m.key())
+                    + "\t" + m.payload() + "\t" + m.atMs() + "\n";
+        Files.writeString(file, line, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+    }
+    public List<Message> replay(String topic) throws IOException {
+        List<Message> out = new ArrayList<>();
+        for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+            String[] f = line.split("\t", -1);
+            if (f.length == 5 && f[1].equals(topic))
+                out.add(new Message(Long.parseLong(f[0]), f[1], f[2].isEmpty() ? null : f[2], f[3], Map.of(), Long.parseLong(f[4])));
+        }
+        return out;
+    }
+}
+
+/** Where a subscriber's committed cursor lives across a restart. In Kafka this is the __consumer_offsets topic. */
+interface OffsetStore {
+    /** Remember that this subscription has finished everything below `offset`. */
+    void commit(String subscriptionId, long offset);
+    /** The remembered cursor, or the default for a subscriber that has never run. */
+    long committed(String subscriptionId, long orElse);
+}
+
+/** The in-memory version, which is the file version wearing a different coat. */
+final class InMemoryOffsets implements OffsetStore {
+    private final Map<String, Long> at = new ConcurrentHashMap<>();
+    public void commit(String subscriptionId, long offset) { at.put(subscriptionId, offset); }
+    public long committed(String subscriptionId, long orElse) { return at.getOrDefault(subscriptionId, orElse); }
+}
+
+/** Restore a broker from a store after a restart, then resume each subscriber from its committed cursor. */
+final class Recovery {
+    /** Replay every stored message of a topic back into a fresh broker, in order, so the offsets come out the same. */
+    static int restore(Broker broker, MessageStore store, String topic) throws IOException {
+        List<Message> stored = store.replay(topic);
+        for (Message m : stored) broker.publish(topic, m.key(), m.payload(), m.headers());
+        return stored.size();
+    }
+    /** Subscribe where this subscriber left off. One line, because the cursor was always just a number. */
+    static Subscription resume(Broker broker, OffsetStore offsets, String subId, String topic, Handler h) {
+        return broker.subscribe(subId, topic, h, SubscribeOptions.opts().fromOffset(offsets.committed(subId, 0)));
+    }
+    // and the two-process answer: this is where an in-process broker stops being the right tool. The log moves
+    // out (Kafka, Pulsar, a table with a monotonic id), the topic's lock becomes the partition leader's, and the
+    // cursor becomes a committed offset in the broker's own store. Every class here keeps its name — which is
+    // why "explain Kafka" and "explain this file" are the same explanation at two sizes.
+}
+
+// ---- ext: replay from a point in time -- because nobody remembers an offset, they remember "since 9am"
+/** Offset lookup by timestamp: a binary search over the retained window, because offsets and time both increase. */
+final class TimeSeek {
+    /** The first offset at or after this instant; the tail if everything retained is older. O(log n). */
+    static long offsetAt(Topic topic, long atMs) {
+        long lo = topic.earliestOffset(), hi = topic.tailOffset();
+        while (lo < hi) {
+            long mid = lo + (hi - lo) / 2;
+            Message m = topic.readAt(mid);
+            if (m == null || m.atMs() >= atMs) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
+}
+
+// ---- ext: the Kafka mapping -- every class in Main.java has a name in the system they will compare this to
+/** The table to put on the whiteboard when they ask "so how is this different from Kafka?". */
+final class KafkaMapping {
+    static final String[][] ROWS = {
+        {"Topic (the ArrayList + baseOffset)", "a partition's segment log on disk"},
+        {"Message.offset", "the partition offset, same meaning, same monotonicity"},
+        {"maxRetained + trim", "log.retention.ms / log.retention.bytes"},
+        {"Subscription.cursor (AtomicLong)", "a committed offset in __consumer_offsets"},
+        {"one dispatcher thread per subscription", "one consumer in a group polling its partitions"},
+        {"Filter on the key", "partition assignment inside a consumer group"},
+        {"cursor.incrementAndGet() after the handler", "enable.auto.commit=false, then commitSync() after processing"},
+        {"DeadLetterSink", "a DLQ topic plus the error-handling deserializer"},
+        {"lag() = tail - cursor", "consumer lag, the one metric that matters"},
+        {"fast-forward when trimmed past", "the OffsetOutOfRange error and auto.offset.reset=earliest"},
+    };
+    /** Print it, so the mapping is code rather than something you hope to remember. */
+    static void print() {
+        for (String[] r : ROWS) System.out.printf("  %-42s -> %s%n", r[0], r[1]);
+    }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        Broker broker = new Broker(50);
+        LagMonitor metrics = new LagMonitor();
+        broker.addListener(metrics);
+        broker.configure(new ExponentialBackoff(4, 1, 20), new DeadLetterTopic(broker, ".dlq"));
+
+        // 1. consumer group: three workers, nine messages, each handled exactly once, same key to the same worker
+        Map<String, List<String>> byWorker = new ConcurrentHashMap<>();
+        ConsumerGroup.join(broker, "billing", "orders", 3, m -> {
+            byWorker.computeIfAbsent(Thread.currentThread().getName() + "/" + ConsumerGroup.slotOf(m, 3),
+                k -> new CopyOnWriteArrayList<>()).add(m.payload());
+        });
+        String[] keys = {"acc-1", "acc-2", "acc-3"};
+        for (int i = 0; i < 9; i++) broker.publish("orders", keys[i % 3], "order-" + i);
+        Main.awaitUntil(() -> byWorker.values().stream().mapToInt(List::size).sum() == 9, 2000);
+        System.out.println("consumer group: 9 messages over " + byWorker.size() + " workers, "
+            + byWorker.values().stream().mapToInt(List::size).sum() + " handled in total, no duplicates="
+            + (new HashSet<>(byWorker.values().stream().flatMap(List::stream).toList()).size() == 9));
+
+        // 2 + 3. a permanent failure goes straight to the dead-letter TOPIC; a transient one is retried
+        AtomicInteger transientTries = new AtomicInteger();
+        List<String> dlq = new CopyOnWriteArrayList<>();
+        broker.subscribe("dlq-reader", "payments.dlq", m -> dlq.add(m.payload() + " <- " + m.headers().get("dlq.reason")),
+            SubscribeOptions.opts().fromEarliest());
+        broker.subscribe("payments", "payments", m -> {
+            if (m.payload().startsWith("junk")) throw new PermanentFailure("not JSON");
+            if (transientTries.incrementAndGet() <= 2) throw new IllegalStateException("gateway timeout");
+        }, SubscribeOptions.opts().fromEarliest().retry(new NoRetryFor(new ExponentialBackoff(6, 1, 20), PermanentFailure.class)));
+        broker.publish("payments", "a", "junk-1");
+        broker.publish("payments", "b", "good-1");
+        Main.awaitUntil(() -> dlq.size() == 1 && broker.sub("payments").delivered() == 1, 2000);
+        System.out.println("permanent failure parked after " + broker.sub("payments").deadLettered()
+            + " give-up, transient retried " + broker.sub("payments").retried() + " times; dlq topic holds " + dlq);
+
+        // 4. exactly-once for the handler: the same message id delivered twice, the business code runs once
+        AtomicInteger charged = new AtomicInteger();
+        IdempotentHandler once = new IdempotentHandler(m -> charged.incrementAndGet(), 1000);
+        broker.subscribe("charges", "charges", once, SubscribeOptions.opts().fromEarliest());
+        for (int i = 0; i < 3; i++) broker.publish("charges", "c", "charge-7", Map.of("id", "txn-7"));
+        Main.awaitUntil(() -> broker.sub("charges").delivered() == 3, 2000);
+        System.out.println("idempotent handler: 3 deliveries, " + charged.get() + " charge, "
+            + once.duplicates() + " duplicates swallowed");
+
+        // 5. back-pressure: a slow subscriber makes the publisher wait, then refuse
+        broker.subscribe("molasses", "bursty", m -> Thread.sleep(50), SubscribeOptions.opts().fromEarliest());
+        for (int i = 0; i < 4; i++) broker.publish("bursty", "k", "burst-" + i);
+        try {
+            BackPressure.publishWhenReady(broker, "bursty", "k", "burst-x", 2, 120);
+            System.out.println("back-pressure: published, the consumer had caught up");
+        } catch (IllegalStateException e) {
+            System.out.println("back-pressure: refused -- " + e.getMessage());
+        }
+
+        // 6. the lag alarm
+        System.out.println("lag alarm (>1 behind): " + LagMonitor.alarming(broker, 1));
+        System.out.println("metrics: published=" + metrics.count(EventType.PUBLISHED)
+            + " delivered=" + metrics.count(EventType.DELIVERED)
+            + " retried=" + metrics.count(EventType.RETRIED)
+            + " dead=" + metrics.count(EventType.DEAD_LETTERED)
+            + " skipped=" + metrics.count(EventType.SKIPPED));
+
+        // 7. partitions: same key, same partition, order kept per key, four locks instead of one
+        PartitionedTopic trades = new PartitionedTopic(broker, "trades", 4);
+        Map<String, List<String>> perKey = new ConcurrentHashMap<>();
+        trades.subscribeAll("tape", m -> perKey.computeIfAbsent(m.key(), k -> new CopyOnWriteArrayList<>()).add(m.payload()));
+        for (int i = 0; i < 6; i++) { trades.publish("INFY", "infy-" + i); trades.publish("TCS", "tcs-" + i); }
+        Main.awaitUntil(() -> perKey.getOrDefault("INFY", List.of()).size() == 6
+                           && perKey.getOrDefault("TCS", List.of()).size() == 6, 2000);
+        System.out.println("partitions: INFY on p" + trades.partitionOf("INFY") + " -> " + perKey.get("INFY")
+            + "  (order per key kept=" + perKey.get("INFY").equals(List.of("infy-0", "infy-1", "infy-2", "infy-3", "infy-4", "infy-5")) + ")");
+
+        // 8. persistence: write the log to a file, restart into a fresh broker, resume a subscriber at its cursor
+        Path file = Files.createTempFile("pubsub-log", ".tsv");
+        FileStore store = new FileStore(file);
+        OffsetStore offsets = new InMemoryOffsets();
+        Broker before = new Broker(1000);
+        before.addListener(e -> {
+            if (e.type() == EventType.PUBLISHED) {
+                try { store.append(before.topic(e.topic()).readAt(e.offset())); } catch (IOException io) { throw new UncheckedIOException(io); }
+            }
+        });
+        for (int i = 0; i < 5; i++) before.publish("events", "e", "event-" + i);
+        offsets.commit("reader", 3);                                       // this subscriber had finished the first three
+        before.close();
+
+        Broker after = new Broker(1000);
+        int restored = Recovery.restore(after, store, "events");
+        List<String> resumed = new CopyOnWriteArrayList<>();
+        Recovery.resume(after, offsets, "reader", "events", m -> resumed.add(m.payload()));
+        Main.awaitUntil(() -> resumed.size() == 2, 2000);
+        System.out.println("persistence: " + restored + " messages restored from " + file.getFileName()
+            + ", the reader resumed at offset 3 and saw " + resumed);
+
+        // 9. replay from a point in time, with the clock handed in so the timestamps are exactly what we say
+        Broker timed = new Broker(100);
+        long[] tick = { 1_700_000_000_000L };
+        timed.setClock(() -> tick[0]);
+        for (int i = 0; i < 5; i++) { timed.publish("clicks", "c", "click-" + i); tick[0] += 60_000; }   // one a minute
+        long cut = 1_700_000_000_000L + 3 * 60_000;
+        System.out.println("seek by time: three minutes in, the first offset at or after is "
+            + TimeSeek.offsetAt(timed.topic("clicks"), cut) + " (click-3)");
+        timed.close();
+
+        // 10. the mapping they will ask for
+        System.out.println("how this maps onto Kafka:");
+        KafkaMapping.print();
+
+        after.close();
+        broker.close();
+        Files.deleteIfExists(file);
+    }
+}

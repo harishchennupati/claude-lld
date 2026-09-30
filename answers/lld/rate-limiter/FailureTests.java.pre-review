@@ -1,0 +1,155 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+/**
+ * One targeted test per claim the design makes on page 02. Each block is a failure a reviewer found on some
+ * rate limiter somewhere; all of them must now pass. Run: javac Main.java Extensions.java FailureTests.java
+ * &amp;&amp; java FailureTests
+ */
+public class FailureTests {
+    static int failures = 0;
+    /** Print one claim and remember whether it held. */
+    static void check(boolean ok, String what) {
+        System.out.println((ok ? "PASS " : "FAIL ") + what);
+        if (!ok) failures++;
+    }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. burst then refill, on an injected clock: no Thread.sleep anywhere in this suite
+        ManualClock clock = new ManualClock(0);
+        RateLimiter limiter = new RateLimiter();
+        limiter.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), clock);
+        int burst = 0;
+        for (int i = 0; i < 5; i++) if (limiter.allow("acme").allowed()) burst++;
+        Decision sixth = limiter.allow("acme");
+        check(burst == 5, "the burst of five is admitted");
+        check(!sixth.allowed(), "the sixth call in the same millisecond is refused");
+        check(sixth.retryAfterMs() == 200, "it is told to come back in " + sixth.retryAfterMs() + "ms, not to retry now");
+        clock.advance(200);
+        check(limiter.allow("acme").allowed(), "200ms later exactly one permit exists, and it is granted");
+        check(!limiter.allow("acme").allowed(), "and only one: the second call at that instant is refused");
+
+        // 2. the fixed window doubles the limit at the boundary; the sliding counter does not
+        ManualClock fw = new ManualClock(0);
+        RateLimiter fixed = new RateLimiter();
+        fixed.configure(new FixedWindow(), new FlatRules(new Rule(5, 1_000L, 5)), fw);
+        fw.advance(900);
+        int before = 0;
+        for (int i = 0; i < 5; i++) if (fixed.allow("k").allowed()) before++;
+        fw.advance(100);                                    // one millisecond into the next window
+        int after = 0;
+        for (int i = 0; i < 5; i++) if (fixed.allow("k").allowed()) after++;
+        check(before + after == 10, "fixed window: " + (before + after) + " calls in 100ms on a limit of 5 per second");
+
+        ManualClock sw = new ManualClock(0);
+        RateLimiter sliding = new RateLimiter();
+        sliding.configure(new SlidingWindowCounter(), new FlatRules(new Rule(5, 1_000L, 5)), sw);
+        sw.advance(900);
+        int sBefore = 0;
+        for (int i = 0; i < 5; i++) if (sliding.allow("k").allowed()) sBefore++;
+        sw.advance(100);
+        int sAfter = 0;
+        for (int i = 0; i < 5; i++) if (sliding.allow("k").allowed()) sAfter++;
+        check(sBefore == 5 && sAfter == 0, "sliding counter: " + (sBefore + sAfter) + " over the same boundary");
+
+        // 3. a hundred threads, one key, one instant: exactly the limit gets through
+        ManualClock frozen = new ManualClock(0);
+        RateLimiter hot = new RateLimiter();
+        hot.configure(new TokenBucket(), new FlatRules(new Rule(50, 1_000L, 50)), frozen);
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(100);
+        AtomicInteger admitted = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(32);
+        for (int i = 0; i < 100; i++) pool.submit(() -> {
+            try { start.await(); if (hot.allow("hot").allowed()) admitted.incrementAndGet(); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            finally { done.countDown(); }
+        });
+        start.countDown();
+        done.await();
+        pool.shutdown();
+        check(admitted.get() == 50, "100 threads on one key, limit 50: exactly " + admitted.get() + " admitted");
+        check(hot.remaining("hot") == 0, "and the bucket is empty afterwards, not negative");
+
+        // 4. a key nobody has seen starts with a full burst, and keys never share a budget
+        check(limiter.remaining("never-seen") == 5, "an unknown key reports a full burst without being created");
+        check(limiter.size() == 1, "and asking about it did not create a state for it");
+        RateLimiter two = new RateLimiter();
+        ManualClock tc = new ManualClock(0);
+        two.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), tc);
+        for (int i = 0; i < 5; i++) two.allow("alice");
+        check(!two.allow("alice").allowed() && two.allow("bob").allowed(), "alice is out of permits; bob is untouched");
+
+        // 5. a clock that goes backwards must not mint permits
+        ManualClock back = new ManualClock(10_000);
+        RateLimiter b = new RateLimiter();
+        b.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), back);
+        for (int i = 0; i < 5; i++) b.allow("k");
+        back.advance(-5_000);                               // NTP drags the wall clock back five seconds
+        check(!b.allow("k").allowed(), "no permit is minted while the clock is behind");
+        back.advance(5_000);                                // and back to where it was
+        check(!b.allow("k").allowed(), "and none is minted for the time the clock travelled twice");
+        back.advance(200);
+        check(b.allow("k").allowed(), "real elapsed time still mints normally afterwards");
+
+        // 6. the sweeper drops only idle keys, and dropping one loses nothing
+        ManualClock sc = new ManualClock(0);
+        RateLimiter sweepable = new RateLimiter();
+        sweepable.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), sc);
+        for (int i = 0; i < 5; i++) sweepable.allow("idle");
+        sc.advance(90_000);
+        sweepable.allow("live");
+        check(sweepable.sweepIdle(60_000) == 1 && sweepable.size() == 1, "the idle key is dropped, the live one is kept");
+        check(sweepable.remaining("idle") == 5, "the dropped key is back at a full burst - which it had refilled to anyway");
+        check(sweepable.remaining("live") == 4, "the live key kept the permit it spent");
+
+        // 7. a metrics listener that throws cannot break a decision
+        ManualClock oc = new ManualClock(0);
+        RateLimiter obs = new RateLimiter();
+        obs.configure(new TokenBucket(), new FlatRules(new Rule(3, 1_000L, 3)), oc);
+        obs.addObserver((k, d) -> { throw new RuntimeException("the metrics sidecar is down"); });
+        MetricsCounter good = new MetricsCounter();
+        obs.addObserver(good);
+        int through = 0;
+        for (int i = 0; i < 5; i++) if (obs.allow("k").allowed()) through++;
+        check(through == 3, "three admitted although the first listener throws on every call");
+        check(good.allowed() == 3 && good.refused() == 2, "and the listener after the broken one still heard all five");
+
+        // 8. permits are never minted: a refund stops at the burst, and a lowered burst clamps the bucket down
+        ManualClock rc = new ManualClock(0);
+        RateLimiter r = new RateLimiter();
+        r.configure(new TokenBucket(), new FlatRules(new Rule(5, 1_000L, 5)), rc);
+        for (int i = 0; i < 5; i++) r.allow("k");
+        r.refund("k", 3);
+        check(r.remaining("k") == 3, "three permits given back after three calls that never happened");
+        r.refund("k", 100);
+        check(r.remaining("k") == 5, "a refund of a hundred still leaves the burst of five, not a hundred");
+        TierRules live = new TierRules(Rule.perMinute(600, 100));
+        RateLimiter sale = new RateLimiter();
+        sale.configure(new TokenBucket(), live, new ManualClock(0));
+        check(sale.allow("acme").remaining() == 99, "a PRO key starts at a burst of 100");
+        live.setRule(Tier.FREE, Rule.perMinute(60, 10));    // ops lowers the plan while the process runs
+        check(sale.allow("acme").remaining() == 9, "the burst drops to 10 on the next decision, and the held tokens drop with it");
+
+        // 9. the leaky bucket is not a different answer: GCRA admits exactly what the token bucket admits
+        ManualClock tbc = new ManualClock(0), gc = new ManualClock(0);
+        RateLimiter tb = new RateLimiter(), gcra = new RateLimiter();
+        Rule same = new Rule(10, 1_000L, 5);                // 10 a second, burst 5, for both
+        tb.configure(new TokenBucket(), new FlatRules(same), tbc);
+        gcra.configure(new Gcra(), new FlatRules(same), gc);
+        StringBuilder tbRun = new StringBuilder(), gcraRun = new StringBuilder();
+        for (long jump : new long[] { 0, 100, 250, 1_000 }) {   // the clock jumps, then eight calls at that instant
+            tbc.advance(jump); gc.advance(jump);
+            for (int i = 0; i < 8; i++) {
+                tbRun.append(tb.allow("k").allowed() ? '1' : '0');
+                gcraRun.append(gcra.allow("k").allowed() ? '1' : '0');
+            }
+        }
+        check(tbRun.toString().equals(gcraRun.toString()),
+              "gcra admits the same calls as the token bucket: " + tbRun + " vs " + gcraRun);
+
+        System.out.println(failures == 0 ? "\nALL PASS" : "\n" + failures + " FAILED");
+        if (failures > 0) System.exit(1);
+    }
+}

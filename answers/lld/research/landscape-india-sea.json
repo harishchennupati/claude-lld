@@ -1,0 +1,3405 @@
+[
+  {
+    "id": "ticket-booking-train-flight",
+    "title": "Train / flight seat booking (IRCTC, Cleartrip)",
+    "kind": "lld",
+    "prompt": "Search trains/flights by route+date, show seat availability, book and cancel seats. Train variant: a seat can be re-sold for a later segment (A->B then C->D). Flight variant: flights on sectors, several fare types, each with its own seat list, users pay from a fund balance.",
+    "companies": [
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5724806/"
+        ]
+      },
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7383296/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5780635/"
+        ]
+      },
+      {
+        "name": "InMobi",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7422653/"
+        ]
+      },
+      {
+        "name": "Navi",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4572315/"
+        ]
+      },
+      {
+        "name": "MakeMyTrip",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4700672/"
+        ]
+      },
+      {
+        "name": "Cleartrip",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7052339/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7560534/"
+        ]
+      }
+    ],
+    "reports": 8,
+    "followups": [
+      "fair handling of concurrent bookings for the same seat (pessimistic vs optimistic locking)",
+      "segment-wise seat reuse on a train",
+      "waitlist and promotion on cancel",
+      "PNR / ticket generation after payment",
+      "DB schema for trains/routes/seats/bookings (+ payments table)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Most-reported NEW problem. Zepto/InMobi/Walmart asked it as an LLD round (classes+schema+locking); Cleartrip as a 90-min runnable machine-coding problem (flight inventory); MMT and Navi in design rounds that went down to schema and booking algorithm."
+  },
+  {
+    "id": "job-scheduler",
+    "title": "Task / job scheduler (delayed, recurring, dependencies)",
+    "kind": "lld",
+    "prompt": "Accept jobs with a run time (epoch or cron-like), execute them when due; later parts add recurring schedules, priorities, dependencies and retries.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6260445/"
+        ]
+      },
+      {
+        "name": "MPL",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3954383/"
+        ]
+      },
+      {
+        "name": "Oracle",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4160037/"
+        ]
+      },
+      {
+        "name": "Media.net",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7346375/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7196883/"
+        ]
+      },
+      {
+        "name": "Harness",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8524180/"
+        ]
+      },
+      {
+        "name": "Arcesium",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3351948/"
+        ]
+      },
+      {
+        "name": "Uber / Goldman Sachs (compiled post)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7646238/"
+        ]
+      }
+    ],
+    "reports": 7,
+    "followups": [
+      "dependencies between tasks + circular-dependency detection (Media.net)",
+      "priority ordering; retry up to N failures",
+      "cancel a task and its dependents",
+      "parallel execution with a worker pool",
+      "execution history",
+      "recurring intervals and 'run at time T' (Harness)",
+      "build it as a ScheduledThreadPoolExecutor with a DelayQueue (Uber/GS)",
+      "place jobs on clusters that satisfy CPU/RAM needs (Arcesium)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Swiggy Instamart phrased it as 'design your own cron: unix command + epoch time'. Uber and MPL mixed LLD with HLD in the same hour. Closest existing pages: mt-blocking-queue, mt-producer-consumer."
+  },
+  {
+    "id": "inventory-order-management",
+    "title": "Inventory + order management (block, confirm, release stock)",
+    "kind": "lld",
+    "prompt": "addProduct / getStock / createOrder / confirmOrder: creating an order blocks stock, confirming deducts it, an unconfirmed block expires (e.g. after 5 minutes). Some versions split internal stock from external-seller stock reached via APIs.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3918884/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5863391/",
+          "https://leetcode.com/discuss/post/5925685/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7854949/"
+        ]
+      },
+      {
+        "name": "Licious",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3846272/"
+        ]
+      },
+      {
+        "name": "Harness",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7560806/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4374203/"
+        ]
+      }
+    ],
+    "reports": 7,
+    "followups": [
+      "thread safety under many concurrent buyers (Meesho: 10M users, 5M products)",
+      "auto-release of expired blocks (background sweeper)",
+      "stock never negative / no overselling",
+      "internal vs external inventory sources (PhonePe)",
+      "how the locking changes when the service is distributed (PhonePe review round)",
+      "multi-tenant stores (Harness 'design Shopify')"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Meesho's signature machine-coding problem (3 reports, SDE-1 to SDE-3). PhonePe gave it with only 1 hour to code. Aggregator codezym also tags it for Flipkart, Intuit, TikTok, DE Shaw, Amazon (weak)."
+  },
+  {
+    "id": "ecommerce-cart",
+    "title": "Shopping cart / marketplace checkout (with discounts)",
+    "kind": "lld",
+    "prompt": "Users browse products, add/remove items in a cart, see totals, check out into an order, see order history. Richer versions validate stock, apply discounts, take payment through a pluggable interface and send notifications.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7069404/"
+        ]
+      },
+      {
+        "name": "Cars24",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5050216/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3605761/",
+          "https://leetcode.com/discuss/post/4472947/"
+        ]
+      },
+      {
+        "name": "Harness",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7560806/"
+        ]
+      },
+      {
+        "name": "Codezym shopping-cart tags (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/paypal",
+          "https://codezym.com/lld/walmart",
+          "https://codezym.com/lld/amazon"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "discount / offer application at checkout (Swiggy)",
+      "inventory validation and locking during checkout",
+      "pluggable payment interface",
+      "notification on order events",
+      "API retry strategy (Cars24)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "A stand-alone 'coupon / offers engine' was NOT found as its own first-hand question; discounts show up as one requirement inside cart, wallet (PhonePe offers) or billing problems. Codezym lists 'Billing and discounts system' for Flipkart/Cleartrip (aggregator only)."
+  },
+  {
+    "id": "library-management",
+    "title": "Library / book-lending system",
+    "kind": "lld",
+    "prompt": "Catalog books (several copies each), register members, borrow and return, limit books per member, list/filter books by author or availability. Flipkart's version adds a FIFO waitlist and late fines.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6729792/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4343398/",
+          "https://leetcode.com/discuss/post/4374203/"
+        ]
+      },
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5760479/"
+        ]
+      },
+      {
+        "name": "Slice",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6704196/"
+        ]
+      },
+      {
+        "name": "Licious",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5996910/"
+        ]
+      },
+      {
+        "name": "workat.tech practice list (aggregator)",
+        "year": null,
+        "urls": [
+          "https://workat.tech/machine-coding/practice"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "FIFO waitlist: a returned copy is held for the first waiting member",
+      "fine after 14 days (pluggable fine policy)",
+      "max 3 books per member (Slice)",
+      "generated IDs like ROW1234 (author prefix + number)",
+      "class diagram + DB schema only (Walmart)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Walmart asked it in the 'Java + LLD' round as design-only; Flipkart as a 90-minute runnable machine-coding drive."
+  },
+  {
+    "id": "meeting-room-booking",
+    "title": "Conference / meeting room booking",
+    "kind": "lld",
+    "prompt": "Rooms spread over buildings and floors; book a room for a time slot, list free rooms, cancel. Uber's short version: scheduleMeeting(start,end) returns a reservation id with a room, or an error.",
+    "companies": [
+      {
+        "name": "Cleartrip",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3464380/",
+          "https://leetcode.com/discuss/post/3985584/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7560534/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7045314/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6705389/"
+        ]
+      },
+      {
+        "name": "Salesforce (compiled post)",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7385630/"
+        ]
+      },
+      {
+        "name": "Microsoft (compiled post)",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7418482/"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "capacity filter",
+      "notify invitees",
+      "per-room calendar for today",
+      "interval overlap check (sorted map per room)",
+      "max booking length (12h) and invalid-input errors",
+      "concurrent bookings of the same room"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Uber candidate was told it was 'a data-structure question' inside the LLD round and was rejected for over/under-structuring. Overlaps heavily with calendar (below)."
+  },
+  {
+    "id": "stock-broker",
+    "title": "Stock broker / trading app with portfolio (Zerodha, Groww)",
+    "kind": "lld",
+    "prompt": "Onboard users, list stocks, buy and sell, show each user's portfolio and transaction history. Flipkart's version adds market open/close and a limited 'time shift' that moves prices randomly.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6287328/"
+        ]
+      },
+      {
+        "name": "MakeMyTrip",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8102230/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7058445/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6628212/"
+        ]
+      },
+      {
+        "name": "Tekion",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8503753/"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "add stocks only while market is open",
+      "time-shift operation at most 10 times a day with bounded random price change",
+      "transaction history (bonus)",
+      "DB schema + APIs (Tekion, pen and paper)",
+      "why each pattern (MMT)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Different from the order-book slug: here there is no matching of buyers and sellers, the app trades against a price feed. Groww/Hotstar/Meesho asked the matching version (see order-book variants)."
+  },
+  {
+    "id": "social-feed",
+    "title": "Social network / news feed (Twitter, Instagram) + comments",
+    "kind": "lld",
+    "prompt": "Users post, follow, reply, up/down-vote; show a personalised feed ranked by follow, score, replies and recency. Variants: hashtag follows (Gojek), comment threads with one reply level and annotations (Postman).",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5008378/"
+        ]
+      },
+      {
+        "name": "Gojek",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6305173/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6293258/"
+        ]
+      },
+      {
+        "name": "Salesforce",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4339386/"
+        ]
+      },
+      {
+        "name": "Postman",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6747306/",
+          "https://leetcode.com/discuss/post/6820759/"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "feed ranking rules (followed users first, then score, replies, freshness)",
+      "influencer vs user roles, follow hashtags",
+      "comment tree with tagging users",
+      "Twitter LLD then HLD in the same round (PhonePe)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Flipkart's hiring-drive version is a full 90-min runnable console app; Postman's comment system was coded in a Google Doc."
+  },
+  {
+    "id": "task-management",
+    "title": "Task / issue tracker (Jira, Trello, sprint planner)",
+    "kind": "lld",
+    "prompt": "Create tasks/stories/bugs, assign to users, move through statuses, group into sprints; keep an activity log of every change.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4931932/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5049988/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6145158/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7033066/"
+        ]
+      },
+      {
+        "name": "workat.tech practice list (aggregator)",
+        "year": null,
+        "urls": [
+          "https://workat.tech/machine-coding/practice"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "a user can hold at most 2 in-progress tickets even under concurrent edits (Meesho)",
+      "sprint vs task separation (Flipkart feedback)",
+      "activity log for every action (PhonePe)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Flipkart candidate was marked down for putting sprint and task logic in one class and for one enum per model."
+  },
+  {
+    "id": "url-shortener",
+    "title": "URL shortener as LLD / machine coding",
+    "kind": "lld",
+    "prompt": "createURL(originalUrl, user, expiryDays) -> short code; resolve; expire. Postman asks for a small working API.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4047665/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5040334/"
+        ]
+      },
+      {
+        "name": "Postman",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5527905/"
+        ]
+      },
+      {
+        "name": "Postman",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6820759/"
+        ]
+      },
+      {
+        "name": "MakeMyTrip",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5916765/"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "code generation (hash vs counter), collisions",
+      "expiry handling",
+      "HTTP status codes",
+      "test the API live"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Usually an HLD topic; these five reports treat it as class design + code."
+  },
+  {
+    "id": "leaderboard",
+    "title": "Leaderboard service (games, contests, ratings)",
+    "kind": "lld",
+    "prompt": "Accept score submissions and return top-N / a user's rank. PhonePe: daily leaderboards for several games, campaign configuration, full and partial rank lists, result computation, concurrent submissions.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7474219/"
+        ]
+      },
+      {
+        "name": "Games24x7",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6896211/"
+        ]
+      },
+      {
+        "name": "Goldman Sachs",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7069404/"
+        ]
+      },
+      {
+        "name": "Groww",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7046387/"
+        ]
+      },
+      {
+        "name": "Gojek",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6440962/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6583356/"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "concurrent score submissions",
+      "top-N contestants and top-N departments (PhonePe hackathon variant)",
+      "average rating per user printed in descending order (Atlassian agent-rating variant)",
+      "millions of events per second (Games24x7)"
+    ],
+    "maps_to": null,
+    "tier": 1,
+    "notes": "Mixed depth: PhonePe is a coded machine-coding problem; Groww/Gojek/Games24x7 were design discussions. Codezym also lists 'Leaderboard for fantasy teams' and 'Customer support agent rating leaderboard' (aggregator)."
+  },
+  {
+    "id": "calendar",
+    "title": "Calendar / meeting scheduler with recurring events (Google Calendar)",
+    "kind": "lld",
+    "prompt": "Create events with location/start/end, recurring events (daily/weekly), share with view/edit permission, find a common free time across people and rooms, propose changes, list conflicts.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3609494/",
+          "https://leetcode.com/discuss/post/3651542/"
+        ]
+      },
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5739688/",
+          "https://leetcode.com/discuss/post/5870596/",
+          "https://leetcode.com/discuss/post/5885026/",
+          "https://leetcode.com/discuss/post/7353272/"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "find free time using others' availability and room availability",
+      "store recurring rules vs expanded instances",
+      "permissions (view/edit)",
+      "shifts per user (PhonePe)",
+      "judged on class + DB + API design (Zepto)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Zepto SDE-3 favourite in 2024 (LLD rounds run by InterviewVector). Zepto calendar posts may include 2 posts by one candidate; counted as 4 conservatively for Zepto incl. the Nov-2024 meeting scheduler."
+  },
+  {
+    "id": "vehicle-rental",
+    "title": "Vehicle / car / bike rental",
+    "kind": "lld",
+    "prompt": "Branches with vehicle types, book by hourly slot at a fixed price, default choice = lowest price, fall back to another branch when none is free, system view of booked and free vehicles.",
+    "companies": [
+      {
+        "name": "super.money (Flipkart group)",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6400849/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7302014/"
+        ]
+      },
+      {
+        "name": "Adobe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6177012/"
+        ]
+      },
+      {
+        "name": "PhonePe (title-only, weak)",
+        "year": null,
+        "urls": [
+          "https://enginebogie.com/interview/experience/phonepe-software-development-enginner-2/99"
+        ]
+      },
+      {
+        "name": "Codezym tags (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/phonepe",
+          "https://codezym.com/lld/flipkart"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "pluggable vehicle-selection strategy",
+      "fallback branch",
+      "reservations + car inventory as two services (Uber)",
+      "schema design + 2-3 features in depth (Adobe)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "hotel-booking",
+    "title": "Hotel booking",
+    "kind": "lld",
+    "prompt": "Search hotels, view available rooms, reserve, manage bookings.",
+    "companies": [
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5737970/"
+        ]
+      },
+      {
+        "name": "Cars24",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5050216/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "DB schema",
+      "API design",
+      "concurrent reservation of the last room; ACID / isolation levels (Cars24)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Both were LLD rounds run by third-party interviewers (InterviewVector). Agoda asks Booking.com-style search/booking only as HLD."
+  },
+  {
+    "id": "doctor-appointment",
+    "title": "Doctor appointment booking (Practo)",
+    "kind": "lld",
+    "prompt": "Doctors register with a speciality and open 30-minute slots (9am-9pm); patients search by speciality, book and cancel; a patient cannot hold two appointments in the same slot.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5377854/",
+          "https://leetcode.com/discuss/post/5383990/",
+          "https://leetcode.com/discuss/post/6168500/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6702200/",
+          "https://leetcode.com/discuss/post/6834461/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "ranked slot list with a pluggable ranking strategy (start time, doctor rating)",
+      "waitlist: first waiting patient gets a freed slot",
+      "trending doctor (bonus)",
+      "concurrency when two patients book the same slot (Flipkart review round)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Agoda asked 'doctor appointment booking app' only as an architecture/HLD prompt (2025)."
+  },
+  {
+    "id": "fitness-slot-booking",
+    "title": "Gym / fitness class slot booking",
+    "kind": "lld",
+    "prompt": "Admins create classes with capacity and time; members book, cancel, list bookings; no overbooking, no overlapping bookings for one member.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6980677/"
+        ]
+      },
+      {
+        "name": "Udaan",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7103567/"
+        ]
+      },
+      {
+        "name": "Codezym tag (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/flipkart"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "tier quotas (Platinum 10 / Gold 5 / Silver 3 classes)",
+      "waitlist promotion on cancel",
+      "cancel only up to 30 min before start",
+      "thread-safe booking",
+      "staged requirements: Stage 1 must be fully working before Stage 2 (Udaan)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Codezym lists a Flipkart 'Gym fitness center / FlipFit' version (aggregator only)."
+  },
+  {
+    "id": "issue-resolution",
+    "title": "Customer-support issue / ticket assignment",
+    "kind": "lld",
+    "prompt": "Tickets arrive with a category; agents have skills in several categories; assign each ticket to a free capable agent; track agent work history and each ticket's phase.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5151898/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7096111/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7560534/"
+        ]
+      },
+      {
+        "name": "Codezym tags (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/phonepe",
+          "https://codezym.com/lld/atlassian"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "assignment strategies (round robin, least loaded)",
+      "queue when no agent is free, retry",
+      "audit trail of every phase (Flipkart)",
+      "shard agents by category (ThoughtSpot follow-up)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "delivery-assignment",
+    "title": "Delivery partner assignment (quick commerce, P2P parcel)",
+    "kind": "lld",
+    "prompt": "Onboard customers and delivery partners; auto-assign each order to an available partner, queue orders when none is free; pick-up, deliver, cancel rules; show order and partner status.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7588244/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6363567/"
+        ]
+      },
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5710176/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "thread safety",
+      "cancel allowed only before pick-up",
+      "notify via a mocked email/SMS vendor (bonus)",
+      "rate the driver; top-drivers dashboard (bonus)",
+      "route optimisation using third-party real-time data (Zepto)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Flipkart SDE-3 (Peer-to-peer delivery like Dunzo) and 'Flipkart Minutes' 2026. Existing food-delivery page covers restaurant-side assignment but not a driver pool."
+  },
+  {
+    "id": "search-engine",
+    "title": "In-memory document search engine",
+    "kind": "lld",
+    "prompt": "Create datasets, insert/delete text documents, search by keywords/pattern, order results (document size, keyword frequency, recency).",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6012081/"
+        ]
+      },
+      {
+        "name": "Razorpay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6888761/"
+        ]
+      },
+      {
+        "name": "Razorpay",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7575649/"
+        ]
+      },
+      {
+        "name": "Microsoft",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7507538/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "pluggable ordering strategy",
+      "inverted index / trie",
+      "AND-queries, tag search",
+      "delete correctness",
+      "AI tools allowed; judged on AI usage too (Razorpay 2026)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Razorpay's most repeated senior machine-coding problem 2024-2026."
+  },
+  {
+    "id": "circuit-breaker",
+    "title": "Circuit breaker",
+    "kind": "lld",
+    "prompt": "Wrap calls to a remote service: CLOSED -> OPEN after N failures, HALF_OPEN after a timeout, close again on success.",
+    "companies": [
+      {
+        "name": "Wise",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7061184/"
+        ]
+      },
+      {
+        "name": "Wise",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7500120/",
+          "https://leetcode.com/discuss/post/8480569/"
+        ]
+      },
+      {
+        "name": "Blinkit",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5123902/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "thread-safe implementation",
+      "configurable thresholds and windows",
+      "store/replay requests while the service is down (Blinkit)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Wise's 60-minute HackerRank pair-programming problem (3 reports incl. Hyderabad 2026)."
+  },
+  {
+    "id": "rule-engine",
+    "title": "Rule / expression engine",
+    "kind": "lld",
+    "prompt": "Evaluate business rules against records: Rippling = list of expense rules (total cap, per-seller-type cap, banned expense types) -> flag violations; Groww = evaluate a boolean expression string over a map of values.",
+    "companies": [
+      {
+        "name": "Rippling",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6850291/",
+          "https://leetcode.com/discuss/post/6807729/"
+        ]
+      },
+      {
+        "name": "Groww",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5506821/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "add new rule types / operators without touching existing code",
+      "model rules as data",
+      "operators &&, ||, ==, !=, <=, >="
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "feature-flag-rollout",
+    "title": "Feature flags / staged app-version rollout",
+    "kind": "lld",
+    "prompt": "Microsoft: design a feature flag system. PhonePe: app-version management — apps have versions with minimum OS, admins roll out install/update by strategy (beta devices, percentage), updates ship a diff.",
+    "companies": [
+      {
+        "name": "Microsoft",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7323765/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6661034/",
+          "https://leetcode.com/discuss/post/7211822/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "rollout strategies (beta, percentage)",
+      "install vs update-by-diff",
+      "device/OS compatibility checks"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "PhonePe's version was coded from scratch on CodeSignal (2 reports)."
+  },
+  {
+    "id": "document-versioning",
+    "title": "Document manager with versions / Google Docs with ACL",
+    "kind": "lld",
+    "prompt": "Create, update, view, delete text documents; keep every version and revert; only the owner edits; Razorpay/Microsoft asked Google Docs with access control.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4589653/"
+        ]
+      },
+      {
+        "name": "Razorpay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7360702/"
+        ]
+      },
+      {
+        "name": "Microsoft",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7135013/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "revert to a previous version",
+      "ACL per document",
+      "storage schema and sync (Razorpay)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "resource-allocator",
+    "title": "Resource / cluster allocation for tasks",
+    "kind": "lld",
+    "prompt": "Track servers (CPU config, price) in data centres or clusters and place tasks on single or multiple instances that meet the requirement; Microsoft: keep several containers running.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4406681/"
+        ]
+      },
+      {
+        "name": "Arcesium",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3351948/"
+        ]
+      },
+      {
+        "name": "Microsoft",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6869521/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "placement strategy (cheapest, best fit)",
+      "job priority",
+      "free resources when tasks end"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "snake-game",
+    "title": "Snake game (Nokia-style, not snake & ladder)",
+    "kind": "lld",
+    "prompt": "Grid, snake moves each tick, eats food and grows, dies on wall/self collision; print head and tail positions.",
+    "companies": [
+      {
+        "name": "Atlassian",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6399510/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7565749/"
+        ]
+      },
+      {
+        "name": "Zomato",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7573378/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "O(1) move with a deque + set",
+      "unit tests and exception handling are scored (Atlassian no-hire without them)"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "tagging-system",
+    "title": "Tagging / activity-tag system",
+    "kind": "lld",
+    "prompt": "PhonePe machine coding: add hierarchical tags to activities and count how often each tag is used across entities. Atlassian/Salesforce: tags across products (Jira, Confluence) with API + schema.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6293258/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4725877/",
+          "https://leetcode.com/discuss/post/6587244/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6763689/",
+          "https://leetcode.com/discuss/post/6907694/"
+        ]
+      },
+      {
+        "name": "Salesforce",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4339386/"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "top-10 trending tags",
+      "hierarchical tags",
+      "API design and DB schema"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Only PhonePe's is a coded LLD; Atlassian's is its standard HLD question that drifts into schema/API detail."
+  },
+  {
+    "id": "user-journey-workflow",
+    "title": "User journey / workflow state machine",
+    "kind": "lld",
+    "prompt": "PhonePe: journeys are DAGs of stages; users onboard once and move to the next stage when events match rules; journeys are time-bound or perpetual and must be activated. Salesforce: log state transitions of workflow steps.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5906754/"
+        ]
+      },
+      {
+        "name": "Salesforce",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7785889/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "mark time-bound journeys inactive after validity",
+      "isolation between journeys",
+      "event-driven stage transitions"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "load-balancer",
+    "title": "Load balancer (working service)",
+    "kind": "practical",
+    "prompt": "Razorpay: a REST app with config endpoints (add/remove backend, timeouts, health checks) that proxies all other routes to mocked backends using a pluggable algorithm. Media.net SRE: TCP key-value server, then add a proxy, then a load balancer.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7360702/"
+        ]
+      },
+      {
+        "name": "Media.net",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8436269/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "dynamic config changes",
+      "pluggable balancing algorithm",
+      "health checks"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": "Media.net's was an SRE loop."
+  },
+  {
+    "id": "board-game-ludo",
+    "title": "Ludo / board game",
+    "kind": "lld",
+    "prompt": "Model a multi-player board game (Ludo) with turns, dice and pieces.",
+    "companies": [
+      {
+        "name": "ShareChat",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3609519/"
+        ]
+      },
+      {
+        "name": "Urban Company",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5714042/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "Scrabble asked first at Urban Company"
+    ],
+    "maps_to": null,
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "thread-pool",
+    "title": "Thread pool / scheduled executor from scratch",
+    "kind": "concurrency",
+    "prompt": "Implement a ThreadPoolExecutor: worker threads, a blocking task queue, core vs max pool size, keep-alive, rejection policies, graceful shutdown. Uber/GS/Rubrik version: ScheduledExecutorService on a DelayQueue.",
+    "companies": [
+      {
+        "name": "Walmart",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7620235/"
+        ]
+      },
+      {
+        "name": "Uber / Goldman Sachs / Rubrik (compiled post)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7646238/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "race conditions and synchronisation choices",
+      "rejection policies",
+      "delayed and periodic tasks"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "First-hand only at Walmart; the Uber/GS/Rubrik claim comes from a compiled solution post (secondhand)."
+  },
+  {
+    "id": "auction",
+    "title": "Online auction (highest unique bid) / BidBlitz",
+    "kind": "lld",
+    "prompt": "Sellers create auctions with min/max bid limits and a participation cost; buyers bid, update or withdraw; on close the highest UNIQUE bid wins; seller profit = winning bid + 20% of participation fees - average of limits. 2023 variant: lowest bid with SuperCoins wins a daily item.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6039919/",
+          "https://leetcode.com/discuss/post/6153487/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4092098/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "preferred buyer (>2 past auctions) wins ties (bonus)",
+      "several auctions at once",
+      "view past winners (BidBlitz)"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Flipkart signature."
+  },
+  {
+    "id": "bnpl",
+    "title": "Buy Now Pay Later (Flipkart BNPL)",
+    "kind": "lld",
+    "prompt": "Seed and view inventory; users have a credit limit; buy now, clear dues within 30 days; view dues and history.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6036782/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8331479/",
+          "https://leetcode.com/discuss/post/8503504/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "credit limit checks",
+      "due dates / blacklisting on default",
+      "read input from file/STDIN/driver",
+      "AI use prohibited (2026 drive)"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Flipkart signature; still live in June and Sept 2026 drives."
+  },
+  {
+    "id": "bug-bounty",
+    "title": "Bug bounty program manager",
+    "kind": "lld",
+    "prompt": "Employees log bug reports received by email, assign them, move through statuses (Open ... BountyPaid, Closed), edit, comment; admins delete.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6607251/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "role-based permissions",
+      "status transition rules"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Flipkart signature (codezym lists it too)."
+  },
+  {
+    "id": "hackathon-platform",
+    "title": "Hackathon platform",
+    "kind": "lld",
+    "prompt": "Contestants (with department) solve problems (tag, difficulty, score); filter and sort problems; per-problem solver counts and average time; pluggable scoring; leaderboards for top contestants and top departments.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4623818/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6437969/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8382058/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "recommend top-5 related problems after a solve (extension)",
+      "scoring by score+time"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "PhonePe signature; interviewer who explains is not the one who evaluates."
+  },
+  {
+    "id": "microprocessor",
+    "title": "Microprocessor / register machine simulator",
+    "kind": "lld",
+    "prompt": "Registers A-D and commands like SET, ADD, INR, MOV, PRINT read as text; implement the machine so new commands plug in.",
+    "companies": [
+      {
+        "name": "CRED",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3984528/"
+        ]
+      },
+      {
+        "name": "CRED",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5926410/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "command pattern",
+      "pre-written unit tests and model classes on HackerRank (2024)"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "CRED signature."
+  },
+  {
+    "id": "loan-emi",
+    "title": "In-memory loan EMI calculator",
+    "kind": "lld",
+    "prompt": "Model loans and compute EMIs; completed with bonus requirements.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5328449/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "PDE (product development engineer) track."
+  },
+  {
+    "id": "vcs-git",
+    "title": "Git-like version control",
+    "kind": "lld",
+    "prompt": "Implement init, add <regex>, checkout -b, reset HEAD~n, commit -m/-am, status, log, diff, help with extensible code.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7273127/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "AI code assistant allowed in the proctored assessment"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "middleware-router",
+    "title": "Middleware router with wildcards",
+    "kind": "lld",
+    "prompt": "put(path, value) / get(path) where get supports '*' segments (e.g. /a/*/c).",
+    "companies": [
+      {
+        "name": "Atlassian",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4725877/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6763689/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8293408/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "trie implementation (interviewer insisted, 2026)",
+      "multithreaded access",
+      "hash map vs trie vs regex"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Atlassian code-design signature."
+  },
+  {
+    "id": "subscription-billing",
+    "title": "Subscription cost calculator",
+    "kind": "lld",
+    "prompt": "Products priced per month (JIRA $10, CONFLUENCE $7.5, BITBUCKET $8); users subscribe to combinations; compute monthly billing for a year.",
+    "companies": [
+      {
+        "name": "Atlassian",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6907694/"
+        ]
+      },
+      {
+        "name": "Codezym 'Product plan cost explorer' (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/atlassian"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "mid-month changes / proration",
+      "extensibility scoring ('how many lines change for a new requirement')"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Subscription billing at Razorpay, PhonePe and Groww was asked only as HLD."
+  },
+  {
+    "id": "employee-hierarchy",
+    "title": "Employee / team directory",
+    "kind": "lld",
+    "prompt": "Add employee, assign manager, add to team, show the hierarchy under anyone, roll up employee and team CTC; 2026 version: get/changeManager/addEmployee with at least two O(1) operations.",
+    "companies": [
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6880181/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8110219/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "time-complexity constraints beat class elegance"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Uber signature."
+  },
+  {
+    "id": "train-platform",
+    "title": "Train-to-platform assignment",
+    "kind": "lld",
+    "prompt": "Assign trains to platforms by schedule; query which train is on a platform at time t and which platform a train is on.",
+    "companies": [
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7182332/"
+        ]
+      },
+      {
+        "name": "Uber (Medium, snippet only)",
+        "year": 2024,
+        "urls": [
+          "https://medium.com/@laxmankumarmegwal/uber-interview-experience-l4-sde2-backend-december-2024-da0f059c230e"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "min-heap assignment strategy vs random strategy",
+      "time-based queries"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Uber signature."
+  },
+  {
+    "id": "access-management",
+    "title": "Employee access / resource manager",
+    "kind": "lld",
+    "prompt": "grant, revoke, get access for employees to resources; add/remove resources.",
+    "companies": [
+      {
+        "name": "Rippling",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7069356/"
+        ]
+      },
+      {
+        "name": "Rippling",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7494610/",
+          "https://leetcode.com/discuss/post/7602654/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "optimised lookups"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Rippling signature (SDE-1 LLD round)."
+  },
+  {
+    "id": "music-analytics",
+    "title": "Music player analytics",
+    "kind": "practical",
+    "prompt": "add_song, play_song(user, song), print songs ranked by unique listeners, recently played unique songs per user (last k).",
+    "companies": [
+      {
+        "name": "Rippling",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6850291/"
+        ]
+      },
+      {
+        "name": "interviewdb (aggregator)",
+        "year": null,
+        "urls": [
+          "https://www.interviewdb.io/question/rippling/music-player"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "unique-user counting",
+      "recent-k with de-duplication"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "delivery-cost-tracker",
+    "title": "Delivery cost tracker",
+    "kind": "practical",
+    "prompt": "add_driver, add_delivery(driver, start, end), total cost; then pay_up_to(time) and cost still unpaid; then max active drivers in the last 24h.",
+    "companies": [
+      {
+        "name": "Rippling",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6850291/"
+        ]
+      },
+      {
+        "name": "Rippling",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7602654/",
+          "https://leetcode.com/discuss/post/7649290/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "done in Rippling's AI-coding round (2026)"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Rippling signature."
+  },
+  {
+    "id": "amazon-locker",
+    "title": "Amazon locker system",
+    "kind": "lld",
+    "prompt": "Assign parcels to lockers by size, pickup codes, expiry.",
+    "companies": [
+      {
+        "name": "Zeta",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7279705/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "crowdfunding",
+    "title": "Medical crowdfunding",
+    "kind": "lld",
+    "prompt": "Patients raise several campaigns, donors donate to many campaigns, track campaign status; coded in 90 minutes on-site.",
+    "companies": [
+      {
+        "name": "Navi",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8120706/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "survey-builder",
+    "title": "Survey builder (SurveyMonkey)",
+    "kind": "lld",
+    "prompt": "Surveys, questions, responses with API design and schema.",
+    "companies": [
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5965272/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "review-rating",
+    "title": "Reviews and ratings (user-generated content)",
+    "kind": "lld",
+    "prompt": "Post reviews/ratings, censor bad content, compute average rating; classes + schema.",
+    "companies": [
+      {
+        "name": "Myntra",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4620440/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "where censoring sits in the flow"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "package-tracking",
+    "title": "Package tracking",
+    "kind": "lld",
+    "prompt": "Track shipments through checkpoints.",
+    "companies": [
+      {
+        "name": "Walmart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6104099/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "multithreading and locks questions in the same round"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "connection-pool",
+    "title": "Generic connection / resource pool",
+    "kind": "concurrency",
+    "prompt": "Hand out connections from a bounded pool (thread pool, DB pool); callers wait when empty.",
+    "companies": [
+      {
+        "name": "Walmart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6146141/"
+        ]
+      },
+      {
+        "name": "Codezym tags (aggregator)",
+        "year": null,
+        "urls": [
+          "https://codezym.com/lld/salesforce",
+          "https://codezym.com/lld/walmart"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "interviewer wanted code in the IDE straight away"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "tree-of-space",
+    "title": "Tree of Space: lock / unlock / upgrade on an M-ary tree",
+    "kind": "concurrency",
+    "prompt": "Lock(X,uid) fails if any ancestor or descendant is locked; Unlock; Upgrade(X,uid) replaces descendant locks held by uid with a lock on X. Part B: make it thread-safe without locking the whole tree.",
+    "companies": [
+      {
+        "name": "Juspay",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4445507/"
+        ]
+      },
+      {
+        "name": "Juspay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6776238/",
+          "https://leetcode.com/discuss/post/7060019/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "per-node mutexes / atomics instead of one global lock",
+      "race when two descendants notify the same ancestor"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Juspay hackathon: Part A 2h, Part B 8h over Slack."
+  },
+  {
+    "id": "on-call-roster",
+    "title": "On-call roster (PagerDuty-like)",
+    "kind": "lld",
+    "prompt": "Employee roster / rotation management.",
+    "companies": [
+      {
+        "name": "Freshworks",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5761982/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Pen and paper, in person."
+  },
+  {
+    "id": "air-traffic-runway",
+    "title": "Air traffic control: runway assignment",
+    "kind": "lld",
+    "prompt": "Planes request land, takeoff, dock, undock; runways used by one plane at a time, first come first served; fast in-memory structures plus persistence.",
+    "companies": [
+      {
+        "name": "Gojek",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7321525/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "llm-chat-context",
+    "title": "ChatGPT-style chat with context management",
+    "kind": "lld",
+    "prompt": "Users keep many chats and resume old ones; the model keeps no memory, so the service must build the right context for each prompt; classes, APIs, DB.",
+    "companies": [
+      {
+        "name": "ThoughtSpot",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6938826/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "log-tail",
+    "title": "Live log tail (tail -f) server",
+    "kind": "practical",
+    "prompt": "Server watches a multi-GB append-only log, pushes new lines to many web clients, shows last 10 lines without re-reading the file.",
+    "companies": [
+      {
+        "name": "BrowserStack",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6456126/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "read last 10 lines by seeking from the end",
+      "push not poll"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "goal-gamification",
+    "title": "Goal-tracking library with gamification",
+    "kind": "lld",
+    "prompt": "Break long-term goals into tasks; points, streaks, badges, leaderboards.",
+    "companies": [
+      {
+        "name": "Microsoft",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7135013/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Microsoft hiring drive; same candidate also got Google Docs."
+  },
+  {
+    "id": "autocomplete",
+    "title": "Autocomplete engine",
+    "kind": "lld",
+    "prompt": "Return top-k suggestions for a prefix, update frequencies.",
+    "companies": [
+      {
+        "name": "Microsoft (compiled post)",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7164991/"
+        ]
+      },
+      {
+        "name": "TikTok (phone screen, location unknown)",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5123280/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "top-k by frequency",
+      "trie with cached top-k"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Weak: one secondhand, one data-structure screen."
+  },
+  {
+    "id": "google-classroom",
+    "title": "Google Classroom",
+    "kind": "lld",
+    "prompt": "Teachers, students, subjects/classes.",
+    "companies": [
+      {
+        "name": "DE Shaw",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6754544/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "undo-delete-ttl",
+    "title": "Undo delete with TTL (Postman collections)",
+    "kind": "lld",
+    "prompt": "Deleted collections can be restored for a limited time.",
+    "companies": [
+      {
+        "name": "Postman",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5502573/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "scaling the undo store",
+      "TTL expiry"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Same loop: read the pickleDB code, split the big class, add TTL."
+  },
+  {
+    "id": "chat-app",
+    "title": "Chat application (WhatsApp) as LLD",
+    "kind": "lld",
+    "prompt": "One-to-one/group messages, delivery state; plus a separate multithreading coding question.",
+    "companies": [
+      {
+        "name": "DE Shaw",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6761878/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "at least 5 follow-ups"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Elsewhere chat is asked as HLD (Uber staff, Agoda, Amazon), not LLD."
+  },
+  {
+    "id": "fantasy-team",
+    "title": "Fantasy team selection validator (Dream11)",
+    "kind": "lld",
+    "prompt": "User has credits; pick exactly X players; min/max per category (keeper, batter...); at most Y from one real team; validate each pick.",
+    "companies": [
+      {
+        "name": "Dream11",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6604836/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Asked in a frontend (React Native) loop. Codezym's 'Leaderboard for fantasy teams' is aggregator-only."
+  },
+  {
+    "id": "cricket-scoreboard",
+    "title": "Cricket scoring / match simulator (Cricbuzz)",
+    "kind": "lld",
+    "prompt": "Simulate or score a short match: overs, balls, runs, wickets, strike change, extras.",
+    "companies": [
+      {
+        "name": "Flipkart (iOS role)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7644130/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "no-ball, wide, free-hit rules",
+      "observer for live scoreboard"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Only one in-window report and it is a mobile role; the classic Swiggy 'design Cricbuzz' report is from 2022 (outside window)."
+  },
+  {
+    "id": "code-review-platform-round",
+    "title": "Agoda platform round: review a given Java service",
+    "kind": "practical",
+    "prompt": "Given a supplier/vendor search or booking service in Java, review it like a PR, then design APIs, cache keys (productId, vendorId) and indexes; refactor vendor calls behind a Strategy interface.",
+    "companies": [
+      {
+        "name": "Agoda",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7199643/",
+          "https://leetcode.com/discuss/post/7313063/"
+        ]
+      },
+      {
+        "name": "Agoda",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8292630/",
+          "https://leetcode.com/discuss/post/8540150/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "find bottlenecks proactively (staff bar)",
+      "plain HTTP-client knowledge"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Agoda signature (Bangkok + Gurugram)."
+  },
+  {
+    "id": "stripe-practical",
+    "title": "Stripe multi-part practical (payments / fraud validation)",
+    "kind": "practical",
+    "prompt": "Multi-part coding on realistic payment data: validate records, extract features, compute a match ratio, return specific error codes; onsite adds Integration (call a live API) and Bug Bash (fix a failing test in an unfamiliar repo).",
+    "companies": [
+      {
+        "name": "Stripe",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7497123/",
+          "https://leetcode.com/discuss/post/7521596/",
+          "https://leetcode.com/discuss/post/7566910/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "each part builds on the previous one"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Not LLD in the Indian sense; included because Stripe Singapore/Bangalore use this loop."
+  },
+  {
+    "id": "rank-teams-voting",
+    "title": "Rank teams by votes (code-design framing)",
+    "kind": "practical",
+    "prompt": "Rank candidates/teams from ballots by position counts with tie-breaks, then extend (e.g., distributed or multithreaded counting).",
+    "companies": [
+      {
+        "name": "Atlassian",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4725877/",
+          "https://leetcode.com/discuss/post/6587244/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "distributed approach",
+      "small LLD for rank computation with threads"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Essentially LeetCode 1366 asked inside Atlassian's coding / code-design loop."
+  },
+  {
+    "id": "x-splitwise",
+    "title": "Splitwise (expense sharing)",
+    "kind": "lld",
+    "prompt": "Add expenses split among users; per-user balances; simplified who-owes-whom.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4540407/"
+        ]
+      },
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6180241/"
+        ]
+      },
+      {
+        "name": "Groww",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5032433/",
+          "https://leetcode.com/discuss/post/5777593/"
+        ]
+      },
+      {
+        "name": "Groww",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7046387/"
+        ]
+      },
+      {
+        "name": "MakeMyTrip",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4700672/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5510451/"
+        ]
+      },
+      {
+        "name": "ShareChat",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6489146/"
+        ]
+      },
+      {
+        "name": "Licious",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3746403/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6145158/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6725210/"
+        ]
+      },
+      {
+        "name": "Uber (HLD)",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7672800/"
+        ]
+      }
+    ],
+    "reports": 12,
+    "followups": [
+      "equal only, but extensible to exact/percent (Razorpay)",
+      "simplify debts (min transactions)",
+      "currency conversion (Amazon)",
+      "sample test cases verified by interviewer (Swiggy, ~3h incl. explanation)"
+    ],
+    "maps_to": "splitwise",
+    "tier": 1,
+    "notes": "Still the single most repeated machine-coding problem in India."
+  },
+  {
+    "id": "x-parking-lot",
+    "title": "Parking lot",
+    "kind": "lld",
+    "prompt": "Multi-level lot, slots by vehicle type, park/unpark, tickets, payment.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7383296/"
+        ]
+      },
+      {
+        "name": "Swiggy",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7480610/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6737808/"
+        ]
+      },
+      {
+        "name": "Nykaa",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5002073/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8105382/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7054407/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6777577/"
+        ]
+      },
+      {
+        "name": "Gojek",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6371415/",
+          "https://leetcode.com/discuss/post/6440962/",
+          "https://leetcode.com/discuss/post/6491846/"
+        ]
+      }
+    ],
+    "reports": 10,
+    "followups": [
+      "slots reservable by several companies over time intervals (Swiggy 2026)",
+      "payment + switch to a subscription model (Flipkart)",
+      "multiple gates (Nykaa)",
+      "different parking strategies and pricing models (Amazon)",
+      "extend a given parking-lot codebase with missing commands + tests (Gojek)"
+    ],
+    "maps_to": "parking-lot",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-rate-limiter",
+    "title": "Rate limiter",
+    "kind": "lld",
+    "prompt": "Allow/deny requests per client using a pluggable algorithm.",
+    "companies": [
+      {
+        "name": "Atlassian",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/4377722/"
+        ]
+      },
+      {
+        "name": "Atlassian",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6587244/"
+        ]
+      },
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7069404/"
+        ]
+      },
+      {
+        "name": "Postman",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5170690/"
+        ]
+      },
+      {
+        "name": "Freshworks",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4532978/",
+          "https://leetcode.com/discuss/post/4832058/"
+        ]
+      },
+      {
+        "name": "Microsoft (compiled post)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7644877/"
+        ]
+      },
+      {
+        "name": "Games24x7 (JS)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8359465/"
+        ]
+      },
+      {
+        "name": "Chargebee",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8308156/"
+        ]
+      }
+    ],
+    "reports": 8,
+    "followups": [
+      "token bucket (Atlassian)",
+      "sliding window and leaky bucket both coded (Swiggy bar raiser)",
+      "combined limits across several APIs (Microsoft)"
+    ],
+    "maps_to": "rate-limiter",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-bookmyshow",
+    "title": "Movie ticket booking (BookMyShow)",
+    "kind": "lld",
+    "prompt": "Theatres, shows, seats, booking.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6168500/"
+        ]
+      },
+      {
+        "name": "Blinkit",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7083108/"
+        ]
+      },
+      {
+        "name": "Tekion",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6818916/"
+        ]
+      },
+      {
+        "name": "Urban Company",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5714042/"
+        ]
+      },
+      {
+        "name": "GoTo",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6344830/"
+        ]
+      }
+    ],
+    "reports": 5,
+    "followups": [
+      "seat-blocking algorithm (GoTo)",
+      "LLD then HLD in one round: actors, models, APIs, schema (Flipkart design round)"
+    ],
+    "maps_to": "bookmyshow",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-notification",
+    "title": "Notification system",
+    "kind": "lld",
+    "prompt": "Send notifications over channels based on events and preferences.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7389374/"
+        ]
+      },
+      {
+        "name": "Blinkit",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8514070/"
+        ]
+      },
+      {
+        "name": "Ola",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5616645/"
+        ]
+      },
+      {
+        "name": "Cleartrip",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7533924/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8382058/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6834461/"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "stakeholder-specific rules: customer gets every status, seller only 'placed', logistics only 'shipped' (Cleartrip)",
+      "HLD + LLD skeleton code + schema in 90 min (Ola)",
+      "UML on draw.io, trade-offs over code (Blinkit)"
+    ],
+    "maps_to": "notification-lld",
+    "tier": 1,
+    "notes": "Cleartrip panel rejected a Kafka-style design: they wanted a demoable solution, not a scalable one."
+  },
+  {
+    "id": "x-order-book",
+    "title": "Stock exchange order matching",
+    "kind": "lld",
+    "prompt": "Buy/sell orders matched by price-time priority.",
+    "companies": [
+      {
+        "name": "Groww",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6674506/"
+        ]
+      },
+      {
+        "name": "Hotstar",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5357949/"
+        ]
+      },
+      {
+        "name": "Meesho",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6701623/"
+        ]
+      },
+      {
+        "name": "PhonePe (design round)",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3608427/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "order expiry sweep (Meesho bonus)",
+      "priority queues per side",
+      "store matched orders in a table"
+    ],
+    "maps_to": "order-book",
+    "tier": 1,
+    "notes": "No first-hand Binance/OKX/Crypto.com report was found."
+  },
+  {
+    "id": "x-pubsub",
+    "title": "Pub-sub / Kafka-like queue",
+    "kind": "lld",
+    "prompt": "Topics, publishers, subscribers.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6890687/"
+        ]
+      },
+      {
+        "name": "Razorpay",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7600874/"
+        ]
+      },
+      {
+        "name": "Dream11",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5283151/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5807498/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8084315/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5253431/"
+        ]
+      },
+      {
+        "name": "Salesforce",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8399267/"
+        ]
+      }
+    ],
+    "reports": 7,
+    "followups": [
+      "per-consumer offset and in-order guaranteed delivery",
+      "filtered consumption",
+      "what to do when a consumer is down; spill to disk and restore (plus points)",
+      "concurrency support (Uber)"
+    ],
+    "maps_to": "pubsub",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-ride-sharing",
+    "title": "Ride sharing / cab booking",
+    "kind": "lld",
+    "prompt": "Riders, drivers, matching, trips.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6095033/"
+        ]
+      },
+      {
+        "name": "Salesforce",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7398700/"
+        ]
+      },
+      {
+        "name": "Uber",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8476675/"
+        ]
+      },
+      {
+        "name": "Nykaa",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7406725/"
+        ]
+      },
+      {
+        "name": "Zepto",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5703566/"
+        ]
+      },
+      {
+        "name": "Arcesium",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7178192/"
+        ]
+      },
+      {
+        "name": "Swiggy / MakeMyTrip (compiled)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7484820/"
+        ]
+      },
+      {
+        "name": "Paytm",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7113665/"
+        ]
+      }
+    ],
+    "reports": 7,
+    "followups": [
+      "offer a ride vs take a ride, select by preference (Swiggy/MMT car-pool version)",
+      "nearest five drivers, first come first served, route history (Nykaa)",
+      "driver sees accepted/declined requests; schema-first (Zepto)",
+      "premium cab allocation with multithreading (Uber 2026)",
+      "calculateETA by vehicle type via strategy (Paytm)"
+    ],
+    "maps_to": "ride-sharing",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-food-delivery",
+    "title": "Food ordering (restaurants with capacity)",
+    "kind": "lld",
+    "prompt": "Restaurants with menus and capacity; orders auto-assigned by a strategy.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6614846/",
+          "https://leetcode.com/discuss/post/6667785/",
+          "https://leetcode.com/discuss/post/6874431/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5066843/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "selection strategy chosen by customer (lowest cost / best rating)",
+      "capacity freed on completion",
+      "process commands sorted by timestamp even if given out of order (FoodKart)"
+    ],
+    "maps_to": "food-delivery",
+    "tier": 1,
+    "notes": "Flipkart evaluator 'cared more about features working than patterns' (2025)."
+  },
+  {
+    "id": "x-inmem-db",
+    "title": "In-memory DB / key-value store (transactions, TTL)",
+    "kind": "lld",
+    "prompt": "Tables or KV pairs with CRUD, then transactions or TTL.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4750617/"
+        ]
+      },
+      {
+        "name": "Rippling",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5071351/",
+          "https://leetcode.com/discuss/post/5411057/"
+        ]
+      },
+      {
+        "name": "Gojek",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5129060/"
+        ]
+      },
+      {
+        "name": "Coinbase",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5911625/"
+        ]
+      },
+      {
+        "name": "Postman",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5502573/"
+        ]
+      },
+      {
+        "name": "Media.net (SRE)",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/8436269/"
+        ]
+      }
+    ],
+    "reports": 7,
+    "followups": [
+      "typed columns with constraints (string <= 20 chars, int >= 1024) and filters (Razorpay)",
+      "file-based persistence + BEGIN/COMMIT/ROLLBACK + locks (Gojek BitDB)",
+      "CodeSignal levels: CRUD -> prefix search -> TTL at a timestamp -> ... (Coinbase)",
+      "read pickleDB, split the god-class, add TTL (Postman)"
+    ],
+    "maps_to": "inmem-db",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-lru-cache",
+    "title": "LRU / LFU / in-memory cache",
+    "kind": "lld",
+    "prompt": "Bounded cache with eviction.",
+    "companies": [
+      {
+        "name": "MakeMyTrip",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4700672/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5253431/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7096111/"
+        ]
+      },
+      {
+        "name": "Freshworks",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7031783/"
+        ]
+      },
+      {
+        "name": "LinkedIn",
+        "year": 2026,
+        "urls": [
+          "https://leetcode.com/discuss/post/7479450/"
+        ]
+      },
+      {
+        "name": "Cleartrip",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6289757/"
+        ]
+      }
+    ],
+    "reports": 6,
+    "followups": [
+      "concurrency on the cache (MMT)",
+      "evict by a rank from a mocked API, LRU as tie-break (LinkedIn)",
+      "two-level cache: per-user L1 (5) + global L2 (20) (Cleartrip ZipReel)"
+    ],
+    "maps_to": "lru",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-cache-eviction",
+    "title": "Expiring counter / TTL structures",
+    "kind": "lld",
+    "prompt": "Counts or values that expire after t seconds.",
+    "companies": [
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7043175/"
+        ]
+      },
+      {
+        "name": "Coinbase",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7278768/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "put_element / get_element_count / get_total_elements with expiry (Uber)",
+      "event store with 1-minute timeout using a heap (Coinbase)"
+    ],
+    "maps_to": "cache-eviction",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-snake-ladder",
+    "title": "Snake and ladder",
+    "kind": "lld",
+    "prompt": "Board game with snakes, ladders, dice, players.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4615686/",
+          "https://leetcode.com/discuss/post/5241117/"
+        ]
+      },
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6260445/"
+        ]
+      },
+      {
+        "name": "Tekion",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5224482/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "config file: N players, board size, S snakes, L ladders, D dice",
+      "landing on an occupied cell sends that player back to 1",
+      "generate a random VALID board",
+      "extra rules added live in the evaluation round"
+    ],
+    "maps_to": "snake-ladder",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-file-system",
+    "title": "In-memory file system",
+    "kind": "lld",
+    "prompt": "mkdir, cd, ls, pwd, touch.",
+    "companies": [
+      {
+        "name": "Uber",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7300207/",
+          "https://leetcode.com/discuss/post/7672800/"
+        ]
+      },
+      {
+        "name": "Coinbase",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7278768/"
+        ]
+      },
+      {
+        "name": "Freshworks",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5761982/"
+        ]
+      }
+    ],
+    "reports": 4,
+    "followups": [
+      "cd with '*' matching '.', '..' or any child (Uber)",
+      "multithreaded access (Freshworks)"
+    ],
+    "maps_to": "file-system",
+    "tier": 1,
+    "notes": ""
+  },
+  {
+    "id": "x-stackoverflow",
+    "title": "Q&A platform (Stack Overflow / Flipkart Overflow)",
+    "kind": "lld",
+    "prompt": "Topics, questions, answers, votes, feed.",
+    "companies": [
+      {
+        "name": "Flipkart",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3365100/"
+        ]
+      },
+      {
+        "name": "Flipkart",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5221179/"
+        ]
+      },
+      {
+        "name": "DE Shaw",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6754544/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "subscribe to topics; feed filtered by topic / answered / unanswered",
+      "answer only in subscribed topics"
+    ],
+    "maps_to": "stackoverflow",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-elevator",
+    "title": "Elevator",
+    "kind": "lld",
+    "prompt": "Lifts, requests, scheduling.",
+    "companies": [
+      {
+        "name": "Microsoft",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/6154075/"
+        ]
+      },
+      {
+        "name": "Tekion",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6583509/"
+        ]
+      },
+      {
+        "name": "Agoda",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5978891/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "state diagram (Tekion)"
+    ],
+    "maps_to": "elevator",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-vending",
+    "title": "Vending machine",
+    "kind": "lld",
+    "prompt": "States, coins, inventory.",
+    "companies": [
+      {
+        "name": "Swiggy",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/7069404/"
+        ]
+      },
+      {
+        "name": "Amazon",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6614921/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [],
+    "maps_to": "vending",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-logger",
+    "title": "Logger",
+    "kind": "lld",
+    "prompt": "Levels, sinks, formatting.",
+    "companies": [
+      {
+        "name": "Razorpay",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4824582/"
+        ]
+      },
+      {
+        "name": "ThoughtSpot",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3777195/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "chain of responsibility vs facade+factory"
+    ],
+    "maps_to": "logger",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-tic-tac-toe",
+    "title": "Tic-tac-toe",
+    "kind": "lld",
+    "prompt": "Board, players, win check.",
+    "companies": [
+      {
+        "name": "Microsoft",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5227991/"
+        ]
+      },
+      {
+        "name": "Walmart",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6798566/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [],
+    "maps_to": "tic-tac-toe",
+    "tier": 2,
+    "notes": ""
+  },
+  {
+    "id": "x-payment-gateway",
+    "title": "Payment gateway",
+    "kind": "lld",
+    "prompt": "Clients, pay modes, bank routing.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3599433/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5161744/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "router with distribution percentages across banks",
+      "switch traffic dynamically by bank success rate (extension)"
+    ],
+    "maps_to": "payment-gateway",
+    "tier": 3,
+    "notes": "PhonePe signature."
+  },
+  {
+    "id": "x-digital-wallet",
+    "title": "Digital wallet",
+    "kind": "lld",
+    "prompt": "Top-up, P2P transfer, balance, history.",
+    "companies": [
+      {
+        "name": "PhonePe",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3608427/"
+        ]
+      },
+      {
+        "name": "PhonePe",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/4992773/"
+        ]
+      }
+    ],
+    "reports": 2,
+    "followups": [
+      "offers applied to eligible transactions",
+      "sort and filter transaction history (extensible sorters/filters)"
+    ],
+    "maps_to": "digital-wallet",
+    "tier": 3,
+    "notes": "No CRED wallet/cashback LLD was found; CRED asks the microprocessor problem."
+  },
+  {
+    "id": "x-text-editor",
+    "title": "Text editor with undo/redo",
+    "kind": "lld",
+    "prompt": "append, backspace, undo, redo.",
+    "companies": [
+      {
+        "name": "Uber",
+        "year": 2023,
+        "urls": [
+          "https://leetcode.com/discuss/post/3657264/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "redo only valid right after undo/redo"
+    ],
+    "maps_to": "text-editor",
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "x-spreadsheet",
+    "title": "Spreadsheet",
+    "kind": "lld",
+    "prompt": "Cells, formulas.",
+    "companies": [
+      {
+        "name": "Rippling",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5071351/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [],
+    "maps_to": "spreadsheet",
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "x-banking",
+    "title": "Banking system (OOP coding)",
+    "kind": "lld",
+    "prompt": "Accounts, deposits, withdrawals, transfers.",
+    "companies": [
+      {
+        "name": "Agoda",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5978891/"
+        ]
+      }
+    ],
+    "reports": 1,
+    "followups": [
+      "asked inside the DSA round as OOP code in Java"
+    ],
+    "maps_to": "banking",
+    "tier": 3,
+    "notes": ""
+  },
+  {
+    "id": "concurrency-misc",
+    "title": "Small concurrency asks (thread-safe builder, multi-threaded fetch)",
+    "kind": "concurrency",
+    "prompt": "Thread-safe builder; multi-threaded page download + count.",
+    "companies": [
+      {
+        "name": "MakeMyTrip",
+        "year": 2024,
+        "urls": [
+          "https://leetcode.com/discuss/post/5916765/",
+          "https://leetcode.com/discuss/post/5492878/"
+        ]
+      },
+      {
+        "name": "DE Shaw",
+        "year": 2025,
+        "urls": [
+          "https://leetcode.com/discuss/post/6761878/"
+        ]
+      }
+    ],
+    "reports": 3,
+    "followups": [
+      "builder made thread-safe with atomics, not synchronized (MMT)",
+      "several threads fetch HTML and count a word, with communication between them (MMT)"
+    ],
+    "maps_to": null,
+    "tier": 3,
+    "notes": "Maps loosely to the mt-* pages; no first-hand report of print-series, H2O or dining philosophers was found in this window."
+  }
+]

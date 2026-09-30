@@ -1,0 +1,474 @@
+import java.time.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// ---- ext: a bank you can break on purpose, because nobody can make a real one time out to order
+/**
+ * Wraps a real bank and lets a test script the next answers. A forced DECLINED or TIMEOUT never reaches
+ * the real bank at all, so the balance is untouched. The two nastier failures are separate: a debit that
+ * LANDS but whose answer is lost, and a link that throws instead of answering.
+ */
+class FlakyBank implements BankService {
+    private final BankService base;
+    private final Deque<BankReply> scripted = new ArrayDeque<>();   // forced answers, oldest first
+    private long delayMs;                                           // how long the link takes to answer
+    private int lostAnswers;                                        // debits that land, but the answer is lost
+    private int linkDown;                                           // calls that throw before reaching the bank
+    final AtomicInteger debits = new AtomicInteger(), credits = new AtomicInteger();
+    FlakyBank(BankService base) { this.base = base; }
+    /** Force the next debit to answer this, without reaching the bank. */
+    FlakyBank next(BankReply r) { scripted.add(r); return this; }
+    /** The next debit reaches the bank and lands, but the machine hears TIMEOUT: the dangerous timeout. */
+    FlakyBank landsButTimesOut() { lostAnswers++; return this; }
+    /** The next few calls that move money throw, the way a dead network link does. */
+    FlakyBank linkDownFor(int calls) { linkDown = calls; return this; }
+    /** Make every debit take this long, so a test can have a bank call genuinely in flight. */
+    FlakyBank slowBy(long ms) { delayMs = ms; return this; }
+    public PinCheck authenticate(String cardNumber, String pin) { return base.authenticate(cardNumber, pin); }
+    public long balance(String accountId) { return base.balance(accountId); }
+    public void credit(String accountId, long amount, String key) { link(); credits.incrementAndGet(); base.credit(accountId, amount, key); }
+    public boolean reverse(String accountId, long amount, String key) { link(); return base.reverse(accountId, amount, key); }
+    public BankReply debit(String accountId, long amount, String key) {
+        debits.incrementAndGet();
+        link();
+        if (delayMs > 0) try { Thread.sleep(delayMs); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        BankReply forced = scripted.poll();
+        if (forced != null && forced != BankReply.OK) return forced;      // no money moves
+        BankReply r = base.debit(accountId, amount, key);
+        if (lostAnswers > 0) { lostAnswers--; return BankReply.TIMEOUT; } // it landed; the machine never hears
+        return r;
+    }
+    /** Throw if the link is down for this call. */
+    private void link() { if (linkDown > 0) { linkDown--; throw new RuntimeException("the link to the bank is down"); } }
+}
+
+// ---- ext: a dispenser that jams, so the reversal path can be tested
+/** Jams the first few pushes. The ATM turns a jam into a reversal, not a lost customer. */
+class JammingFeeder implements NoteFeeder {
+    private int jamsLeft;
+    JammingFeeder(int jams) { this.jamsLeft = jams; }
+    public void feed(EnumMap<Note, Integer> notes) {
+        if (jamsLeft-- > 0) throw new RuntimeException("note path blocked");
+    }
+}
+
+// ---- ext: "cap withdrawals at 20,000 a day" -- a new class that wraps the bank, nothing else moves
+/**
+ * A daily ceiling, counted where the money actually moves. It wraps a BankService, so the ATM, the states
+ * and the dispenser are untouched: an over-cap debit returns DECLINED, which is a path the machine already
+ * handles by putting every note back. "A day" is the bank's LOCAL day: midnight in Mumbai, not in London.
+ * The counter only moves for a key it has not counted before, and money that is reversed is given back to
+ * the day, so neither a retry nor a jam eats the customer's limit.
+ */
+class DailyCap implements BankService {
+    private final BankService base;
+    private final long cap;
+    private final Clock clock;
+    private final ZoneId zone;                                                 // where "today" is decided
+    private final Map<String, long[]> spent = new ConcurrentHashMap<>();       // account -> {day, total today}; also its lock
+    private final Set<String> counted = ConcurrentHashMap.newKeySet();         // keys already counted against a day
+    DailyCap(BankService base, long cap, Clock clock, ZoneId zone) {
+        this.base = base; this.cap = cap; this.clock = clock; this.zone = zone;
+    }
+    public PinCheck authenticate(String cardNumber, String pin) { return base.authenticate(cardNumber, pin); }
+    public long balance(String accountId) { return base.balance(accountId); }
+    public void credit(String accountId, long amount, String key) { base.credit(accountId, amount, key); }
+    /** Today's date in the bank's time zone, as a number: a new number means a fresh limit. */
+    private long today() { return Instant.ofEpochMilli(clock.nowMs()).atZone(zone).toLocalDate().toEpochDay(); }
+    /**
+     * Checking the cap and taking the money happen under the ACCOUNT's own lock, so two machines cannot both
+     * squeeze past the limit, and other accounts never wait. The first line inside is the one that is easy to
+     * get wrong: a key this decorator has already counted is a RETRY of a withdrawal that already happened,
+     * not a new one, so it goes straight through to the bank, which answers with what it did the first time.
+     * Without that line the retry would be measured against the cap a second time and come back DECLINED --
+     * and the machine would be told "no" about money that had actually left the account.
+     */
+    public BankReply debit(String accountId, long amount, String key) {
+        long[] s = spent.computeIfAbsent(accountId, a -> new long[] { today(), 0 });
+        synchronized (s) {
+            if (counted.contains(key)) return base.debit(accountId, amount, key);  // a retry: the bank has the answer
+            long day = today();
+            if (s[0] != day) { s[0] = day; s[1] = 0; }                             // a new local day, a fresh limit
+            if (s[1] + amount > cap) return BankReply.DECLINED;
+            BankReply r = base.debit(accountId, amount, key);
+            if (r == BankReply.OK && counted.add(key)) s[1] += amount;
+            return r;
+        }
+    }
+    /** A reversal: money that went back no longer counts against today's limit. */
+    public boolean reverse(String accountId, long amount, String key) {
+        boolean back = base.reverse(accountId, amount, key);
+        long[] s = spent.get(accountId);
+        if (back && s != null) synchronized (s) { if (counted.remove(key) && s[0] == today()) s[1] -= amount; }
+        return back;
+    }
+}
+
+// ---- ext: a second note rule proves the interface: keep the big notes for the big withdrawals
+/**
+ * Fewest notes, except that the 2000s are held back below a threshold so a morning of 500s does not empty
+ * the one cassette that makes large amounts possible. If the small notes cannot make the amount it falls
+ * back to the plain rule rather than refusing cash the machine is holding.
+ */
+class RationBigNotes implements NoteSelection {
+    private final NoteSelection base = new FewestNotes();
+    private final long threshold;
+    RationBigNotes(long threshold) { this.threshold = threshold; }
+    public EnumMap<Note, Integer> select(EnumMap<Note, Integer> stock, long amount) {
+        if (amount >= threshold) return base.select(stock, amount);
+        EnumMap<Note, Integer> withoutBig = new EnumMap<>(stock);
+        withoutBig.put(Note.N2000, 0);
+        EnumMap<Note, Integer> plan = base.select(withoutBig, amount);
+        return plan != null ? plan : base.select(stock, amount);
+    }
+}
+
+// ---- ext: LeetCode 2241's rule -- largest notes first, and never step back
+/**
+ * The rule LeetCode 2241 ("Design an ATM Machine") specifies: take as many of each note as fit, largest
+ * first, and if that does not come out exact, refuse. So 600 from {500 x 1, 200 x 3} is REFUSED there,
+ * although 200 x 3 would pay it. If the prompt says this, it is the spec: one more NoteSelection.
+ */
+class GreedyOnly implements NoteSelection {
+    public EnumMap<Note, Integer> select(EnumMap<Note, Integer> stock, long amount) {
+        EnumMap<Note, Integer> plan = new EnumMap<>(Note.class);
+        long left = amount;
+        for (Note n : Note.values()) {                                // largest first: the enum's order
+            int take = (int) Math.min(left / n.value, stock.getOrDefault(n, 0));
+            if (take > 0) { plan.put(n, take); left -= (long) take * n.value; }
+        }
+        return left == 0 ? plan : null;                               // no stepping back: exact or refused
+    }
+}
+
+// ---- ext: reconciling the rows the bank never answered
+/**
+ * What an operator (or a start-up task) does with an UNKNOWN row: it sends a REVERSAL for the row's key.
+ * If the debit landed, the bank gives the money back once; if it never landed, the bank marks the key dead,
+ * so the lost request cannot land if it turns up late. It never "asks" by debiting again: if the first
+ * debit never landed, that question would take the money now.
+ */
+class Reconciler {
+    private final BankService bank;
+    Reconciler(BankService bank) { this.bank = bank; }
+    /** Settle every UNKNOWN row it is given; any other row is left alone. Returns how many were settled. */
+    int settle(List<Withdrawal> rows) {
+        int done = 0;
+        for (Withdrawal w : rows) {
+            if (w.state != TxnState.UNKNOWN) continue;                         // never reverse a row that paid out
+            try {
+                if (bank.reverse(w.accountId, w.amount, w.key)) {
+                    w.state = TxnState.REVERSED;
+                    w.note = "reconciled: the debit had landed and nothing was dispensed, so it was reversed";
+                } else {
+                    w.state = TxnState.REFUSED;
+                    w.note = "reconciled: the debit never landed, and now it never can";
+                }
+                done++;
+            } catch (RuntimeException linkStillDown) { }                      // stays UNKNOWN: try again next run
+        }
+        return done;
+    }
+}
+
+// ---- ext: the same life cycle written as state objects instead of a table
+/**
+ * The alternative to the ALLOWED table: one class per situation. Every action defaults to throwing, so a
+ * concrete state only writes the moves it actually allows and every other move is rejected by construction.
+ * Same guarantee, more classes; the table is smaller, this reads better once a state carries real work.
+ */
+interface AtmState {
+    default AtmState insertCard(StateMachine m, Card c) { return illegal("insertCard"); }
+    default AtmState enterPin(StateMachine m, String pin) { return illegal("enterPin"); }
+    default AtmState withdraw(StateMachine m, long amount) { return illegal("withdraw"); }
+    default AtmState ejectCard(StateMachine m) { return illegal("ejectCard"); }
+    /** The default for every move a state does not allow: refuse, and name the state it happened in. */
+    private AtmState illegal(String action) {
+        throw new IllegalStateException(action + " is illegal in " + getClass().getSimpleName());
+    }
+}
+/** Nothing in the slot. The only legal move is to put a card in. */
+class IdleState implements AtmState {
+    public AtmState insertCard(StateMachine m, Card c) { m.card = c; return new HasCardState(); }
+}
+/** A card is in. A PIN or a cancel, nothing else; when the bank says BLOCKED the machine keeps the card. */
+class HasCardState implements AtmState {
+    public AtmState enterPin(StateMachine m, String pin) {
+        PinCheck r = m.bank.authenticate(m.card.number, pin);
+        if (r == PinCheck.OK) return new AuthedState();
+        if (r == PinCheck.WRONG) throw new IllegalArgumentException("wrong PIN, try again");
+        m.card = null;                                                   // BLOCKED: the card stays inside
+        throw new CardRetained("too many wrong PINs: card retained");
+    }
+    public AtmState ejectCard(StateMachine m) { m.card = null; return new IdleState(); }
+}
+/**
+ * The PIN was right. Money can move, in the same order as the table version: reserve, debit, push. This is a
+ * sketch of the LIFE CYCLE, not a second money path -- it has no journal, no TIMEOUT branch and no
+ * reversal, because those belong to ATM.doWithdraw. Compare the two for shape, and copy that one.
+ */
+class AuthedState implements AtmState {
+    public AtmState withdraw(StateMachine m, long amount) {
+        EnumMap<Note, Integer> plan = m.cash.reserve(amount);
+        if (plan == null) throw new IllegalStateException("the cassettes cannot make " + amount);
+        String key = "sm-" + m.card.accountId + "-" + amount + "-" + System.nanoTime();
+        if (m.bank.debit(m.card.accountId, amount, key) != BankReply.OK) {
+            m.cash.release(plan);
+            throw new IllegalStateException("the bank declined");
+        }
+        m.cash.push(plan);
+        return this;
+    }
+    public AtmState ejectCard(StateMachine m) { m.card = null; return new IdleState(); }
+}
+/** The context. It holds the current state and forwards; it contains no "if state ==" anywhere. */
+class StateMachine {
+    AtmState state = new IdleState();
+    Card card;
+    final BankService bank;
+    final CashDispenser cash;
+    StateMachine(BankService bank, CashDispenser cash) { this.bank = bank; this.cash = cash; }
+    void insertCard(Card c)      { state = state.insertCard(this, c); }
+    void enterPin(String pin) {
+        try { state = state.enterPin(this, pin); }
+        catch (CardRetained e) { state = new IdleState(); throw e; }     // the card is kept; the machine is free again
+    }
+    void withdraw(long amount)   { state = state.withdraw(this, amount); }
+    void ejectCard()             { state = state.ejectCard(this); }
+    String where()               { return state.getClass().getSimpleName(); }
+}
+
+// ---- ext: mini-statement -- a second listener, not a change to the machine
+/** Keeps the last few money events per account. It is an observer, so the ATM never learns it exists. */
+class MiniStatement implements AtmObserver {
+    private final int keep;
+    private final Map<String, Deque<String>> lines = new ConcurrentHashMap<>();
+    MiniStatement(int keep) { this.keep = keep; }
+    public void onEvent(AtmEvent e) {
+        if (e.amount == 0) return;
+        Deque<String> d = lines.computeIfAbsent(e.accountId, a -> new ArrayDeque<>());
+        synchronized (d) {
+            d.addFirst(e.kind + " " + e.amount + (e.txn == null ? "" : " " + e.txn.state));
+            while (d.size() > keep) d.removeLast();
+        }
+    }
+    /** The last few lines for one account, newest first. */
+    List<String> of(String accountId) {
+        Deque<String> d = lines.get(accountId);
+        if (d == null) return List.of();
+        synchronized (d) { return new ArrayList<>(d); }
+    }
+}
+
+// ---- ext: the drawer is running low -- a second listener, and the machine still learns nothing
+/**
+ * Pages an operator when the cash left in the machine drops under a floor. It is an AtmObserver, so it is
+ * added with addObserver and the ATM never learns it exists, and it runs after the lock is released, so a
+ * slow pager cannot hold up a customer. It alerts on the CROSSING, not on every event, so one empty drawer
+ * is one page and not a page per withdrawal; a refill that lifts the cash back over the floor re-arms it.
+ */
+class LowCashAlert implements AtmObserver {
+    private final CashDispenser dispenser;
+    private final long floor;
+    private volatile boolean raised;
+    final List<String> alerts = new CopyOnWriteArrayList<>();
+    LowCashAlert(CashDispenser dispenser, long floor) { this.dispenser = dispenser; this.floor = floor; }
+    public void onEvent(AtmEvent e) {
+        long left = dispenser.cash();
+        if (left < floor && !raised) { raised = true; alerts.add(e.atmId + ": " + left + " left, below " + floor + " -- refill"); }
+        if (left >= floor) raised = false;                               // refilled: arm it again
+    }
+}
+
+// ---- ext: a deposit the machine cannot count -- an envelope, verified the next morning
+/** Where an envelope is in its life: in the bin, counted, or found empty. */
+enum EnvelopeState { ACCEPTED, VERIFIED, REJECTED }
+/**
+ * The customer types an amount and posts an envelope. The balance does not move: the machine has no idea
+ * what is inside. A human counts it the next morning and the credit happens then, once, under the
+ * envelope's own key, so a re-run of the morning job cannot pay twice.
+ */
+class EnvelopeDeposit {
+    final String accountId, key;
+    final long claimed;
+    EnvelopeState state = EnvelopeState.ACCEPTED;
+    long verified;
+    EnvelopeDeposit(String accountId, long claimed, String key) { this.accountId = accountId; this.claimed = claimed; this.key = key; }
+    /** The morning count. Credits what was actually in the envelope, not what the customer typed. */
+    void verify(BankService bank, long actual) {
+        if (state != EnvelopeState.ACCEPTED) throw new IllegalStateException("already " + state);
+        verified = actual;
+        state = actual > 0 ? EnvelopeState.VERIFIED : EnvelopeState.REJECTED;
+        if (actual > 0) bank.credit(accountId, actual, key);
+    }
+}
+
+// ---- ext: state that must outlive the process -- the journal behind a repository
+/**
+ * The journal, moved out of the machine. claim() is the interesting one: it must refuse a key that is
+ * already there, which is what makes a machine that rebooted mid-transaction safe to restart.
+ */
+interface WithdrawalRepository {
+    /** Write the row before the bank is asked. False means this key already exists. */
+    boolean claim(Withdrawal w);
+    /** Write the outcome. */
+    void update(Withdrawal w);
+    /** Every row whose outcome nobody knows, for an operator or a start-up task. */
+    List<Withdrawal> unresolved();
+}
+/** One process, one map. In SQL it is the same two statements, shown below the class. */
+class InMemoryWithdrawalRepository implements WithdrawalRepository {
+    private final Map<String, Withdrawal> byKey = new ConcurrentHashMap<>();
+    public boolean claim(Withdrawal w) { return byKey.putIfAbsent(w.key, w) == null; }
+    public void update(Withdrawal w)   { byKey.put(w.key, w); }
+    public List<Withdrawal> unresolved() {
+        List<Withdrawal> out = new ArrayList<>();
+        for (Withdrawal w : byKey.values()) if (w.state == TxnState.UNKNOWN) out.add(w);
+        return out;
+    }
+}
+// the same two steps in SQL, where the database does what the lock and the CAS did here:
+//   INSERT INTO withdrawal (key, account, amount, state) VALUES (?, ?, ?, 'PENDING');   -- duplicate key = already tried
+//   UPDATE account SET balance = balance - ? WHERE id = ? AND balance >= ?;             -- 1 row = paid, 0 rows = declined
+
+// ---- ext: the customer walked away -- a watchdog that takes the card back
+/**
+ * A customer put a card in and wandered off. A watchdog thread takes the card back after a quiet period, and
+ * every customer action calls touch() to restart the countdown. The interesting part is not the timer, it is
+ * the lock: ejectCard() takes the machine's own lock, the same one a withdrawal holds, so the watchdog can
+ * never cut in between the debit and the push -- it queues behind the withdrawal and ejects afterwards. The
+ * price of that safety is that the watchdog waits for as long as the machine holds the lock, and the machine
+ * holds it across the bank round trip and the push; that is exactly what rung 1 of the ladder in move 8 buys.
+ */
+class SessionWatchdog {
+    private final ATM atm;
+    private final long quietMs;
+    private final ScheduledExecutorService timer;
+    private ScheduledFuture<?> pending;
+    final AtomicInteger fired = new AtomicInteger();                      // how often it gave up on a customer
+    SessionWatchdog(ATM atm, long quietMs, ScheduledExecutorService timer) {
+        this.atm = atm; this.quietMs = quietMs; this.timer = timer;
+    }
+    /** Start, or restart, the countdown. A screen touch, a PIN digit, a withdrawal: all of them call this. */
+    synchronized void touch() {
+        if (pending != null) pending.cancel(false);
+        pending = timer.schedule(this::giveUp, quietMs, TimeUnit.MILLISECONDS);
+    }
+    /** The visit ended by itself, so stop the countdown. */
+    synchronized void disarm() { if (pending != null) pending.cancel(false); pending = null; }
+    /** Deliberately NOT synchronized on this watchdog: it may block on the ATM's lock, and touch() must not. */
+    private void giveUp() {
+        fired.incrementAndGet();
+        try { atm.ejectCard(); } catch (RuntimeException ignored) { }      // waits for a withdrawal in flight
+    }
+}
+
+/** Runs every extension once so the file is proof rather than prose. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        InMemoryBank core = new InMemoryBank();
+        core.open("ACC-1", 100_000);
+        core.issueCard("4111-1111", "1234");
+        Clock clock = () -> 1_757_000_000_000L;                       // a fixed "today"
+
+        // 1. the daily cap: a new class around the bank; the ATM and the states do not change
+        DailyCap capped = new DailyCap(core, 20_000, clock, ZoneId.of("Asia/Kolkata"));
+        CashDispenser cash = new CashDispenser(new WorkingFeeder());
+        cash.refill(Note.N2000, 20); cash.refill(Note.N500, 20); cash.refill(Note.N200, 20); cash.refill(Note.N100, 20);
+        ATM atm = new ATM("ATM-X", capped, cash);
+        atm.setClock(clock);
+        MiniStatement mini = new MiniStatement(3);
+        atm.addObserver(mini);
+        atm.insertCard(new Card("4111-1111", "ACC-1"));
+        atm.enterPin("1234");
+        atm.withdraw(15_000);
+        try { atm.withdraw(10_000); }
+        catch (WithdrawalFailed f) { System.out.println("daily cap: " + f.getMessage() + "; cash still in machine " + cash.cash()); }
+        System.out.println("under the cap: " + atm.withdraw(5_000).notes);
+        System.out.println("mini-statement: " + mini.of("ACC-1"));
+        atm.ejectCard();
+
+        // 2. a second note rule: the 2000s are held back below 5,000
+        CashDispenser d2 = new CashDispenser(new WorkingFeeder());
+        d2.refill(Note.N2000, 5); d2.refill(Note.N500, 10);
+        d2.setSelection(new RationBigNotes(5_000));
+        System.out.println("2000 with the big notes rationed: " + d2.reserve(2_000)
+            + "; 6000 above the threshold: " + d2.reserve(6_000));
+        CashDispenser lc = new CashDispenser(new WorkingFeeder());
+        lc.refill(Note.N500, 1); lc.refill(Note.N200, 3);
+        lc.setSelection(new GreedyOnly());
+        System.out.println("LeetCode 2241's rule, 600 from 500x1 + 200x3: " + lc.reserve(600) + " (refused, as that spec says)");
+
+        // 3. the dispenser jams after the debit: the account is credited back, the notes go to the retract bin
+        core.open("ACC-2", 10_000);
+        CashDispenser jam = new CashDispenser(new JammingFeeder(1));
+        jam.refill(Note.N500, 4);
+        ATM atm2 = new ATM("ATM-J", core, jam);
+        atm2.setClock(clock);
+        atm2.insertCard(new Card("4111-1111", "ACC-2"));
+        atm2.enterPin("1234");
+        try { atm2.withdraw(1_000); }
+        catch (WithdrawalFailed f) { System.out.println("jam: " + f.w.state + " -> balance back to " + core.balance("ACC-2") + ", retracted notes " + jam.retracted()); }
+        atm2.ejectCard();
+
+        // 4. the bank never answers: nothing is dispensed, and the row is reconciled afterwards
+        FlakyBank flaky = new FlakyBank(core);
+        flaky.next(BankReply.TIMEOUT);
+        core.open("ACC-3", 10_000);
+        CashDispenser d3 = new CashDispenser(new WorkingFeeder());
+        d3.refill(Note.N500, 4);
+        ATM atm3 = new ATM("ATM-T", flaky, d3);
+        atm3.setClock(clock);
+        atm3.insertCard(new Card("4111-1111", "ACC-3"));
+        atm3.enterPin("1234");
+        try { atm3.withdraw(1_000); } catch (WithdrawalFailed f) { System.out.println("timeout: " + f.w.state + ", cash in machine still " + d3.cash()); }
+        List<Withdrawal> open = atm3.unresolved();
+        System.out.println("unresolved rows: " + open.size() + " -> settled " + new Reconciler(core).settle(open)
+            + ": " + open.get(0).state + " (" + open.get(0).note + "), balance " + core.balance("ACC-3"));
+
+        // 5. the same life cycle as state objects: an illegal move is not implemented, so it throws
+        StateMachine sm = new StateMachine(core, cash);
+        System.out.println("state objects: start in " + sm.where());
+        try { sm.enterPin("1234"); } catch (IllegalStateException e) { System.out.println("  " + e.getMessage()); }
+        sm.insertCard(new Card("4111-1111", "ACC-1"));
+        sm.enterPin("1234");
+        sm.withdraw(1_000);
+        System.out.println("  withdrew 1000 in " + sm.where() + "; balance " + core.balance("ACC-1"));
+        sm.ejectCard();
+
+        // 6. an envelope deposit: the balance moves only when a human has counted it
+        EnvelopeDeposit env = new EnvelopeDeposit("ACC-2", 5_000, "ENV-1");
+        long before = core.balance("ACC-2");
+        env.verify(core, 4_500);
+        System.out.println("envelope: claimed " + env.claimed + ", counted " + env.verified + ", " + env.state
+            + ", balance " + before + " -> " + core.balance("ACC-2"));
+
+        // 7. the journal behind a repository: the same key cannot be claimed twice
+        WithdrawalRepository repo = new InMemoryWithdrawalRepository();
+        Withdrawal w = new Withdrawal(1, "ATM-X", "ACC-1", 500, clock.nowMs());
+        System.out.println("repo claim: " + repo.claim(w) + ", claim again: " + repo.claim(w));
+
+        // 8. the customer walked away: the watchdog takes the card back after a quiet 50 ms
+        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+        SessionWatchdog dog = new SessionWatchdog(atm2, 50, timer);
+        atm2.insertCard(new Card("4111-1111", "ACC-2"));
+        dog.touch();
+        while (atm2.state() != SessionState.IDLE) Thread.sleep(10);
+        System.out.println("watchdog fired " + dog.fired.get() + " time; the machine is " + atm2.state());
+        timer.shutdown();
+
+        // 9. the drawer runs low: one more observer, and the ATM does not learn a new word
+        core.open("ACC-4", 100_000);
+        CashDispenser thin = new CashDispenser(new WorkingFeeder());
+        thin.refill(Note.N500, 6);                                    // 3,000 in the drawer
+        ATM atm4 = new ATM("ATM-L", core, thin);
+        atm4.setClock(clock);
+        LowCashAlert low = new LowCashAlert(thin, 2_000);
+        atm4.addObserver(low);
+        atm4.insertCard(new Card("4111-1111", "ACC-4"));
+        atm4.enterPin("1234");
+        atm4.withdraw(500); atm4.withdraw(1_000); atm4.withdraw(500);  // 2,500 -> 1,500 -> 1,000
+        System.out.println("low cash: " + low.alerts);
+    }
+}

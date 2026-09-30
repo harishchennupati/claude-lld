@@ -1,0 +1,442 @@
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
+import java.lang.management.ThreadMXBean;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: the real deadlock, and the watchdog that breaks it
+/**
+ * The protocol with no grace timeout at all: left fork, then right fork, waiting forever. This is
+ * the version that genuinely deadlocks, kept here (not in Main) because the only safe way to run it
+ * is with a watchdog armed. lockInterruptibly is what makes the rescue possible: a wedged
+ * philosopher can be interrupted, throws, drops the fork it holds, and unwinds.
+ */
+final class TrueNaivePolicy implements ForkPolicy {
+    private final CountDownLatch wedge;
+
+    /** The wedge latch guarantees every philosopher holds a left fork before any reaches for a right one. */
+    TrueNaivePolicy(CountDownLatch wedge) { this.wedge = wedge; }
+
+    /** Left, then right, with no timeout: the circular wait, for real. */
+    @Override public void acquireBoth(Philosopher p) throws InterruptedException {
+        p.markWaiting(p.left().id());
+        p.left().pickUp(p.id());
+        if (wedge != null) { wedge.countDown(); wedge.await(1, TimeUnit.SECONDS); }
+        p.markWaiting(p.right().id());
+        try { p.right().pickUp(p.id()); }
+        catch (InterruptedException e) { p.left().putDown(p.id()); throw e; }   // the rescue path
+        finally { p.markWaiting(-1); }
+    }
+
+    /** Both forks go back. */
+    @Override public void releaseBoth(Philosopher p) { p.right().putDown(p.id()); p.left().putDown(p.id()); }
+}
+
+/**
+ * The production answer to "how would you know?": the JVM already tracks who owns which
+ * ReentrantLock, so ThreadMXBean.findDeadlockedThreads() reports a real cycle rather than guessing
+ * from a timeout. This watchdog polls it, prints the threads in the ring, and breaks them out.
+ * It is a monitor, not a fix -- the fix is the acquisition policy on page 02, move 4.
+ */
+final class DeadlockWatchdog implements Runnable {
+    private final DiningTable table;
+    private final long budgetMs, everyMs;
+    private volatile String report = "no deadlock seen";
+    private volatile boolean fired = false;
+
+    /** Watch this table for budgetMs, sampling every everyMs. */
+    DeadlockWatchdog(DiningTable table, long budgetMs, long everyMs) {
+        this.table = table; this.budgetMs = budgetMs; this.everyMs = everyMs;
+    }
+
+    /** Poll the JVM; on a real cycle, name the threads and interrupt everybody so they unwind. */
+    @Override public void run() {
+        ThreadMXBean jvm = ManagementFactory.getThreadMXBean();
+        long end = System.currentTimeMillis() + budgetMs;
+        while (System.currentTimeMillis() < end) {
+            long[] ids = jvm.findDeadlockedThreads();
+            if (ids != null && ids.length > 0) {
+                List<String> names = new ArrayList<>();
+                for (ThreadInfo ti : jvm.getThreadInfo(ids, true, true))
+                    names.add(ti.getThreadName() + " blocked on " + ti.getLockName()
+                              + " owned by " + ti.getLockOwnerName());
+                report = "DEADLOCK: " + names;
+                fired = true;
+                table.interruptAll();                        // the rescue: interruptible locks make this possible
+                return;
+            }
+            LockSupport.parkNanos(everyMs * 1_000_000L);
+        }
+        table.interruptAll();                                // backstop: never leave a run wedged, even undetected
+    }
+
+    /** True if the JVM reported a genuine cycle. */
+    boolean fired() { return fired; }
+
+    /** What it saw, in one line. */
+    String report() { return report; }
+}
+
+// ---- ext: fairness, measured rather than asserted
+/**
+ * "Prove nobody starves." You cannot prove it from the code, so measure it: this observer records
+ * when each philosopher became hungry and how long it stayed that way, and reports the spread.
+ * It is an observer, so it runs after the forks are back and can never slow a meal down.
+ */
+final class FairnessMetrics implements DiningObserver {
+    private final long[] hungrySince, worstWaitMs, totalWaitMs, meals;
+
+    /** One row per philosopher. */
+    FairnessMetrics(int n) {
+        hungrySince = new long[n]; worstWaitMs = new long[n]; totalWaitMs = new long[n]; meals = new long[n];
+        Arrays.fill(hungrySince, -1);
+    }
+
+    /** Start the stopwatch on HUNGRY, stop it on EATING, and count the meal. */
+    @Override public synchronized void onState(int id, PhilosopherState state, long atMs) {
+        if (state == PhilosopherState.HUNGRY) hungrySince[id] = atMs;
+        else if (state == PhilosopherState.EATING && hungrySince[id] >= 0) {
+            long waited = atMs - hungrySince[id];
+            totalWaitMs[id] += waited;
+            worstWaitMs[id] = Math.max(worstWaitMs[id], waited);
+            meals[id]++;
+            hungrySince[id] = -1;
+        }
+    }
+
+    /** meals, worst wait and total wait per philosopher, plus the fairness ratio min/max meals. */
+    synchronized String report() {
+        long min = Long.MAX_VALUE, max = 0;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < meals.length; i++) {
+            min = Math.min(min, meals[i]); max = Math.max(max, meals[i]);
+            sb.append(String.format("p%d meals=%d worst wait=%dms total=%dms; ", i, meals[i], worstWaitMs[i], totalWaitMs[i]));
+        }
+        sb.append(String.format("fairness min/max = %.2f", max == 0 ? 1.0 : (double) min / max));
+        return sb.toString();
+    }
+}
+
+// ---- ext: the asymmetric fix -- one philosopher reaches the other way
+/**
+ * The fix when you may not renumber the forks but may treat one seat differently: even-numbered
+ * philosophers take their left fork first, odd-numbered ones take their right. That single
+ * asymmetry means two neighbours always reach for the SAME fork first, so at least one of them
+ * loses at once instead of both holding one and waiting -- and a full ring can never close.
+ */
+final class AsymmetricPolicy implements ForkPolicy {
+    /** Even seats: left then right. Odd seats: right then left. */
+    @Override public void acquireBoth(Philosopher p) throws InterruptedException {
+        Fork first = p.id() % 2 == 0 ? p.left() : p.right();
+        Fork second = first == p.left() ? p.right() : p.left();
+        p.markWaiting(first.id());
+        first.pickUp(p.id());
+        try {
+            p.markWaiting(second.id());
+            second.pickUp(p.id());
+        } catch (InterruptedException e) {
+            first.putDown(p.id());
+            throw e;
+        } finally { p.markWaiting(-1); }
+    }
+
+    /** Both forks go back. */
+    @Override public void releaseBoth(Philosopher p) { p.right().putDown(p.id()); p.left().putDown(p.id()); }
+}
+
+// ---- ext: the same trick anywhere two locks are taken -- bank transfers
+/**
+ * Dining philosophers is not a puzzle about cutlery: it is every place where a thread takes two
+ * locks. A transfer takes the payer's lock and the payee's lock, and two opposite transfers at the
+ * same instant are exactly the circular wait. The cure is the same: a global order, here the
+ * account number, with a tie-break lock for the case where two ids are equal.
+ */
+final class Account {
+    private final int id;
+    private long balance;
+    final ReentrantLock lock = new ReentrantLock();
+
+    /** An account with an opening balance. */
+    Account(int id, long balance) { this.id = id; this.balance = balance; }
+
+    /** The global order the locks are taken in. */
+    int id() { return id; }
+
+    /** The balance; read under the account's lock. */
+    long balance() { return balance; }
+
+    /** Move money; only ever called with this account's lock held. */
+    void add(long amount) { balance += amount; }
+}
+
+/**
+ * Ordered locking for any two resources, and the worked example everybody meets in production.
+ */
+final class LockOrdering {
+    private static final ReentrantLock TIE_BREAK = new ReentrantLock();
+
+    private LockOrdering() { }
+
+    /** Transfer, taking the two account locks in id order so two opposite transfers cannot deadlock. */
+    static boolean transfer(Account from, Account to, long amount) {
+        if (from == to) return false;
+        Account first = from.id() < to.id() ? from : to;
+        Account second = first == from ? to : from;
+        if (from.id() == to.id()) {                          // equal ids (or identity hashes): one global tie-break lock
+            TIE_BREAK.lock();
+            try { return move(from, to, amount); } finally { TIE_BREAK.unlock(); }
+        }
+        first.lock.lock();
+        try {
+            second.lock.lock();
+            try { return move(from, to, amount); } finally { second.lock.unlock(); }
+        } finally { first.lock.unlock(); }
+    }
+
+    /** The money move itself, with both locks already held. */
+    private static boolean move(Account from, Account to, long amount) {
+        if (from.balance() < amount) return false;
+        from.add(-amount);
+        to.add(amount);
+        return true;
+    }
+
+    /** The general form: take any number of locks in id order, run the body, release in reverse. */
+    static void withAll(List<Fork> forks, int by, Runnable body) throws InterruptedException {
+        List<Fork> order = new ArrayList<>(forks);
+        order.sort((a, b) -> Integer.compare(a.id(), b.id()));
+        int taken = 0;
+        try {
+            for (Fork f : order) { f.pickUp(by); taken++; }
+            body.run();
+        } finally {
+            for (int i = taken - 1; i >= 0; i--) order.get(i).putDown(by);
+        }
+    }
+}
+
+// ---- ext: a graceful stop instead of an interrupt
+/**
+ * "Interrupting is how you break a wedged run; how do you stop a healthy one?" With a flag the
+ * philosopher checks once per round -- and because thinking is handed in, the flag lives in the
+ * work, not in the actor. Stopping ends the round in progress, never a meal half way through, and
+ * only escalates to interrupt if somebody does not come back in time.
+ */
+final class GracefulShutdown {
+    private final DiningTable table;
+    private volatile boolean running = true;
+    private final AtomicLong roundsSeen = new AtomicLong();
+
+    /** Wrap a table; hand table.configure() the work returned by stoppable(). */
+    GracefulShutdown(DiningTable table) { this.table = table; }
+
+    /** Wrap any work so that it ends the philosopher's loop once stop() has been called. */
+    Work stoppable(Work base) {
+        return id -> {
+            roundsSeen.incrementAndGet();
+            if (!running) throw new InterruptedException("dinner is over");   // a clean exit, between meals
+            base.perform(id);
+        };
+    }
+
+    /** Ask everybody to stop after the round they are in; then wait, and only then escalate. */
+    boolean stop(long graceMs) throws InterruptedException {
+        running = false;
+        if (table.awaitFinish(graceMs)) return true;
+        table.interruptAll();                                // the escalation, not the plan
+        return table.awaitFinish(graceMs);
+    }
+
+    /** How many rounds started in total: what the flag was checked against. */
+    long roundsSeen() { return roundsSeen.get(); }
+}
+
+// ---- ext: forks in another process -- the same protocol, one level up
+/**
+ * A stand-in for Redis: a key-value store whose SET-if-absent is atomic and whose keys expire.
+ * It is here to make one point honestly -- the protocol survives the move off one JVM, but the
+ * guarantee weakens, because a lease can expire while its holder still believes it holds the fork.
+ */
+final class FakeRedis {
+    private final ConcurrentHashMap<String, long[]> keys = new ConcurrentHashMap<>();   // key -> [owner, expiresAtMs]
+    private final Clock clock;
+
+    /** Injected clock, so a test can expire a lease without sleeping. */
+    FakeRedis(Clock clock) { this.clock = clock; }
+
+    /** SET key owner NX PX lease: true only if the key was free or its lease had expired. */
+    boolean setIfAbsent(String key, int owner, long leaseMs) {
+        long now = clock.nowMs();
+        long[] prev = keys.compute(key, (k, v) -> (v == null || v[1] <= now) ? new long[]{ owner, now + leaseMs } : v);
+        return prev[0] == owner && prev[1] > now;
+    }
+
+    /** Release only if you still hold it (the Redis Lua compare-and-delete, not a bare DEL). */
+    boolean release(String key, int owner) {
+        long[] v = keys.get(key);
+        if (v == null || v[0] != owner) return false;
+        return keys.remove(key, v);
+    }
+
+    /** Who the store thinks holds the key right now, or -1. */
+    int owner(String key) {
+        long[] v = keys.get(key);
+        return v == null || v[1] <= clock.nowMs() ? -1 : (int) v[0];
+    }
+}
+
+/**
+ * A fork that lives in the store instead of in this JVM. Same two methods as Fork, which is the
+ * point: Philosopher and the policies would take an interface with pickUp/putDown and neither
+ * would change. What DOES change is the failure model: a lease that expires hands the fork to
+ * somebody else while the first holder is still eating, so a real system needs a fencing token.
+ */
+final class LeasedFork {
+    private final String key;
+    private final FakeRedis store;
+    private final long leaseMs;
+
+    /** A fork identified by a key in the shared store. */
+    LeasedFork(int id, FakeRedis store, long leaseMs) { this.key = "fork:" + id; this.store = store; this.leaseMs = leaseMs; }
+
+    /** Poll for the key until the deadline; true means this philosopher holds the lease now. */
+    boolean pickUp(int by, long waitMs) throws InterruptedException {
+        long end = System.currentTimeMillis() + waitMs;
+        do {
+            if (store.setIfAbsent(key, by, leaseMs)) return true;
+            Thread.sleep(2);
+        } while (System.currentTimeMillis() < end);
+        return false;
+    }
+
+    /** Give the lease back if it is still ours. */
+    void putDown(int by) { if (store.owner(key) == by) store.release(key, by); }
+
+    /** Who the store says holds it. */
+    int owner() { return store.owner(key); }
+}
+
+// ---- ext: the read-only view a supervisor wants
+/**
+ * Metrics without touching the run: who is hungry, how many meals each has had, how many are
+ * eating right now. Every number is an O(1) read of a volatile field, so asking costs nothing and
+ * cannot slow a philosopher down or take a fork.
+ */
+final class TableMonitor {
+    private final DiningTable table;
+
+    /** Watch a table without being part of it. */
+    TableMonitor(DiningTable table) { this.table = table; }
+
+    /** One line: states, meals, and the peak parallelism so far. */
+    String line() {
+        Snapshot s = table.snapshot();
+        StringBuilder sb = new StringBuilder();
+        int hungry = 0, eating = 0;
+        for (int i = 0; i < table.size(); i++) {
+            if (s.states()[i] == PhilosopherState.HUNGRY) hungry++;
+            if (s.states()[i] == PhilosopherState.EATING) eating++;
+            sb.append(String.format("p%d=%s(%d) ", i, s.states()[i], s.meals()[i]));
+        }
+        Cycle c = table.findCycle();
+        return sb + String.format("| hungry=%d eating=%d total=%d peak=%d ring=%s",
+                hungry, eating, s.totalMeals(), s.peakEating(), c == null ? "none" : c.size() + " deep");
+    }
+}
+
+/**
+ * Runs every extension above, in the order the follow-ups ask for them. Nothing here can hang:
+ * the philosopher threads are daemons, the watchdog has a budget, and every join has a timeout.
+ */
+class ExtDemo {
+
+    /** Prints one section per follow-up. */
+    public static void main(String[] args) throws Exception {
+        System.out.println("== a real deadlock, found by the JVM and broken by an interrupt ==");
+        CountDownLatch wedge = new CountDownLatch(5);
+        DiningTable wedged = new DiningTable(5, new TrueNaivePolicy(wedge), 1).configure(Work.none(), Work.none());
+        DeadlockWatchdog dog = new DeadlockWatchdog(wedged, 3_000, 20);
+        Thread watcher = new Thread(dog, "watchdog");
+        watcher.setDaemon(true);
+        wedged.start();
+        watcher.start();
+        boolean unwound = wedged.awaitFinish(5_000);
+        watcher.join(4_000);
+        System.out.println("   watchdog fired=" + dog.fired());
+        System.out.println("   " + dog.report());
+        System.out.println("   the table unwound after the interrupt: " + unwound + ", every fork back: " + wedged.allForksFree());
+
+        System.out.println("\n== fairness, measured over 500 meals each ==");
+        DiningTable fairRun = new DiningTable(5, new OrderedPolicy(), 500, true).configure(Work.none(), Work.sleepMs(1));
+        FairnessMetrics metrics = new FairnessMetrics(5);
+        fairRun.addObserver(metrics);
+        fairRun.start();
+        fairRun.awaitFinish(30_000);
+        System.out.println("   " + metrics.report());
+
+        System.out.println("\n== the asymmetric fix: odd philosophers reach the other way ==");
+        DiningTable asym = new DiningTable(5, new AsymmetricPolicy(), 2_000).configure(Work.none(), Work.none());
+        asym.start();
+        System.out.println("   finished=" + asym.awaitFinish(20_000) + " meals=" + asym.totalMeals()
+            + " fork held twice=" + asym.anyForkViolated() + " peak eating=" + asym.peakEating());
+
+        System.out.println("\n== the same trick in production: two-account transfers ==");
+        Account a = new Account(1, 1_000), b = new Account(2, 1_000);
+        AtomicLong moved = new AtomicLong(), refused = new AtomicLong();
+        Runnable aToB = () -> { for (int i = 0; i < 50_000; i++) { if (LockOrdering.transfer(a, b, 1)) moved.incrementAndGet(); else refused.incrementAndGet(); } };
+        Runnable bToA = () -> { for (int i = 0; i < 50_000; i++) { if (LockOrdering.transfer(b, a, 1)) moved.incrementAndGet(); else refused.incrementAndGet(); } };
+        Thread t1 = new Thread(aToB), t2 = new Thread(bToA);
+        t1.setDaemon(true); t2.setDaemon(true);
+        t1.start(); t2.start();
+        t1.join(10_000); t2.join(10_000);
+        System.out.println("   100000 opposing transfers, no deadlock: moved=" + moved.get()
+            + " refused for want of balance=" + refused.get());
+        System.out.println("   a=" + a.balance() + " b=" + b.balance() + " total=" + (a.balance() + b.balance())
+            + " (conserved; the ONLY reason this does not hang is the id order)");
+
+        System.out.println("\n== three resources, not two: the order generalises ==");
+        Fork[] three = { new Fork(7, false), new Fork(2, false), new Fork(5, false) };
+        LockOrdering.withAll(Arrays.asList(three), 0, () -> System.out.println("   holding forks 2, 5 and 7, taken in that order"));
+        System.out.println("   all three back on the table: " + (three[0].isFree() && three[1].isFree() && three[2].isFree()));
+
+        System.out.println("\n== a graceful stop, with interrupt only as the escalation ==");
+        DiningTable longRun = new DiningTable(5, new OrderedPolicy(), 1_000_000);
+        GracefulShutdown stopper = new GracefulShutdown(longRun);
+        longRun.configure(stopper.stoppable(Work.none()), Work.sleepMs(1));
+        longRun.start();
+        Thread.sleep(60);
+        long before = longRun.totalMeals();
+        boolean stopped = stopper.stop(3_000);
+        System.out.println("   stopped cleanly=" + stopped + " meals at the stop=" + before
+            + " final=" + longRun.totalMeals() + " forks back=" + longRun.allForksFree());
+
+        System.out.println("\n== forks in another process: the same protocol, a weaker guarantee ==");
+        long[] now = { 1_700_000_000_000L };
+        FakeRedis redis = new FakeRedis(() -> now[0]);
+        LeasedFork remote = new LeasedFork(2, redis, 100);
+        System.out.println("   p1 takes the remote fork: " + remote.pickUp(1, 50) + ", owner=" + remote.owner());
+        System.out.println("   p2 tries while p1 holds it: " + remote.pickUp(2, 30) + " (refused)");
+        now[0] += 101;                                        // the lease expires while p1 still believes it is eating
+        System.out.println("   after the lease expires, p2 takes it: " + remote.pickUp(2, 30) + ", owner=" + remote.owner());
+        System.out.println("   that is the danger: two holders at once unless every write carries a fencing token");
+
+        System.out.println("\n== the supervisor's read-only view ==");
+        DiningTable watched = new DiningTable(5, new OrderedPolicy(), 200).configure(Work.sleepMs(1), Work.sleepMs(1));
+        TableMonitor monitor = new TableMonitor(watched);
+        watched.start();
+        Thread.sleep(40);
+        System.out.println("   mid-dinner: " + monitor.line());
+        watched.awaitFinish(30_000);
+        System.out.println("   at rest:    " + monitor.line());
+    }
+}

@@ -1,0 +1,677 @@
+# LRU / LFU cache LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"lru/Main.java").read_text()
+ext   = (H/"lru/Extensions.java").read_text()
+tests = (H/"lru/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("get", 30, [("key K: is it here?", "one hash lookup, no walk"),
+                     ("present, and still fresh?", "an expired entry is a miss"),
+                     ("move it to the front", "a read counts as a use"),
+                     ("return the value", "nothing is allocated")]),
+        ("put", 175, [("key K, value V", "insert, or overwrite in place"),
+                      ("full? the oldest leaves FIRST", "never one over capacity"),
+                      ("link it at the front", "map and list, in one step"),
+                      ("tell the listener", "after the unlock, never inside")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+27, x+260), True)
+pf += _ar("M555 84 V100", dash=True)
+pf += _bx(360, 100, 500, 44, "a miss: the loader runs with no lock held", "and nothing is written until a value comes back", dash=True)
+pf += _tx(88, 272, "read", "var(--acc)", 13)
+pf += _tx(175, 272, "the value for this key (one hash lookup);  which entry would leave next (the tail of the list);  how many are resident (a count)", "var(--text)", 12, "start")
+pf += _tx(615, 308, "sixty-four threads call get and put at the same instant: the map and the list must always name exactly the same keys, and the count must never exceed the capacity", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 322, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("09:00:00  put A, B, C", ["a cache of three, now full", "newest first: C  B  A", "A is the next to go"], False),
+      ("09:00:01  get A -- a hit", ["A moves to the front", "newest first: A  C  B", "B is the next to go now"], True),
+      ("09:00:02  put D", ["full, so B is unlinked first", "then D is linked at the front", "the count is 3 the whole time"], True),
+      ("09:01:03  get B -- a miss", ["B left an hour ago", "the loader reads Postgres: 5 ms", "outside the lock, then put(B)"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 110, t, lines, acc=acc)
+P_EX = _mv(1230, 185, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>get(key): the value, or nothing if it is not there &mdash; and a read counts as a use.</li>
+<li>put(key, value): insert a new entry, or overwrite an existing one in place.</li>
+<li>A fixed capacity: a put that would go over it evicts the entry that has gone longest without use.</li>
+<li>remove(key), size(), capacity(), and the order in which entries would be given up.</li>
+<li>Tell somebody when an entry leaves, and why: full, expired, overwritten, or removed.</li>
+<li>On a miss, optionally fetch the value from wherever it really lives and keep it (read-through).</li>
+<li>Optionally expire an entry a fixed time after it was written.</li>
+<li>Swap the rule for who leaves: least-recently-used today, least-frequently-used on request.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>get and put are O(1): one hash lookup and a fixed number of pointer writes, never a scan.</li>
+<li>Many threads at once: the map and the order must never be seen disagreeing.</li>
+<li>The count must never exceed the capacity, not even for an instant inside a put.</li>
+<li>Memory bounded by the capacity and nothing else; no allocation on a hit.</li>
+<li>The eviction policy swappable without editing a single caller.</li>
+<li>Nothing slow inside the lock: a database read is milliseconds, the lock is nanoseconds.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design an LRU cache. Fixed capacity, generic key and value, and both get and put have to be O(1). '
+          'When it is full the least-recently-used entry goes. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A box that remembers a fixed number of answers so '
+ 'that the slow thing behind it &mdash; a database, an API, a computation &mdash; is asked as rarely as '
+ 'possible. A caller asks for a key: if the box has it, hand back the value; if not, say so. A caller writes a '
+ 'key and a value: store it, and if the box is already full, throw out whichever entry has gone longest without '
+ 'being used. The catch is the word <i>both</i> in "both get and put are O(1)": a hash map finds a value '
+ 'instantly but has no idea which entry is stalest, and a list knows the order but cannot find a key without '
+ 'walking. Neither one is enough, so the answer is both at once over the same objects. A read is a use, which '
+ 'means even get changes the order &mdash; and that is what makes the concurrency question interesting, because '
+ 'there is no such thing as a pure reader here. Many threads hammer one cache, and the one thing that must '
+ 'always be true is that the map and the order describe exactly the same set of keys, and that the count never '
+ 'goes above the capacity.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that fills a small cache, reads one entry, and shows the right key being evicted. The '
+ 'interviewer is watching for, in this order: the questions you ask before typing (thread safety and what '
+ 'happens on a miss are the first two); which classes exist and which one owns the two indexes; get and put end '
+ 'to end, with the key stored <i>inside</i> the node; what happens when two threads put at the same instant '
+ 'while the cache is full; where the rules that will change live &mdash; the policy, the loader, the listener '
+ '&mdash; so "now make it LFU" is a new class and not an edit; what happens when the database behind the loader '
+ 'is down. Then the twists: TTL, least-frequently-used, hit-rate stats, bounding by bytes, striping, and what '
+ 'Caffeine actually ships.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Is the capacity a count of entries, or a budget in bytes?</td><td>A count of entries, fixed at construction</td><td>One <code>if</code> before an insert, not a loop of evictions (moves 5, 12)</td></tr>'
+ '<tr><td>Will several threads share one cache?</td><td>Yes</td><td>One lock inside the cache, and no pure readers (moves 4, 7)</td></tr>'
+ '<tr><td>On a miss: return nothing, or fetch it?</td><td>Return nothing by default; a loader can be handed in</td><td>A one-method loader, called outside the lock (moves 3, 6)</td></tr>'
+ '<tr><td>Is it only capacity that evicts, or do entries also expire?</td><td>Capacity by default; a TTL can be switched on</td><td>An expiry stamp on the node and an injected clock (moves 1, 6)</td></tr>'
+ '<tr><td>Does anybody need to be told when an entry leaves?</td><td>Yes: a write-back store and a metric</td><td>A listener, called after the unlock (moves 3, 4)</td></tr>'
+ '<tr><td>Will the policy change &mdash; LFU, FIFO, weighted?</td><td>Yes, LFU before the hour is out</td><td>The <code>Cache</code> interface is the seam, not a flag (move 3)</td></tr>'
+ '<tr><td>Null keys and null values?</td><td>Neither; null is how a miss is reported</td><td>Two null checks and no ambiguity at the boundary (move 9)</td></tr>'
+ '<tr><td>One process, in memory?</td><td>Yes</td><td>No shared store yet; a follow-up adds one (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> capacity is a fixed count of entries; a read counts as a use; the '
+ 'cache is shared by many threads, so it holds its own lock; null is how a miss is reported, so neither keys nor '
+ 'values may be null; and the eviction policy is a whole implementation of one interface, not a flag. Named as '
+ 'out of scope: bounding by bytes, striping, persistence, a background sweeper &mdash; each is a follow-up on '
+ 'page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: the nouns with state
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a CACHE of a fixed CAPACITY holds ENTRIES; a KEY finds a VALUE; the ORDER OF USE decides the VICTIM", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 180, "Cache", "map, order, capacity", 1), (228, 180, "Entry / Node", "key, value, two links", 1),
+                          (426, 190, "Order", "which end is oldest", 1), (634, 150, "Key", "no state: a lookup", 0),
+                          (802, 180, "Value", "the caller's object", 0), (1000, 200, "Victim", "a question: a method", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a lookup, the caller's object, or a question", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("find the value for a key", "the map  (owns key -&gt; node)", "index.get(key)"),
+                                       ("say \"this was just used\"", "RecencyList  (owns the links)", "order.moveToFirst(n)"),
+                                       ("choose who leaves", "the policy: LruCache or LfuCache", "order.last()"),
+                                       ("insert, evict, tell somebody", "LruCache  (map + order + lock)", "cache.put(k, v)")]):
+    y = 20 + k*52
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 245, "a verb whose state is spread over two indexes goes to the class that owns both: that class becomes the orchestrator", "var(--muted)", 11)
+m2 += _tx(615, 265, "and notice that \"get\" is a verb that WRITES: it changes the order. There are no pure readers here, which decides move 4.", "var(--acc)", 11)
+MV[2] = _mv(1230, 278, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 55, 230, 100, "LruCache / LfuCache", "configure(loader, listener)", acc=True)
+for k, (t, sub, impl) in enumerate([("CacheLoader", "where a miss goes", "a database read, an HTTP call, a lambda"),
+                                    ("EvictionListener", "write-back, stats, metrics", "WriteBackListener, WriteBehind, a lambda"),
+                                    ("Clock", "now, in milliseconds", "System::currentTimeMillis, a test's instant")]):
+    y = 20 + k*58
+    m3 += _ar("M260 105 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 420, 44, impl, "the classes that can be handed in") + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 205, "dashed lavender = handed in. The cache never builds a rule, which is why a test can hand it a loader that throws.", "var(--muted)", 11)
+m3 += _tx(615, 227, "and the biggest seam is Cache itself: \"now evict the least-FREQUENTLY used\" is a whole new class and one constructor line -- Strategy.", "var(--acc)", 11)
+m3 += _tx(615, 249, "a wrapper that ADDS to a cache instead of replacing it (hit-rate stats, locking, a de-duplicating loader) is Decorator.", "var(--muted)", 11)
+MV[3] = _mv(1230, 262, m3)
+
+# move 4: the gap, one owner, one lock
+m4 = _D + _bx(30, 30, 190, 44, "thread 1", "sees 100 of 100") + _bx(30, 110, 190, 44, "thread 2", "sees 100 of 100")
+m4 += _bx(350, 70, 190, 44, "the tail node", "the oldest entry", acc=True)
+m4 += _ar("M220 52 H350 V70") + _ar("M220 132 H350 V114") + _tx(285, 40, "read", "var(--muted)", 10.5) + _tx(285, 162, "read", "var(--muted)", 10.5)
+m4 += '<rect x="580" y="20" width="290" height="150" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(725, 45, "the gap", RED, 12) + _tx(725, 70, "both unlink the same node", RED, 11) + _tx(725, 90, "one prev pointer is written twice", RED, 11)
+m4 += _tx(725, 110, "the list loops; the map leaks a row", RED, 11)
+m4 += _tx(725, 148, "fix: look, evict and insert as ONE step", "var(--text)", 11)
+m4 += _bx(900, 45, 300, 100, "LruCache.lock", "find + evict + insert = one step", acc=True)
+m4 += _tx(1050, 168, "the lock lives where the two indexes live", "var(--muted)", 10.5)
+m4 += _tx(1050, 188, "the loader and the listener stay outside it", "var(--muted)", 10.5)
+MV[4] = _mv(1230, 202, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("the value for this key?", "Map&lt;K, Node&gt;", "O(1)"),
+                                      ("which entry leaves next?", "a doubly linked list, tail = oldest", "O(1)"),
+                                      ("unlink this node, from the middle", "prev / next on the node + sentinels", "O(1), no walk"),
+                                      ("which map row does the victim own?", "the KEY rides inside the node", "O(1) delete"),
+                                      ("the least-FREQUENTLY used?", "Map&lt;count, list&gt; + the smallest count", "O(1)")]):
+    y = 20 + k*50
+    m5 += _bx(30, y, 360, 40, q, "the question") + _ar("M390 %s H450" % (y+20), True)
+    m5 += _bx(450, y, 520, 40, shape, "the shape", acc=True) + _ar("M970 %s H1030" % (y+20), True) + _bx(1030, y, 170, 40, cost, "")
+m5 += _tx(615, 288, "a hash map has lookup without order; a list has order without lookup; the whole trick is that both point at the SAME node object", "var(--muted)", 11)
+MV[5] = _mv(1230, 302, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D + _bx(30, 30, 200, 44, "ABSENT", "not in the cache")
+m6 += _bx(300, 30, 200, 44, "RESIDENT", "in the map and the list", acc=True)
+m6 += _bx(300, 125, 200, 44, "EXPIRED", "its time ran out")
+m6 += _bx(30, 125, 200, 44, "EVICTED", "full, or a caller removed it")
+m6 += _ar("M230 52 H300", True) + _tx(265, 44, "put", "var(--acc)", 10.5)
+m6 += _ar("M400 74 V125", True) + _tx(470, 103, "the ttl passes", "var(--muted)", 10.5)
+m6 += _ar("M300 147 H230", True) + _tx(265, 186, "the read that finds it unlinks it", "var(--muted)", 10.5)
+m6 += _ar("M130 125 V74", True) + _tx(70, 103, "gone", "var(--muted)", 10.5)
+m6 += _ar("M330 74 L240 121", True) + _tx(300, 108, "full", "var(--muted)", 10.5)
+m6 += _card(560, 20, 650, 165, "the order inside put, and why it is this order",
+            ["1 take the lock; already here? then it is ONE node: overwrite and move it up",
+             "2 not here and full: unlink the oldest AND delete its map row, in one step",
+             "3 only now link the newcomer and put it in the map: the count is never capacity + 1",
+             "4 release the lock, and only then tell the listener, inside a try/catch",
+             "a read-through load happens BEFORE put is ever called, with no lock held, so a",
+             "database that is down leaves the cache exactly as it was and the caller retries"], acc=True)
+m6 += _tx(615, 208, "four states and one rule: nothing is linked until the entry it replaces has already gone. A read-modify-write is never split in two.", "var(--muted)", 11)
+MV[6] = _mv(1230, 222, m6)
+
+# move 7: inside the lock, and sixty-four callers at the same instant
+m7 = _D + _card(30, 20, 540, 155, "inside the lock: about 80 nanoseconds",
+                ["one hash lookup on the key", "four pointer writes to unlink a node",
+                 "two more to link it at the front", "one map put, and on an eviction one map remove",
+                 "a dozen machine-level steps, and no allocation"], acc=True)
+m7 += _ar("M570 97 H640", True) + _tx(605, 87, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 155, "outside the lock: microseconds to milliseconds",
+            ["the loader on a miss: about 5 ms to Postgres", "the write-back listener: about 2 ms to the store",
+             "serialising the value for the wire: about 10 us", "the caller doing something with the value"])
+m7 += _tx(615, 202, "sixty-four threads call get at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 215, 106, 40, "thread %d" % (k+1), "waits %d ns" % (k*80), acc=(k == 9))
+m7 += _tx(615, 283, "the tenth waits 720 nanoseconds and the sixty-fourth about five microseconds, against the five milliseconds it would", "var(--muted)", 11)
+m7 += _tx(615, 301, "have spent on a miss anyway. One at a time is true, and nobody can tell -- unless the loader gets inside the lock.", "var(--muted)", 11)
+MV[7] = _mv(1230, 315, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="196" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(300, 42, "one lock on a hot cache: do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["the locked part of a get: about 80 nanoseconds",
+                       "a product cache: 200,000 gets a second, 64 threads",
+                       "200,000 x 80 ns = 16 ms of lock in every second",
+                       "1.6% busy: a thread almost never finds it taken",
+                       "at 5 million ops a second it is 40% busy: now they queue"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(35, 196, "one 5 ms load inside the lock would undo every bit of this", RED, 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 keep the loader and the listener outside the lock", "already done: 5 milliseconds must never sit inside 80 nanoseconds"),
+                              ("2 stripe into 16 segments by key hash", "16 locks, capacity/16 each: approximate LRU, which is what Guava ships"),
+                              ("3 stop reordering the list on every read", "buffer reads per thread, replay them in batches under tryLock: Caffeine")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 230, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("a read does not count as a use", "promote on read; test 1: the key just read is the one that survives"),
+                                ("insert first, evict afterwards", "evict first; test 5: the count is never seen above capacity, in 20,000 puts"),
+                                ("the map and the list drift apart", "both written in one step; test 5: the list walk equals the map's key set"),
+                                ("an overwrite makes a second node", "overwrite in place; test 2: three puts of one key leave one entry"),
+                                ("the loader's database is down", "load before put; test 4: nothing is written, and the retry works"),
+                                ("the write-back listener throws", "notify after the unlock, in a try/catch; test 6: the put still stands"),
+                                ("a stale value is served for ever", "lazy expiry on the read; test 7: an injected clock, then a miss"),
+                                ("LFU evicts the newest of a tie", "each frequency bucket is itself an LRU list; test 8: the older one leaves")]):
+    y = 18 + k*40
+    m9 += _bx(30, y, 320, 36, bad, "") + _ar("M350 %s H380" % (y+18), True) + _bx(380, y, 820, 36, fix, "", acc=True)
+m9 += _tx(615, 358, "every claim this design makes has a failure test: FailureTests.java runs nine of them, thirty-two checks, and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 372, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 860)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("Cache&lt;K,V&gt; c = new LfuCache&lt;&gt;(1000);  the policy IS the implementation", None), ("swap LRU for LFU without opening a caller", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new StatsCache&lt;&gt;(cache);  new SingleFlightLoader&lt;&gt;(loader)", None), ("stats and de-duplication, cache untouched", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("fire(key, value, CAPACITY) after the unlock, in a try/catch", None), ("the store hears; the cache never waits", None)],
+          [("State", "var(--text)"), ("move 6", None), ("EvictionCause, and the ABSENT / RESIDENT / EXPIRED order", None), ("an entry cannot be half-evicted", None)],
+          [("Builder", "var(--acc)"), ("move 12", None), ("CacheBuilder.newBuilder().maximumSize(1000).expireAfterWrite(60s)", None), ("six optional knobs: here it EARNS its place", None)],
+          [("Template Method", "var(--muted)"), ("not earned", None), ("LockedCache holds state and helpers; it does not own get or put", "var(--muted)"), ("either cache can be read on its own", "var(--muted)")],
+          [("Singleton", "var(--muted)"), ("not here", None), ("a cache is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh one", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("in build()", None), ("lfu ? new LfuCache&lt;&gt;(n) : new LruCache&lt;&gt;(n) -- one line", "var(--muted)"), ("it grows a name when policies come from config", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 305, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 320, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Node holds links. RecencyList splices. LruCache owns the policy and the lock.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("LfuCache and StatsCache both exist; LruCache was never opened for either", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("cache.get(key);  never \"is this the LFU one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("Clock, CacheLoader, EvictionListener: one method, so a fake is a lambda", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 9", None), ("cache.configure(loader, listener);  cache.setClock(() -&gt; now[0])", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "LFU, FIFO, weighted by bytes", "a new class behind Cache; not one caller changes", "", "move 3"),
+        ("someone new wants to know", "hit rate, write-back, metrics", "one more listener, or one more wrapper around Cache", "", "move 4"),
+        ("a new step in a life", "expired, dirty, in flight", "one more cause and one more checked transition", "", "move 6"),
+        ("a new invariant across entries", "a budget in bytes, not entries", "the check AND the loop of evictions inside the SAME lock", "", "move 4"),
+        ("state that must outlive the process", "Redis in front of the database", "the far store becomes the loader; the write becomes", "a conditional UPDATE by version, plus an invalidation message to the other servers", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five, Node, RecencyList and the failure tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the prompt again: a <b>cache</b> of a fixed <b>capacity</b> holds <b>entries</b>; a <b>key</b> finds a "
+ "<b>value</b>; the <b>order of use</b> decides the <b>victim</b>. The cache holds the capacity, the map and the "
+ "order, all of which change: a class. An entry has a key, a value and its position in the order: a class, and "
+ "the interesting one, because the position is not a number but two pointers, so the entry <i>is</i> the list "
+ "node. The order has its own state &mdash; which end is newest, which node comes after which &mdash; so it is a "
+ "class too, even though it feels like a detail. A key is something you look up, not something with state. A "
+ "value is the caller's object and the cache never looks inside it. And a victim is not a thing to store: it is "
+ "a question the order answers, so it is a method. Two decisions fall out here. The key goes <i>inside</i> the "
+ "node, because eviction starts at the order and then has to delete that entry from the map, and without the key "
+ "in hand that delete is a scan. And the expiry stamp, if there is a TTL, goes on the node too, because it "
+ "belongs to the entry and nothing else.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Find the value for a key\" touches the map, so it is <code>index.get(key)</code>. \"Say this was just used\" "
+ "touches the two pointers, so it belongs to the thing that owns them: <code>order.moveToFirst(n)</code>. "
+ "\"Choose who leaves\" is the policy's own question &mdash; for LRU it is the tail of the list, for LFU the tail "
+ "of the least-used bucket. \"Insert, evict and tell somebody\" touches the map, the order and the lock at once; "
+ "only the cache sees all three, so <code>cache.put(k, v)</code> is the orchestrator. Now notice the thing this "
+ "move exposes that no other problem on this list has: <code>get</code> is a verb that <i>writes</i>. A read "
+ "moves a node to the front, so there is no such thing as a reader here. That single fact decides move 4 &mdash; "
+ "a read-write lock would buy nothing, because there is nothing to let through in parallel.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Three small rules will change and one big one. Where a miss goes will change: nothing today, a database read "
+ "tomorrow &mdash; that is <code>CacheLoader</code>, one method. Who is told when an entry leaves will change: "
+ "nobody today, a write-back store and a metrics counter tomorrow &mdash; that is "
+ "<code>EvictionListener</code>, one method. Where <i>now</i> comes from will change the moment somebody asks "
+ "for a TTL and you have to test it &mdash; that is <code>Clock</code>, one method. All three are handed in "
+ "through <code>configure()</code> and <code>setClock()</code>, and the cache never builds them. The big one is different in shape: the "
+ "eviction policy is not a rule you plug into a cache, it <i>is</i> the cache, so the seam is the "
+ "<code>Cache</code> interface itself and LFU is a whole new class that nothing else has to notice. This is "
+ "where the patterns come from, not the other way round: a swappable rule behind an interface is "
+ "<b>Strategy</b>; a wrapper that adds to a cache instead of replacing it &mdash; hit-rate stats, a lock, a "
+ "loader that de-duplicates concurrent misses &mdash; is <b>Decorator</b>; a cache that announces \"this left\" "
+ "without knowing what a store is, is <b>Observer</b>. I do them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two threads put a new key into a full cache at the same instant. Both read the count as one hundred of one "
+ "hundred, both walk to the tail, and both unlink the same node: one thread writes <code>prev.next</code> after "
+ "the other has already moved it, the list ends up pointing at a node that is no longer in it, and the map keeps "
+ "a row for a key the order has forgotten. Nobody notices until the cache quietly stops evicting. So the lookup, "
+ "the eviction and the insert must be one step, in the class that owns both indexes: the cache. And the lock "
+ "goes <i>inside</i> the cache rather than in a wrapper around it, for a reason worth saying out loud &mdash; "
+ "only the owner of a lock can release it and then call the listener. A synchronised wrapper is correct and it "
+ "is five lines, but it drags the loader and the write-back inside the critical section, which is exactly the "
+ "thing this design is built to avoid. Extensions.java has that wrapper, with the cost written on it.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"The value for this key\" is a hash map. \"Which entry leaves next\" is the tail of a list. \"Unlink this node "
+ "from the middle\" is why the list is <i>doubly</i> linked: with only forward pointers you would have to walk to "
+ "find the predecessor, and the whole O(1) claim collapses. Two sentinel nodes at the ends remove every "
+ "empty-list and single-element check, so both splices are straight-line pointer writes. \"Which map row does the "
+ "victim own\" is answered by keeping the key inside the node. And \"the least-frequently used\" is a map from "
+ "use-count to a list, plus the smallest count currently in use, which is what makes LFU O(1) rather than a heap "
+ "at O(log n). The whole trick, in one sentence: a hash map has lookup without order, a list has order without "
+ "lookup, and both of them point at the same node object.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "An entry is ABSENT, then RESIDENT when a put links it, then EVICTED when the capacity or a caller pushes it "
+ "out, or EXPIRED when its time runs out and the next read unlinks it. Writing the states down forces the two "
+ "questions the interviewer will ask. First: what if the thing behind the loader is down? The answer is an "
+ "order &mdash; the load happens outside the lock and before any state change at all, so a database outage "
+ "throws through to the caller and the cache is byte for byte what it was; nothing is half-populated and a retry "
+ "just works. Second: what if the cache is full? The answer is also an order &mdash; unlink the oldest node and "
+ "delete its map row as one step, and only then link the newcomer, so the count is never capacity plus one, not "
+ "even for the instant between two statements. An existing key is a third case and a common bug: it is one node "
+ "overwritten in place, never a second node, or the count drifts past the capacity a few puts at a time.", 6),
+("Move 7: yes, the lock makes reads happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every get takes the lock, has the cache become a "
+ "queue? It has, for about eighty nanoseconds. Inside the lock there is one hash lookup, four pointer writes to "
+ "unlink a node, two more to put it at the front, and on an insert one map put and possibly one map remove: a "
+ "dozen machine-level steps and no allocation. Everything slow is outside it. The loader is five milliseconds "
+ "against Postgres and it runs before <code>put</code> is called; the write-back listener is two milliseconds "
+ "and it runs after the unlock, inside a try/catch. So when sixty-four threads call get at the same instant, the "
+ "sixty-fourth waits about five microseconds &mdash; against the five milliseconds it would have spent on a miss "
+ "anyway. One at a time is true and nobody can tell. Put the loader inside the lock and the same sixty-fourth "
+ "thread waits three hundred milliseconds, which is how a cache turns into the slowest part of the system.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "A product-catalogue cache serving two hundred thousand gets a second across sixty-four threads holds the lock "
+ "for eighty nanoseconds each time: sixteen milliseconds of lock in every second, one and a half per cent busy. "
+ "At that rate a thread almost never finds the lock taken, and the honest answer to \"does one lock scale\" is "
+ "yes, for this traffic. Unlike a car park, though, a cache really can get hot: at five million operations a "
+ "second the same lock is forty per cent busy and threads start queueing, so the ladder matters. Rung one is "
+ "already built: the loader and the listener are outside the lock, which is worth more than the other two rungs "
+ "put together, because five milliseconds inside a critical section undoes every bit of the arithmetic above. "
+ "Rung two is striping &mdash; cut the keyspace into sixteen segments by hash, each with its own lock and its "
+ "own order, and say the cost out loud: there is no longer a single global recency order, so this is "
+ "approximate LRU, which is exactly the trade Guava makes. Rung three is Caffeine's: stop reordering the list on "
+ "every read at all, record reads into a small per-thread buffer and replay them in batches under a tryLock, so "
+ "a hit does no pointer surgery and never blocks. Say the arithmetic first; climbing the ladder without it is "
+ "complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "A read that does not count as a use (the cache then evicts precisely the keys it is busiest with). Inserting "
+ "before evicting (the count goes one over capacity, and if the interviewer is watching the size it is the "
+ "easiest bug on this problem to spot). The map and the list drifting apart (unlink from both in one step, or a "
+ "row leaks for ever). An overwrite creating a second node (three puts of one key must leave one entry). The "
+ "database behind the loader being down (nothing written, the exception propagates, the retry works). A "
+ "write-back listener that throws (it is a bystander: it runs after the unlock in a try/catch). A stale value "
+ "served for ever (expiry is checked lazily on the read that finds it, and the entry is unlinked there and "
+ "then). And LFU breaking a tie by the wrong rule (each frequency bucket is itself a recency list, so of two "
+ "entries used once, the one used longest ago leaves). Each of these is a few lines in FailureTests.java, which "
+ "runs nine of them and thirty-two checks; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Strategy is move 3, and on this problem it is unusually clean: the policy is not a field on the cache, it is "
+ "the whole implementation, so \"evict the least-frequently used\" is a new class and one constructor line. "
+ "Decorator is the same move's wrapper &mdash; <code>StatsCache</code> counts hits from outside, "
+ "<code>SynchronizedCache</code> adds a lock, <code>SingleFlightLoader</code> wraps one loader in another so a "
+ "thousand simultaneous misses on one key make one database call. Observer is move 4's rule that a slow "
+ "listener must not be inside the lock. State is move 6: an entry's life and the causes on the callback, so an "
+ "entry cannot be half-evicted. And here is the one that differs from every other problem in this set: "
+ "<b>Builder earns its place</b>. Capacity, TTL, policy, loader, listener, clock and stats are seven knobs of "
+ "which six are optional, and a seven-argument constructor full of nulls is worse than a chain of named calls "
+ "&mdash; which is exactly why Guava ships <code>CacheBuilder</code> and Caffeine ships "
+ "<code>Caffeine.newBuilder()</code>. The rule has not changed: a builder earns its place when the optional "
+ "fields do, and here they do. Template Method did not earn one: <code>LockedCache</code> holds the lock and "
+ "three helpers, it does not own <code>get</code> or <code>put</code>, because being able to read either cache "
+ "on its own is worth more than the twenty-five lines it would save. Singleton earned nothing: a cache is "
+ "handed to its callers, so a test builds a fresh one. Factory is one ternary inside <code>build()</code>; it "
+ "grows a name the day policies arrive as strings from configuration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "SOLID is not a list to recite; it is the check that the moves did their job. S: a class has one reason to "
+ "change, which move 2 gave you &mdash; <code>Node</code> holds links and data, <code>RecencyList</code> does "
+ "nothing but pointer surgery, <code>LruCache</code> owns the policy and the lock, <code>StatsCache</code> owns "
+ "counting, and nobody does two of those. O: a new behaviour is a new class and one changed line "
+ "(<code>LfuCache</code>, <code>StatsCache</code>, <code>WeightedLruCache</code> all exist and "
+ "<code>LruCache</code> was never opened for any of them). L: any implementation drops in and nothing asks "
+ "which one it got &mdash; but this is the one letter with a real trap on this problem, because a decorator "
+ "that forgets to delegate <code>size()</code>, or a policy that quietly stops promoting on read, breaks "
+ "substitution while still compiling. I: the three interfaces have one method each, so a fake for a test is a "
+ "lambda. D: the cache depends on interfaces it is handed, which is exactly why a test can give it a loader "
+ "that throws and a clock that says a minute has passed.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (LFU, FIFO, weighted by bytes) is a new class behind <code>Cache</code> and not one caller "
+ "changes. Someone new who wants to know (hit rate, a write-back store, a metrics counter) is one more listener "
+ "or one more wrapper. A new step in an entry's life (expired, dirty, in flight) is one more cause and one more "
+ "checked transition. A new invariant across entries (a budget in bytes rather than a count of entries) is the "
+ "check <i>and</i> the loop of evictions inside the same lock, all or nothing &mdash; note that it becomes a "
+ "loop, because one big value can push out several small ones. And state that must outlive the process (Redis "
+ "in front of the database, two servers) is the far store becoming the loader, the write becoming a conditional "
+ "update by version &mdash; the database's version of the same atomic step the lock was doing &mdash; and an "
+ "invalidation message so the other server drops its now-wrong copy. For all five, <code>Node</code>, "
+ "<code>RecencyList</code> and the failure tests do not change; that is the test that the derivation was right. "
+ "Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, Splitwise) and the class diagram, the lock, the tests, "
+ "the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is "
+ "named before the move that produced it. On this problem two of the moves do unusually heavy lifting: move 5, because "
+ "the data structures ARE the design here, and move 2, because it is where you notice that a read writes.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the rules handed in, their implementations, and the two decorators
+put("clock", 10, 20, 250, "Clock", [], ["nowMs(): long"], "interface")
+put("loader", 10, 100, 250, "CacheLoader", [], ["load(key): V"], "interface")
+put("listener", 10, 180, 250, "EvictionListener", [], ["onEvict(key, value, cause)"], "interface")
+put("wb", 10, 265, 250, "WriteBackListener", [], ["onEvict(...): store.put(k, v)", "log(): what it saw"])
+put("stats", 10, 390, 250, "StatsCache", ["inner: Cache", "hits / misses: AtomicLong"], ["get / put / remove: delegate", "hitRate(): double", "summary(): String"])
+put("striped", 10, 545, 250, "StripedCache", ["segments: LruCache[16]", "-- approximate LRU"], ["segmentFor(key)", "get / put / remove: delegate"])
+# centre: the contract, the shared plumbing, and the two policies
+put("cache", 430, 20, 350, "Cache", [], ["get(key): V", "put(key, value): V", "remove(key): V", "size() / capacity(): int", "evictionOrder(): List&lt;K&gt;"], "interface")
+put("locked", 430, 200, 350, "LockedCache", ["lock: ReentrantLock", "loader: CacheLoader", "listener: EvictionListener", "clock: Clock", "ttlMs: long"],
+    ["configure(loader, listener)", "setClock(c) / setTtlMs(ms)", "stamp() / expired(node)", "load(key) -- outside the lock", "fire(k, v, cause) -- after unlock"], abstract=True)
+put("lru", 300, 450, 320, "LruCache", ["capacity: int", "index: Map&lt;K, Node&gt;", "order: RecencyList"],
+    ["get(key) / put(key, value)", "remove(key)", "evictionOrder()", "keysNewestFirst()", "consistent(): boolean"])
+put("lfu", 650, 450, 340, "LfuCache", ["capacity: int", "index: Map&lt;K, Node&gt;", "buckets: Map&lt;count, list&gt;", "minFreq: int"],
+    ["get(key) / put(key, value)", "remove(key)", "bump(node): one more use", "evictionOrder()", "frequencyOf(key): int"])
+# right column: the enum and the entry
+put("cause", 1030, 20, 200, "EvictionCause", ["CAPACITY, EXPIRED,", "REPLACED, REMOVED"], [], "enum")
+put("node", 1030, 130, 200, "Node", ["key: K  (final)", "value: V", "prev, next: Node", "freq: int", "expireAtMs: long"], [])
+# bottom: the order list both policies are built on
+put("order", 420, 690, 350, "RecencyList", ["head, tail: sentinel nodes", "size: int"],
+    ["addFirst(n) / moveToFirst(n)", "unlink(n)", "last(): the next victim", "keysOldestFirst(): List&lt;K&gt;"])
+
+EDGES = [
+ ln((605, 200), (605, 154), "inherit"),
+ ln((460, 450), (540, 402), "inherit", "", [(460, 428), (540, 428)]),
+ ln((820, 450), (690, 402), "inherit", "", [(820, 428), (690, 428)]),
+ ln((260, 451), (430, 87), "inherit", "", [(292, 451), (292, 87)]),
+ ln((260, 598), (430, 112), "inherit", "", [(274, 598), (274, 112)]),
+ ln((135, 265), (135, 234), "inherit"),
+ ln((430, 240), (260, 47), "inject", "", [(402, 240), (402, 47)]),
+ ln((430, 268), (260, 127), "inject", "", [(386, 268), (386, 127)]),
+ ln((430, 300), (260, 207), "notify", "", [(370, 300), (370, 207)]),
+ ln((780, 230), (1030, 45), "assoc", "the cause", [(870, 230), (870, 45)]),
+ ln((460, 620), (560, 690), "compose", "one list"),
+ ln((760, 636), (690, 690), "compose", "one list per use-count"),
+ ln((600, 620), (1090, 260), "assoc", "the map", [(600, 680), (1090, 680)]),
+ ln((770, 759), (1130, 260), "compose", "the list owns the nodes", [(1130, 759)]),
+ _tx(950, 858, "two indexes, one object: the map and the list point at the SAME node", "var(--acc)", 10.5),
+]
+UMLSVG = uml_svg(1230, 930, EDGES, legend_y=900)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (<i>italic</i> = abstract, never <code>new</code>-ed; '
+ 'dashed border = interface; &laquo;enum&raquo; = a fixed list of values). Middle: its fields, the state it holds. '
+ 'Bottom: its methods. <b>The arrows.</b> Hollow triangle = extends or implements. Filled diamond = owns: each cache '
+ 'owns its order &mdash; one list for LRU, one list per use-count for LFU &mdash; and the list owns the nodes. Plain '
+ 'arrow = references. Dashed lavender = handed in through <code>configure()</code>. Dotted blue = notifies. '
+ '<b>Where state lives:</b> a <code>Node</code> holds the key, the value, its two links, its use-count and its expiry, '
+ 'and it is the only object with per-entry state; <code>RecencyList</code> holds nothing but two sentinels and a count, '
+ 'and does nothing but splice; <code>LockedCache</code> holds the one lock and the three handed-in rules; each cache '
+ 'holds its capacity, its map and its order. Follow the two arrows into <code>Node</code>: the map points at it and the '
+ 'list points at it, and that is the entire design &mdash; two indexes over one object. Notice what is <i>not</i> here: '
+ 'no Entry class separate from the node (they are the same thing, which is what makes eviction O(1)), and no policy '
+ 'field on the cache, because the policy is the class.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does and what it guarantees; read only those first for the shape, then the bodies for the '
+ 'pointer surgery. Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java (every '
+ 'follow-up\'s reference code, with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (nine claims, '
+ 'thirty-two checks; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints '
+ 'ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your five to eight clarifying questions (thread safety and what happens on a miss first); then type '
+ 'in the order of Main.java: the EvictionCause enum, Node, RecencyList with its two sentinels, the three one-method '
+ 'interfaces (Clock, CacheLoader, EvictionListener), the Cache interface, then LruCache with its lock and the order inside '
+ 'put, then a main that fills a cache of three, reads one entry and shows the right key leaving. Write the lock straight '
+ 'into LruCache in the hour; LockedCache is what you factor out on the second pass, or the moment the interviewer says '
+ '"now do LFU".</div></div>')
+
+FU = [
+("The interviewer changes the policy mid-round: evict the least-FREQUENTLY used instead. How much of your code moves?", "twist", 10,
+ "One new class, and nothing else. Callers hold a <code>Cache</code>, so the constructor line is the only edit at the "
+ "call site. Inside, the single recency list becomes one recency list per use-count plus the smallest count currently "
+ "in use: a get unlinks the node from its bucket, increments the count, links it at the front of the next bucket up, "
+ "and if it just emptied the bottom bucket the smallest count moves up by one. An eviction takes the tail of the "
+ "smallest bucket, so the tie between two entries used the same number of times is broken by recency &mdash; that "
+ "tie-break is what the interviewer is checking for, and it is free because each bucket is itself a recency list. "
+ "Everything stays O(1): no heap, no sort. The one honest wart is on the cold path, where an explicit remove can empty "
+ "the smallest bucket without an insert following, and the smallest count is recomputed over the distinct use-counts "
+ "rather than the entries.",
+ sect(src, "final class LfuCache", "class WriteBackListener")),
+("Fifty threads hammering one cache of a hundred. Prove nothing is lost and the count never goes over capacity, with a test.", "non-functional", 10,
+ "The race lives between reading the count and writing the two indexes. Every operation does the whole read-modify-write "
+ "&mdash; the lookup, the unlink of the victim from both the list and the map, and the link of the newcomer &mdash; "
+ "inside one lock held by the cache, so no other writer can run in that gap. The proof is arithmetic rather than a "
+ "count: fifty threads wait on one latch, then insert four hundred distinct keys each, and afterwards the number the "
+ "listener reported as evicted plus the number still resident must be exactly twenty thousand. A lost update leaves it "
+ "short; a double count leaves it over. The test also samples the size after every put and asserts it was never once "
+ "above the capacity, and finally walks the list and compares its keys to the map's key set.",
+ T("        // 5. fifty threads", "        // 6. an eviction listener")),
+("One lock on a cache doing two hundred thousand gets a second. Have you serialised the whole system?", "non-functional", 5,
+ "No, and the answer is arithmetic. The locked part of a get is one hash lookup and six pointer writes: about eighty "
+ "nanoseconds. Two hundred thousand of those is sixteen milliseconds of lock in every second, one and a half per cent "
+ "busy, so a thread almost never finds it taken. Unlike most LLD problems a cache really can get hot, though: at five "
+ "million operations a second the same lock is forty per cent busy and threads queue. The ladder, in order. Rung one is "
+ "already built and is worth more than the rest put together: the loader (five milliseconds) and the write-back "
+ "listener (two milliseconds) are outside the lock. Rung two is striping &mdash; sixteen segments by key hash, each "
+ "with its own lock, its own map and its own order &mdash; and you must say the cost: there is no longer a global "
+ "recency order, so it is approximate LRU, which is exactly what Guava ships. Rung three is Caffeine's: stop "
+ "reordering on every read, buffer reads per thread and replay them in batches under a tryLock.",
+ X("striping", "the stampede")),
+("The database behind your loader is down. What is the state of the cache, and show me the code handling it.", "functional", 10,
+ "Exactly what it was. A miss leaves the lock first and only then calls the loader, so an exception propagates to the "
+ "caller with nothing written: no placeholder, no null entry, no half-linked node, and the next call retries cleanly. A "
+ "loader that returns null is the same story &mdash; a miss stays a miss. That ordering is deliberate and it is the "
+ "analogue of paying before committing: the slow, fallible, external step happens before any state change, so there is "
+ "nothing to roll back. It also means a cold key hit by a thousand threads at once makes a thousand database calls, "
+ "which is the honest cost of keeping the loader outside the lock; the fix is not to move it back in but to wrap the "
+ "loader so duplicate work collapses, which is the next question but one.",
+ sect(src, "    public V get(K key) {", "    public V put(K key, V value) {")),
+("Why is this actually O(1)? Walk me through the eviction, pointer by pointer.", "non-functional", 5,
+ "Three separate reasons, and an interviewer wants all three. First, the map answers \"the value for this key\" in one "
+ "hash lookup. Second, the list is <i>doubly</i> linked, so unlinking a node found through the map is four pointer "
+ "writes with no walk to find its predecessor; with a singly linked list it would be O(n) and the whole claim "
+ "collapses. Third, the key is stored inside the node, so when eviction takes the tail it already has the key it needs "
+ "to delete the map row &mdash; otherwise you would be searching the map by value. The two sentinels are the fourth, "
+ "smaller reason: they remove every empty-list and one-element special case, so the splices are straight-line code and "
+ "far harder to get wrong. Space is O(capacity): one map entry and one node per key, and a hit allocates nothing at "
+ "all.",
+ sect(src, "final class Node", "abstract class LockedCache")),
+("A thousand threads miss the same cold key at the same instant. What happens to your database?", "non-functional", 5,
+ "A thousand reads, unless you do something, because the loader deliberately runs outside the lock. The fix is not to "
+ "put it back inside the lock &mdash; that would serialise every miss in the cache behind one slow key. It is to wrap "
+ "the loader in another loader that collapses duplicate work: the first caller for a key installs a task in a "
+ "concurrent map and runs it, everybody else finds the task already there and waits on its result, and the winner "
+ "clears the slot when it is done. A thousand callers, one database read, and the same Decorator seam one level down "
+ "&mdash; a <code>CacheLoader</code> wrapping a <code>CacheLoader</code>. The small race that remains is worth "
+ "admitting: a caller arriving in the instant between the winner finishing and clearing the slot starts a second load.",
+ X("the stampede", "the sweeper")),
+("Entries have to expire sixty seconds after they are written. And how do you test that without sleeping?", "twist", 10,
+ "Expiry is a second reason to evict, so it goes on the entry: each node carries the instant it stops being valid, "
+ "stamped from an injected clock when it is written. The check is lazy &mdash; a read that finds an expired node "
+ "treats it as a miss, unlinks it there and then, and tells the listener the cause was EXPIRED rather than CAPACITY. "
+ "Lazy is enough for almost everything, and it costs one comparison on the hot path. What it does not do is free "
+ "memory held by a key nobody ever asks for again, so the proactive version is a second index ordered by expiry &mdash; "
+ "a heap here, a hashed timing wheel in a real system &mdash; that a background tick drains. The test does not sleep: "
+ "it hands the cache a clock that returns a number a test controls, checks a hit one millisecond before the minute is "
+ "up and a miss one millisecond after.",
+ T("        // 7. TTL, on an injected clock", "        // 8. LFU evicts") + "\n" + X("the sweeper", "write-behind")),
+("Bound it by memory instead of by entry count: values are between one kilobyte and one megabyte.", "twist", 5,
+ "The capacity becomes a budget and every value declares a weight through a function handed in at construction. Two "
+ "things change and both matter. The eviction becomes a <i>loop</i> rather than an if, because one large value can "
+ "push out several small ones; and the new invariant &mdash; the sum of the weights never exceeds the budget &mdash; "
+ "is checked and restored inside the same lock, so when the lock is released either the budget holds or nothing was "
+ "written. A value larger than the whole budget is refused up front rather than emptying the cache to make room for "
+ "something that still will not fit. Everything else is untouched: same node, same list, same listener, same tests.",
+ X("bound by bytes", "striping")),
+("Ops want the hit rate on a dashboard by Friday. Do not touch either cache class.", "functional", 5,
+ "Another <code>Cache</code> that delegates and counts. Every method forwards to the one it wraps; get adds one to hits "
+ "or misses on the way back, and hitRate is a division. It composes with anything, because the seam it plugs into is "
+ "the interface rather than a class, so the same wrapper works over LRU, LFU, the weighted cache and the striped one. "
+ "The honest caveat to say out loud: with a read-through loader a miss that the loader satisfies comes back non-null, "
+ "so the wrapper records it as a hit &mdash; when that distinction matters, count the loader's calls instead, which is "
+ "what the demo does.",
+ X("stats", "the locking decorator")),
+("Make it thread-safe by wrapping it, the way the textbook says. What does that cost you?", "design", 5,
+ "It is correct, it is five lines, and it is the right move when the class you were handed is not yours to change. "
+ "What it costs is the one thing this design cares about: everything the inner cache does now happens inside the "
+ "wrapper's lock, including the read-through loader against a database and the write-back listener against a store. "
+ "Only the owner of a lock can release it and <i>then</i> call the listener, so from the outside there is no way to "
+ "keep the slow things out of the critical section &mdash; which is why the caches in Main.java hold their own lock. "
+ "Worth adding: a read-write lock buys nothing here either, because a get moves a node to the front, so there are no "
+ "pure readers to let through in parallel.",
+ X("the locking decorator", "bound by bytes")),
+("Now it has to survive a restart, and there are two servers.", "twist", 5,
+ "Memory goes in front of a shared store, and the seams are already there. The store becomes the loader, so a local "
+ "miss falls through to Redis or a table without the cache knowing what it is talking to. A write goes to the store "
+ "first and only then to the local copy, so a store that refuses leaves this server holding the old value rather than "
+ "a lie. The store's write is a conditional update by version &mdash; only if this version is newer than what is there "
+ "&mdash; which is the database doing exactly what the lock does in one process: one atomic step decides the winner "
+ "and the loser simply loses. What is left is the hard part of every distributed cache: the other server's copy is now "
+ "wrong, so a write publishes an invalidation message and each server drops that key. Say out loud that this is "
+ "eventually consistent, and that the window is the message's delivery time.",
+ X("two tiers", "the builder")),
+("Where does time come from, and how do you test what an entry was stamped with?", "design", 3,
+ "The cache has a <code>Clock</code> it was handed, and it is the only thing in the system that reads the time: the "
+ "expiry stamp on a node comes from it, and so does the expiry check. A test hands in a clock that returns a number the "
+ "test controls, writes an entry, moves the number past the TTL and asserts the miss &mdash; nothing sleeps, and the "
+ "boundary can be probed to the millisecond on either side. The same seam makes the sweeper testable: the sweep is "
+ "given a now, not asked to find one.",
+ "/** Where time comes from. Injected, so a TTL test can jump an hour forward without sleeping for an hour. */\n"
+ "interface Clock { long nowMs(); }\n\n"
+ "// on the cache: handed in, defaulted, never read from the wall clock inside a method\n"
+ "private Clock clock = System::currentTimeMillis;\n"
+ "void setClock(Clock c) { this.clock = Objects.requireNonNull(c); }\n"
+ "long stamp()             { return ttlMs <= 0 ? 0 : clock.nowMs() + ttlMs; }\n"
+ "boolean expired(Node<K, V> n) { return n.expireAtMs > 0 && clock.nowMs() >= n.expireAtMs; }\n\n"
+ "// in a test: pick the instant, then move it across the boundary\n"
+ "long[] now = { 1_700_000_000_000L };\n"
+ "ttl.setClock(() -> now[0]);\n"
+ "ttl.setTtlMs(60_000);\n"
+ "ttl.put(\"session\", \"abc\");\n"
+ "now[0] += 59_999;   // still a hit\n"
+ "now[0] += 2;        // now a miss, and the entry is unlinked on that read\n"),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or a Builder earn its place?", "design", 8,
+ "None of the patterns was chosen up front; each is what a move produced. Strategy is move 3, and it is unusually "
+ "clean here because the policy is the whole implementation rather than a field. Decorator is the same move's wrapper, "
+ "and this problem has three of them &mdash; stats, locking, and a loader that wraps a loader to collapse a stampede. "
+ "Observer is move 4's rule that a slow listener must not be inside the lock. State is move 6, the entry's life and "
+ "the cause on the callback. Then the one that differs from every other problem in this set: Builder <i>earns</i> its "
+ "place here. Capacity, TTL, policy, loader, listener, clock and stats are seven knobs of which six are optional, "
+ "which is exactly why Guava ships CacheBuilder and Caffeine ships Caffeine.newBuilder; the rule has not changed, the "
+ "optional fields have. Factory is one ternary inside build() and grows a name the day policies arrive as strings "
+ "from config. Template Method was declined: LockedCache holds the lock and three helpers but does not own get or "
+ "put, because reading either cache on its own is worth more than the lines it would save. Singleton earned nothing. "
+ "For SOLID: S is move 2 (Node holds links, RecencyList splices, the cache owns the policy and the lock); O is LFU "
+ "and StatsCache, neither of which opened LruCache; L is that the caller never asks which policy it got, with the "
+ "trap that a decorator forgetting to delegate a method breaks substitution while still compiling; I is three "
+ "one-method interfaces; D is configure() and setClock(), which is why a test can hand in a loader that throws.",
+ X("the builder", "the five-line version")),
+("Should I have just used LinkedHashMap?", "design", 5,
+ "Often, yes &mdash; and saying so is a senior signal, not a cop-out. A <code>LinkedHashMap</code> built with access "
+ "order is exactly this design: a hash map whose entries are already in a doubly linked list, with "
+ "<code>removeEldestEntry</code> as the eviction hook. Five lines, in the JDK since 1.4, and the right answer for a "
+ "single-threaded cache with no TTL and no callback. Three things push you back to writing the nodes out, and they are "
+ "the three the interviewer will ask for within ten minutes: you cannot see the victim as it goes, only vote on "
+ "whether it should (the hook returns a boolean); there is no per-entry expiry; and it is not thread-safe, so it needs "
+ "a wrapper, which drags the loader into the lock. So: name it, say when it is enough, and say which of those three "
+ "made you hand-roll.",
+ X("the five-line version", "Runs every extension")),
+]
+
+build(dict(
+    slug="lru", title="LRU / LFU Cache",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 9 failure tests and a 50-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

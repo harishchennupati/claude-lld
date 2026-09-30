@@ -1,0 +1,153 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Targeted failure tests: each one proves a claim the design makes on page 02, move 9. Every claim that cannot
+// be turned into a few lines here is not a claim, it is a hope.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. a read is a USE: the entry a caller just read must not be the one that leaves next.
+        //    This is the bug that makes a cache evict exactly the keys it is busiest with.
+        List<String> evicted = new ArrayList<>();
+        LruCache<String, String> lru = new LruCache<>(3);
+        lru.configure(k -> null, (k, v, c) -> evicted.add(c + ":" + k));
+        lru.put("A", "1"); lru.put("B", "2"); lru.put("C", "3");
+        check(lru.evictionOrder().equals(List.of("A", "B", "C")), "before any read, A is the next victim");
+        lru.get("A");
+        check(lru.evictionOrder().equals(List.of("B", "C", "A")), "after get(A), A is the LAST to go and B is next");
+        lru.put("D", "4");
+        check(lru.get("B") == null && lru.get("A") != null, "put(D) evicted B, not the key that had just been read");
+        check(evicted.equals(List.of("CAPACITY:B")), "the listener was told exactly once, with the cause: " + evicted);
+        check(lru.size() == 3 && lru.consistent(), "size is still 3 and the map and the list name the same keys");
+
+        // 2. an overwrite is ONE node, not a second one: the classic bug that lets size drift past capacity.
+        LruCache<String, String> once = new LruCache<>(2);
+        once.put("k", "first"); once.put("k", "second"); once.put("k", "third");
+        check(once.size() == 1, "three puts of one key leave one entry, not three");
+        check("third".equals(once.get("k")), "and the value is the newest one");
+        check(Collections.frequency(once.keysNewestFirst(), "k") == 1, "the key appears exactly once in the order list");
+        check(once.consistent(), "the two indexes still agree after the overwrites");
+
+        // 3. the edges: capacity 1 works, and a capacity of zero is refused at construction rather than
+        //    producing a cache that silently keeps nothing.
+        LruCache<String, String> one = new LruCache<>(1);
+        one.put("A", "1"); one.put("B", "2");
+        check(one.size() == 1 && one.get("A") == null && "2".equals(one.get("B")), "capacity 1: A left as B arrived");
+        boolean refused = false;
+        try { new LruCache<String, String>(0); } catch (IllegalArgumentException e) { refused = true; }
+        check(refused, "capacity 0 is refused at construction");
+
+        // 4. a loader that fails writes NOTHING, and the caller can retry. The load happens outside the lock and
+        //    before any state change, which is why a database outage cannot leave a half-populated cache.
+        boolean[] databaseDown = { true };
+        int[] loads = { 0 };
+        LruCache<String, String> readThrough = new LruCache<>(2);
+        readThrough.configure(key -> {
+            loads[0]++;
+            if (databaseDown[0]) throw new IllegalStateException("database unreachable");
+            return "row-" + key;
+        }, (k, v, c) -> { });
+        readThrough.put("keep", "me");
+        boolean threw = false;
+        try { readThrough.get("missing"); } catch (IllegalStateException e) { threw = true; }
+        check(threw, "a loader that throws propagates instead of inventing a value");
+        check(readThrough.size() == 1 && "me".equals(readThrough.get("keep")), "and the cache is exactly as it was");
+        databaseDown[0] = false;
+        check("row-missing".equals(readThrough.get("missing")), "the retry succeeds once the database is back");
+        check(readThrough.size() == 2 && readThrough.consistent(), "and only then is the value resident");
+        int before = loads[0];
+        readThrough.get("missing");
+        check(loads[0] == before, "the second read is a hit: the loader is not called again");
+
+        // 5. fifty threads, twenty thousand distinct keys, one cache of a hundred. The proof is arithmetic:
+        //    every key that went in either sits in the cache or was reported as evicted, exactly once. A lost
+        //    update would leave the two numbers short; a double count would leave them over.
+        final int threads = 50, perThread = 400, cap = 100;
+        LruCache<String, String> hot = new LruCache<>(cap);
+        AtomicInteger gone = new AtomicInteger();
+        AtomicInteger overCapacity = new AtomicInteger();
+        hot.configure(k -> null, (k, v, c) -> { if (c == EvictionCause.CAPACITY) gone.incrementAndGet(); });
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> running = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            final int id = t;
+            running.add(pool.submit(() -> {
+                go.await();
+                for (int i = 0; i < perThread; i++) {
+                    hot.put("t" + id + "-" + i, "v");
+                    if (hot.size() > cap) overCapacity.incrementAndGet();   // sampled while the storm is running
+                }
+                return null;
+            }));
+        }
+        go.countDown();
+        for (Future<?> f : running) f.get();
+        pool.shutdown();
+        int inserted = threads * perThread;
+        check(gone.get() + hot.size() == inserted, "evicted (" + gone.get() + ") + resident (" + hot.size()
+            + ") = " + inserted + ": no entry was lost and none was counted twice");
+        check(hot.size() == cap, "the cache is exactly full, not full-ish");
+        check(overCapacity.get() == 0, "size was never observed above the capacity, not once in " + inserted + " puts");
+        check(hot.consistent(), "after the race the map and the list still name exactly the same keys");
+
+        // 6. an eviction listener that throws is a bystander, not a participant: it runs after the unlock, in a
+        //    try/catch, so a broken write-back cannot leave the two indexes disagreeing.
+        LruCache<String, String> withBadListener = new LruCache<>(2);
+        withBadListener.configure(k -> null, (k, v, c) -> { throw new RuntimeException("the store is on fire"); });
+        withBadListener.put("A", "1"); withBadListener.put("B", "2"); withBadListener.put("C", "3");
+        check(withBadListener.size() == 2 && "3".equals(withBadListener.get("C")), "the put stood despite the throwing listener");
+        check(withBadListener.consistent(), "and the cache is still consistent");
+
+        // 7. TTL, on an injected clock: no test sleeps for a minute. A stale entry is a miss, it is unlinked on
+        //    the read that found it, and the listener hears EXPIRED rather than CAPACITY.
+        long[] now = { 1_700_000_000_000L };
+        List<String> causes = new ArrayList<>();
+        LruCache<String, String> ttl = new LruCache<>(10);
+        ttl.setClock(() -> now[0]);
+        ttl.setTtlMs(60_000);
+        ttl.configure(k -> null, (k, v, c) -> causes.add(c.toString()));
+        ttl.put("session", "abc");
+        now[0] += 59_999;
+        check("abc".equals(ttl.get("session")), "one millisecond before the minute is up, it is still a hit");
+        now[0] += 2;
+        check(ttl.get("session") == null, "one millisecond after, it is a miss");
+        check(ttl.size() == 0, "and the entry was unlinked, not left to rot until the capacity pushed it out");
+        check(causes.equals(List.of("EXPIRED")), "the listener was told the cause was EXPIRED: " + causes);
+
+        // 8. LFU evicts the least-USED, and a tie between two equally-used entries is broken by RECENCY,
+        //    because each frequency bucket is itself a recency list.
+        LfuCache<String, String> lfu = new LfuCache<>(3);
+        lfu.put("hot", "1"); lfu.put("warm", "2"); lfu.put("cold", "3");
+        lfu.get("hot"); lfu.get("hot"); lfu.get("warm");
+        check(lfu.frequencyOf("hot") == 3 && lfu.frequencyOf("warm") == 2 && lfu.frequencyOf("cold") == 1,
+              "use counts are 3 / 2 / 1");
+        lfu.put("new", "4");
+        check(lfu.get("cold") == null && lfu.get("hot") != null, "the least-used entry left, not the oldest one");
+        LfuCache<String, String> tie = new LfuCache<>(2);
+        tie.put("first", "1"); tie.put("second", "2");
+        tie.put("third", "3");
+        check(tie.get("first") == null && tie.get("second") != null,
+              "with both at one use, the LEAST RECENTLY used of them left");
+        check(tie.consistent(), "every LFU node is in exactly one bucket and no bucket is left empty");
+
+        // 9. an explicit remove must not leave the LFU cache pointing at a bucket that no longer exists --
+        //    the one place where the smallest-use-count bookkeeping can go wrong.
+        LfuCache<String, String> removed = new LfuCache<>(3);
+        removed.put("a", "1"); removed.get("a"); removed.get("a");   // a is at use-count 3
+        removed.put("b", "2");                                       // b is at 1, so the smallest count is 1
+        removed.remove("b");                                         // ...and now nothing is at 1
+        check(removed.consistent(), "after removing the only least-used entry the buckets are still coherent");
+        removed.put("c", "3"); removed.put("d", "4");
+        removed.put("e", "5");                                       // full: the least-used of c and d must go
+        check(removed.get("c") == null && removed.get("a") != null,
+              "the next eviction still picks the least-used entry, not a stale bucket");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILURES");
+        if (failures > 0) System.exit(1);
+    }
+}

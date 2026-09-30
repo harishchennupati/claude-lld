@@ -1,0 +1,388 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.time.*;
+
+// ---- ext: a background sweeper reclaims lapsed holds -- for the display, never for correctness
+/**
+ * Walks every show every few seconds and hands lapsed holds back. Correctness never depended on it: a
+ * lapsed hold is already treated as free by the next caller. This only makes the seat map tidy sooner.
+ */
+class HoldSweeper {
+    private final List<Show> shows;
+    private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(
+        r -> { Thread t = new Thread(r, "sweeper"); t.setDaemon(true); return t; });
+    HoldSweeper(List<Show> shows) { this.shows = shows; }
+    /** Start sweeping. Each pass takes each show's lock for a few microseconds and releases it. */
+    void start(long everyMs) {
+        timer.scheduleAtFixedRate(() -> {
+            for (Show s : shows) {
+                try { s.sweepExpired(); } catch (RuntimeException e) { /* one bad show must not kill the timer */ }
+            }
+        }, everyMs, everyMs, TimeUnit.MILLISECONDS);
+    }
+    void stop() { timer.shutdownNow(); }
+    /** One pass by hand, for tests: how many holds were reclaimed. */
+    int sweepOnce() { int n = 0; for (Show s : shows) n += s.sweepExpired(); return n; }
+}
+// A DelayQueue<Booking> keyed on holdExpiresMs is the same idea without the polling: one thread takes the
+// next booking to expire and releases it exactly when it dies. Both are optimisations of the lazy path.
+
+// ---- ext: many theatres and screens -- search is an index hop, and each show carries its own lock
+/**
+ * The read path: city, then movie, then the shows on a day. A nested index makes it one hop plus a small
+ * day filter, and it never touches a show's lock, so search cannot slow booking down.
+ */
+class ShowIndex {
+    private final Map<String, Map<String, List<Show>>> byCityMovie = new ConcurrentHashMap<>();
+    /** Register a show for search. Setup, or whenever a theatre publishes a new day. */
+    void add(String city, Show show) {
+        byCityMovie.computeIfAbsent(city, c -> new ConcurrentHashMap<>())
+                   .computeIfAbsent(show.movie, m -> new CopyOnWriteArrayList<>()).add(show);
+    }
+    /** Shows of one movie in one city that start inside a window. O(1) hop + O(k) shows that day. */
+    List<Show> search(String city, String movie, long fromMs, long toMs) {
+        List<Show> out = new ArrayList<>();
+        for (Show s : byCityMovie.getOrDefault(city, Map.of()).getOrDefault(movie, List.of()))
+            if (s.startMs >= fromMs && s.startMs < toMs) out.add(s);
+        out.sort(Comparator.comparingLong(s -> s.startMs));
+        return out;
+    }
+}
+
+// ---- ext: a waitlist -- when a seat comes back, the head of the queue gets it held for them
+/**
+ * One queue per show and class. When a seat returns to AVAILABLE (a cancel, a lapsed hold), the first
+ * person waiting gets it HELD in their name for the usual window, so the offer is real and not a race.
+ */
+class Waitlist {
+    private final Map<String, Deque<String>> queues = new ConcurrentHashMap<>();
+    private static String key(Show s, SeatClass c) { return s.id + "/" + c; }
+    /** Join the back of the queue for this show and class. */
+    void join(Show show, SeatClass cls, String userId) {
+        queues.computeIfAbsent(key(show, cls), k -> new ConcurrentLinkedDeque<>()).add(userId);
+    }
+    /** How many are waiting. */
+    int size(Show show, SeatClass cls) { Deque<String> q = queues.get(key(show, cls)); return q == null ? 0 : q.size(); }
+    /**
+     * A seat became free: hold it for the head of the queue and hand back their booking, or null when
+     * nobody is waiting or somebody else already took it.
+     */
+    Booking offer(BookingService svc, Show show, SeatClass cls, String seatId) {
+        Deque<String> q = queues.get(key(show, cls));
+        String user = q == null ? null : q.poll();
+        if (user == null) return null;
+        try { return svc.hold(show.id, user, List.of(seatId)); }
+        catch (SeatUnavailable e) { q.addFirst(user); return null; }        // somebody was faster: keep their place
+    }
+}
+
+// ---- ext: dynamic pricing and coupons -- new rules behind the same one-method interface
+/** The price climbs as the show fills: full price when empty, up to 1.6x when almost sold out. */
+class DemandPricing implements PricingRule {
+    private final PricingRule base;
+    DemandPricing(PricingRule base) { this.base = base; }
+    public long pricePaise(Show show, Seat seat) {
+        int total = 0; for (Seat s : show.screen.seats) if (s.seatClass == seat.seatClass) total++;
+        double soldFraction = total == 0 ? 0 : 1.0 - (show.freeCount(seat.seatClass) / (double) total);
+        return Math.round(base.pricePaise(show, seat) * (1.0 + 0.6 * soldFraction));
+    }
+}
+/** A coupon takes a percentage off whatever the rule under it decided. Another Decorator, same interface. */
+class CouponPricing implements PricingRule {
+    private final PricingRule base; private final int percentOff;
+    CouponPricing(PricingRule base, int percentOff) { this.base = base; this.percentOff = percentOff; }
+    public long pricePaise(Show show, Seat seat) { return base.pricePaise(show, seat) * (100 - percentOff) / 100; }
+}
+
+// ---- ext: persistence -- the seat claim becomes a conditional UPDATE, the database's compare-and-set
+/**
+ * What the show's seat map looks like once it lives in a database. The only interesting method is the
+ * conditional claim: it must fail when the row is no longer AVAILABLE, which is what the lock did in memory.
+ */
+interface ShowSeatRepository {
+    /** UPDATE show_seat SET status='HELD', hold_booking=?, hold_expires=?
+     *  WHERE show=? AND seat=? AND (status='AVAILABLE' OR hold_expires <= ?) */
+    boolean claim(String showId, String seatId, String bookingId, long expiresMs, long nowMs);
+    /** UPDATE show_seat SET status='SOLD' WHERE show=? AND seat=? AND status='HELD' AND hold_booking=? AND hold_expires > ? */
+    boolean sell(String showId, String seatId, String bookingId, long nowMs);
+    String status(String showId, String seatId);
+}
+/**
+ * A stand-in for the database: one row per show and seat, and every write is a compare-and-set on the row.
+ * Zero rows updated means somebody else got there first -- exactly the answer the lock gave.
+ */
+class ConditionalRowStore implements ShowSeatRepository {
+    /** One row: the three columns that decide the race. */
+    record Row(String status, String bookingId, long expiresMs) {}
+    private final ConcurrentHashMap<String, Row> rows = new ConcurrentHashMap<>();
+    private static String k(String showId, String seatId) { return showId + "#" + seatId; }
+    void put(String showId, String seatId) { rows.put(k(showId, seatId), new Row("AVAILABLE", null, 0)); }
+    public boolean claim(String showId, String seatId, String bookingId, long expiresMs, long nowMs) {
+        String key = k(showId, seatId);
+        Row cur = rows.get(key);
+        if (cur == null) return false;
+        boolean claimable = cur.status().equals("AVAILABLE") || (cur.status().equals("HELD") && cur.expiresMs() <= nowMs);
+        if (!claimable) return false;                                  // WHERE clause did not match: 0 rows
+        return rows.replace(key, cur, new Row("HELD", bookingId, expiresMs));   // the compare-and-set: exactly one caller wins
+    }
+    public boolean sell(String showId, String seatId, String bookingId, long nowMs) {
+        String key = k(showId, seatId);
+        Row cur = rows.get(key);
+        if (cur == null || !cur.status().equals("HELD")
+            || !bookingId.equals(cur.bookingId()) || cur.expiresMs() <= nowMs) return false;
+        return rows.replace(key, cur, new Row("SOLD", bookingId, 0));
+    }
+    public String status(String showId, String seatId) { Row r = rows.get(k(showId, seatId)); return r == null ? null : r.status(); }
+}
+
+// ---- ext: idempotent confirm -- a retried payment webhook returns the same booking and charges nothing
+/**
+ * The gateway calls back more than once for one payment. Keyed on the idempotency key the caller sent, the
+ * first call does the work and every later one hands back the same booking without charging again.
+ */
+class IdempotentConfirm {
+    private final BookingService svc;
+    private final ConcurrentHashMap<String, Booking> done = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+    final AtomicInteger charges = new AtomicInteger();
+    IdempotentConfirm(BookingService svc) { this.svc = svc; }
+    /** Confirm once per key, however many times the webhook fires. */
+    Booking confirm(String key, String bookingId, PaymentProcessor pay) {
+        Booking already = done.get(key);
+        if (already != null) return already;                                   // the cheap path: no gateway, no lock
+        synchronized (locks.computeIfAbsent(key, k -> new Object())) {         // two webhooks with the same key, at once
+            Booking b = done.get(key);
+            if (b != null) return b;
+            charges.incrementAndGet();
+            b = svc.confirm(bookingId, pay);
+            done.put(key, b);
+            return b;
+        }
+    }
+}
+
+// ---- ext: a gateway that times out -- the third outcome, and the reconciliation that closes it
+/**
+ * The gateway neither approved nor declined: the call timed out. The money may have moved and may not
+ * have. Until somebody finds out which, nothing may be confirmed and nothing may be released.
+ */
+class PaymentUnknown extends RuntimeException { PaymentUnknown(String m) { super(m); } }
+
+/** Asks the gateway what really happened to one attempt: the reference if it charged, null if it never did. */
+interface PaymentQuery { String refFor(String idempotencyKey); }
+
+/**
+ * Confirm that survives a timeout. The attempt is written down under the caller's idempotency key BEFORE
+ * the charge, so a timeout leaves a booking that is still PENDING, still holding its seats, and a key to
+ * ask about later. settle() asks, and then either finishes the booking with the reference the gateway
+ * already has, or gives the money back because the hold died while nobody knew.
+ */
+class ReconcilingConfirm {
+    private final BookingService svc;
+    private final PaymentQuery query;
+    private final Map<String, String> attempts = new ConcurrentHashMap<>();   // bookingId -> idempotency key
+    ReconcilingConfirm(BookingService svc, PaymentQuery query) { this.svc = svc; this.query = query; }
+    /** Try to confirm. A timeout is not a failure: it returns null and changes nothing at all. */
+    Booking confirm(String bookingId, String idempotencyKey, PaymentProcessor pay) {
+        attempts.put(bookingId, idempotencyKey);                 // the trail is written before the money moves
+        try { return svc.confirm(bookingId, pay); }
+        catch (PaymentUnknown e) { return null; }                // seats still HELD, booking still PENDING
+    }
+    /** Minutes later: ask the gateway, then finish the job or hand the money back. Never charges again. */
+    Booking settle(String bookingId, PaymentProcessor pay) {
+        Booking b = svc.find(bookingId);
+        if (b.status == BookingStatus.CONFIRMED) return b;       // the first call did get through after all
+        String ref = query.refFor(attempts.get(bookingId));
+        if (ref == null) return null;                            // it never charged: let the hold lapse by itself
+        try { if (b.show.commit(b, ref)) return b; }             // it did: commit with THAT ref, never a second charge
+        catch (HoldLapsed e) { /* the hold died while the outcome was unknown */ }
+        pay.refund(ref, b.amountPaise);                          // money moved, the seat did not: give it back
+        return null;
+    }
+}
+
+// ---- ext: a refund policy -- how much money comes back depends on how close the show is
+/** How much of a cancelled booking is returned, in paise. Another rule that changes, so another interface. */
+interface RefundPolicy { long refundPaise(Booking b, long nowMs); }
+
+/** The usual cinema rule: everything back until two hours before, half until twenty minutes, nothing after. */
+class TieredRefund implements RefundPolicy {
+    public long refundPaise(Booking b, long nowMs) {
+        long minutesToShow = (b.show.startMs - nowMs) / 60_000L;
+        if (minutesToShow >= 120) return b.amountPaise;
+        if (minutesToShow >= 20) return b.amountPaise / 2;       // integer paise: half of 25,000 is 12,500 exactly
+        return 0;                                                // the seat still comes back; the money does not
+    }
+}
+
+/**
+ * Cancel with a policy. The seat returns to the market whatever the money does: the amount is decided from
+ * frozen fields before anything moves, the seats come back under the show's lock, the refund is sent after.
+ */
+class CancelWithRefund {
+    private final BookingService svc;
+    private final RefundPolicy policy;
+    private final Clock clock;
+    CancelWithRefund(BookingService svc, RefundPolicy policy, Clock clock) { this.svc = svc; this.policy = policy; this.clock = clock; }
+    /** Cancel, and return the paise actually sent back. */
+    long cancel(String bookingId, PaymentProcessor pay) {
+        Booking b = svc.find(bookingId);
+        long back = policy.refundPaise(b, clock.nowMs());        // decided before the seats move
+        b.show.cancel(b);                                        // under the lock: on sale again immediately
+        if (back > 0) pay.refund(b.paymentRef, back);            // outside the lock: a slow refund holds no seat
+        return back;
+    }
+}
+
+// ---- ext: a cap per user -- one script must not hold the whole house
+/**
+ * At most N seats per user per show. The quota is claimed in ONE atomic step before the hold is attempted,
+ * so two threads for the same user can never both see "one seat left in your quota"; a hold that fails
+ * gives the quota straight back.
+ */
+class SeatCap {
+    private final int maxPerUser;
+    private final ConcurrentHashMap<String, AtomicInteger> taken = new ConcurrentHashMap<>();
+    SeatCap(int maxPerUser) { this.maxPerUser = maxPerUser; }
+    /** Hold through the cap. Throws SeatUnavailable when this user is already at their limit for this show. */
+    Booking hold(BookingService svc, String showId, String userId, List<String> seatIds) {
+        AtomicInteger n = taken.computeIfAbsent(showId + "/" + userId, k -> new AtomicInteger());
+        int want = seatIds.size();
+        if (n.addAndGet(want) > maxPerUser) {                    // claim first, check second: one atomic step
+            n.addAndGet(-want);
+            throw new SeatUnavailable(userId + " is at the limit of " + maxPerUser + " seats for " + showId);
+        }
+        try { return svc.hold(showId, userId, seatIds); }
+        catch (RuntimeException e) { n.addAndGet(-want); throw e; }   // the seats were gone: the quota comes back
+    }
+    /** How many seats of their quota this user has used, for the message the app shows them. */
+    int used(String showId, String userId) { AtomicInteger n = taken.get(showId + "/" + userId); return n == null ? 0 : n.get(); }
+}
+// A release, a cancel and a lapsed hold should give the quota back too. Counting the user's live seats inside
+// the show's own lock does that for free; this side map is the version that changes nothing in Show.
+
+// ---- ext: per-seat compare-and-set instead of the show lock -- more concurrency, real rollback
+/** One seat claimed without any lock: the holder is swapped from null to a booking id in one hardware step. */
+class CasSeat {
+    final String id;
+    private final AtomicReference<String> holder = new AtomicReference<>();
+    CasSeat(String id) { this.id = id; }
+    boolean tryHold(String bookingId) { return holder.compareAndSet(null, bookingId); }   // exactly one caller wins
+    void release(String bookingId) { holder.compareAndSet(bookingId, null); }             // never drop somebody else's hold
+    String holder() { return holder.get(); }
+}
+/**
+ * The lock-free version of a group hold: take the seats one at a time, and on the first refusal give back
+ * everything already taken. More concurrency than one lock, and the rollback is the price.
+ */
+class CasShow {
+    private final Map<String, CasSeat> seats = new LinkedHashMap<>();
+    void add(CasSeat s) { seats.put(s.id, s); }
+    List<CasSeat> hold(List<String> ids, String bookingId) {
+        List<CasSeat> got = new ArrayList<>();
+        for (String id : ids) {
+            CasSeat s = seats.get(id);
+            if (s != null && s.tryHold(bookingId)) { got.add(s); continue; }
+            for (CasSeat back : got) back.release(bookingId);                 // all-or-nothing, by hand
+            return List.of();
+        }
+        return got;
+    }
+}
+// Once there are four app servers, no JVM lock and no AtomicReference helps: the hold must live outside the
+// process. SET seatKey bookingId NX PX 300000 is this same compare-and-set, and releasing it is a
+// compare-and-delete so one server can never drop another server's hold.
+
+/** Runs every extension once so the reference code on page 05 is code that actually executed. */
+class ExtDemo {
+    static Screen smallScreen() {
+        List<Seat> seats = new ArrayList<>();
+        for (int i = 1; i <= 4; i++) seats.add(new Seat("A", i, SeatClass.SILVER));
+        for (int i = 1; i <= 4; i++) seats.add(new Seat("B", i, SeatClass.GOLD));
+        return new Screen("EXT-1", seats);
+    }
+    public static void main(String[] args) throws Exception {
+        long[] now = { Instant.parse("2026-09-15T12:00:00Z").toEpochMilli() };
+        Clock clock = () -> now[0];
+        long hold = 60_000L;
+        Screen sc = smallScreen();
+        Show six  = new Show("X-6PM", "Dune", sc, Instant.parse("2026-09-15T18:00:00Z").toEpochMilli(), clock, hold);
+        Show nine = new Show("X-9PM", "Dune", sc, Instant.parse("2026-09-15T21:00:00Z").toEpochMilli(), clock, hold);
+        BookingService svc = new BookingService();
+        svc.addShow(six); svc.addShow(nine);
+
+        // search across shows: an index hop, no lock taken
+        ShowIndex index = new ShowIndex(); index.add("Bengaluru", six); index.add("Bengaluru", nine);
+        long dayStart = Instant.parse("2026-09-15T00:00:00Z").toEpochMilli();
+        System.out.println("search Bengaluru/Dune today: " + index.search("Bengaluru", "Dune", dayStart, dayStart + 86_400_000L).size() + " shows");
+
+        // sweeper: a lapsed hold is already free, the sweep only tidies the map
+        Booking abandoned = svc.hold("X-6PM", "ghost", List.of("A1"));
+        now[0] += hold + 1;
+        HoldSweeper sweeper = new HoldSweeper(List.of(six, nine));
+        System.out.println("before the sweep A1 shows as " + six.statusOf("A1") + "; the sweep reclaimed " + sweeper.sweepOnce() + " hold, booking is " + abandoned.status);
+
+        // dynamic pricing and a coupon stack on the flat rule
+        PricingRule demand = new CouponPricing(new DemandPricing(new ClassPricing()), 10);
+        System.out.println("gold, empty show, 10% coupon = " + demand.pricePaise(six, sc.seats.get(4)) + " paise");
+        svc.hold("X-6PM", "a", List.of("B1", "B2"));
+        System.out.println("gold, half the class held, same coupon = " + demand.pricePaise(six, sc.seats.get(6)) + " paise");
+
+        // a waitlist hands a returned seat to whoever was first
+        Waitlist wl = new Waitlist();
+        wl.join(nine, SeatClass.GOLD, "priya");
+        Booking offered = wl.offer(svc, nine, SeatClass.GOLD, "B4");
+        System.out.println("waitlist: " + (offered == null ? "nobody waiting" : offered.userId + " now holds " + offered.seatIds()) + "; queue left = " + wl.size(nine, SeatClass.GOLD));
+
+        // the database's compare-and-set: fifty threads, one row, one winner
+        ConditionalRowStore db = new ConditionalRowStore(); db.put("X-6PM", "A9");
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1); AtomicInteger wins = new AtomicInteger();
+        for (int i = 0; i < 50; i++) { String bk = "BK-" + i; pool.submit(() -> { go.await(); if (db.claim("X-6PM", "A9", bk, now[0] + hold, now[0])) wins.incrementAndGet(); return null; }); }
+        go.countDown(); pool.shutdown(); pool.awaitTermination(5, TimeUnit.SECONDS);
+        System.out.println("conditional UPDATE race: 50 claims on one row, winners = " + wins.get() + ", row = " + db.status("X-6PM", "A9"));
+        if (wins.get() != 1) throw new AssertionError("two rows claimed");
+
+        // idempotent confirm: three webhook retries, one charge
+        Booking b = svc.hold("X-9PM", "asha", List.of("A2"));
+        IdempotentConfirm once = new IdempotentConfirm(svc);
+        PaymentProcessor pay = new UpiPayment();
+        for (int i = 0; i < 3; i++) once.confirm("webhook-key-77", b.id, pay);
+        System.out.println("three webhook retries: charges = " + once.charges.get() + ", booking " + b.id + " is " + b.status);
+
+        // a gateway that times out: nothing confirmed, nothing released, then reconciled from the gateway
+        Booking t = svc.hold("X-9PM", "nikhil", List.of("A3"));
+        String[] chargedRef = { null };
+        PaymentProcessor timingOut = new PaymentProcessor() {
+            public String charge(long paise) { chargedRef[0] = "REF-TIMEOUT"; throw new PaymentUnknown("read timeout after 30 s"); }
+            public void refund(String ref, long paise) { }
+        };
+        ReconcilingConfirm rec = new ReconcilingConfirm(svc, key -> chargedRef[0]);
+        Booking afterTimeout = rec.confirm(t.id, "idem-91", timingOut);
+        System.out.println("after the timeout: booking is " + t.status + ", seat A3 is " + nine.statusOf("A3") + ", returned " + afterTimeout);
+        System.out.println("after settle: booking is " + (rec.settle(t.id, timingOut) == null ? "not confirmed" : t.status) + ", seat A3 is " + nine.statusOf("A3"));
+
+        // a cancel an hour before the show: the seat comes back in full, the money by the policy
+        Booking c = svc.hold("X-6PM", "divya", List.of("B3"));
+        svc.confirm(c.id, new CardPayment());
+        now[0] = six.startMs - 60 * 60_000L;                                   // one hour before the 6pm show
+        CancelWithRefund desk = new CancelWithRefund(svc, new TieredRefund(), clock);
+        System.out.println("cancel one hour before a " + c.amountPaise + " paise booking: " + desk.cancel(c.id, new CardPayment())
+            + " paise back, seat B3 is " + six.statusOf("B3"));
+
+        // one script, one user, a cap of three: the quota is claimed atomically
+        SeatCap cap = new SeatCap(3);
+        int got = 0;
+        for (String sid : List.of("A1", "A2", "A4", "B1", "B2")) {
+            try { cap.hold(svc, "X-9PM", "bot", List.of(sid)); got++; } catch (SeatUnavailable e) { /* at the limit */ }
+        }
+        System.out.println("a bot asking for five seats with a cap of three got " + got + " (quota used " + cap.used("X-9PM", "bot") + ")");
+
+        // the lock-free alternative, with its rollback
+        CasShow cas = new CasShow(); cas.add(new CasSeat("C1")); cas.add(new CasSeat("C2"));
+        System.out.println("CAS hold of C1+C2: " + cas.hold(List.of("C1", "C2"), "BK-a").size() + " seats");
+        System.out.println("a second group asking for C2+C1 gets: " + cas.hold(List.of("C2", "C1"), "BK-b").size() + " seats (rolled back)");
+    }
+}

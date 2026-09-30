@@ -1,0 +1,446 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: a new channel -- one class, one registry line, and the compiler points at the rest
+/**
+ * WhatsApp. The whole channel is this: one class implementing Sender, one line in the map handed to
+ * configure(), and one template registered for it. Nothing in the engine, the queue, the guards or the state
+ * machine moves. The one cost that is not free: Channel is an enum, so a real WhatsApp needs a constant of its
+ * own, and the exhaustive switch in Recipient.addressFor then fails to compile until you say which address it
+ * uses -- which is the compiler doing your review for you. Key the registry by String and even that disappears.
+ */
+final class WhatsAppSender implements Sender {
+    private final AtomicInteger calls = new AtomicInteger();
+    public Channel channel() { return Channel.IN_APP; }          // a real one gets its own constant; see the note above
+    public SendResult send(Recipient to, RenderedMessage m, String idempotencyKey) {
+        calls.incrementAndGet();
+        String number = to.phone();
+        if (number == null || !number.startsWith("+")) return SendResult.permanentFailure("not an E.164 number: " + number);
+        return SendResult.sent("wa/" + Integer.toHexString(idempotencyKey.hashCode()));
+    }
+    int calls() { return calls.get(); }
+}
+
+// ---- ext: a flaky provider is eating the workers -- stop calling it for a while (Decorator)
+/**
+ * A circuit breaker that IS a Sender, so the engine cannot tell the difference. After `threshold` failures in a
+ * row it opens for `openMs` and answers TRANSIENT_FAILURE without making a network call, which means a dead SMS
+ * gateway costs nothing instead of parking every worker on a socket timeout. One success closes it again.
+ */
+final class CircuitBreakerSender implements Sender {
+    private final Sender base; private final int threshold; private final long openMs; private final Clock clock;
+    private final AtomicInteger consecutiveFailures = new AtomicInteger();
+    private final AtomicLong openUntilMs = new AtomicLong();
+    private final AtomicInteger shortCircuited = new AtomicInteger();
+    CircuitBreakerSender(Sender base, int threshold, long openMs, Clock clock) {
+        this.base = base; this.threshold = threshold; this.openMs = openMs; this.clock = clock;
+    }
+    public Channel channel() { return base.channel(); }
+    public SendResult send(Recipient to, RenderedMessage m, String idempotencyKey) {
+        long now = clock.nowMs();
+        if (now < openUntilMs.get()) {
+            shortCircuited.incrementAndGet();
+            return SendResult.transientFailure("circuit open for " + base.channel() + ", no call made");
+        }
+        SendResult result = base.send(to, m, idempotencyKey);
+        switch (result.outcome()) {
+            case SENT, PERMANENT -> consecutiveFailures.set(0);      // a permanent failure is the provider working fine
+            case TRANSIENT, UNKNOWN -> { if (consecutiveFailures.incrementAndGet() >= threshold) openUntilMs.set(now + openMs); }
+        }
+        return result;
+    }
+    /** How many calls the breaker swallowed. The number you would put on a dashboard. */
+    int shortCircuited() { return shortCircuited.get(); }
+    boolean isOpen() { return clock.nowMs() < openUntilMs.get(); }
+}
+
+// ---- ext: the provider caps us at N per second -- a token bucket in front of it (Decorator)
+/**
+ * Per-channel, per-user rate limiting, again as a Sender that wraps a Sender. The bucket is one immutable record
+ * (tokens plus the instant they were measured) inside an AtomicReference, so "refill by elapsed time, then spend
+ * one" is a single compare-and-set: two threads cannot both spend the last token, and no user's bucket blocks
+ * another's. Being refused is a TRANSIENT failure, so the engine's own backoff does the waiting for us.
+ */
+final class RateLimitedSender implements Sender {
+    private record Bucket(double tokens, long stampMs) {}
+    private final Sender base; private final double capacity, refillPerSecond; private final Clock clock;
+    private final ConcurrentHashMap<String, AtomicReference<Bucket>> buckets = new ConcurrentHashMap<>();
+    RateLimitedSender(Sender base, double capacity, double refillPerSecond, Clock clock) {
+        this.base = base; this.capacity = capacity; this.refillPerSecond = refillPerSecond; this.clock = clock;
+    }
+    public Channel channel() { return base.channel(); }
+    public SendResult send(Recipient to, RenderedMessage m, String idempotencyKey) {
+        if (!tryAcquire(to.userId())) return SendResult.transientFailure("rate limited on " + base.channel());
+        return base.send(to, m, idempotencyKey);
+    }
+    private boolean tryAcquire(String key) {
+        AtomicReference<Bucket> ref = buckets.computeIfAbsent(key, k -> new AtomicReference<>(new Bucket(capacity, clock.nowMs())));
+        while (true) {
+            Bucket current = ref.get();
+            long now = clock.nowMs();
+            double refilled = Math.min(capacity, current.tokens() + (now - current.stampMs()) / 1000.0 * refillPerSecond);
+            if (refilled < 1.0) return false;
+            if (ref.compareAndSet(current, new Bucket(refilled - 1.0, now))) return true;
+        }
+    }
+}
+
+// ---- ext: delivery receipts -- SENT is not the end of the story
+/**
+ * The webhook. It listens for SENT, remembers which provider reference belongs to which record and attempt, and
+ * turns a later callback into one rank-ordered move. Everything hard about out-of-order webhooks was already
+ * solved by the rank rule: a receipt for an attempt we have moved past is dropped, a DELIVERED outranks every
+ * other terminal state, and the same receipt twice changes nothing the second time.
+ */
+final class ReceiptWebhook implements DeliveryListener {
+    private record Origin(String notificationId, int attempt) {}
+    private final NotificationService service;
+    private final ConcurrentHashMap<String, Origin> byProviderRef = new ConcurrentHashMap<>();
+    ReceiptWebhook(NotificationService service) { this.service = service; }
+    public void onTransition(DeliveryRecord r, DeliveryState from, DeliveryState to, String detail) {
+        if (to == DeliveryState.SENT) byProviderRef.put(detail, new Origin(r.notification().id(), r.attempt()));
+    }
+    /** Called by the HTTP handler. True means the record moved; false means the callback was stale or a repeat. */
+    boolean deliveredAt(String providerRef) { return apply(providerRef, DeliveryState.DELIVERED, "receipt: handset ack"); }
+    /** A hard bounce: the address exists at us but not at the provider. Terminal, and it outranks SENT. */
+    boolean bounced(String providerRef, String why) { return apply(providerRef, DeliveryState.FAILED_FINAL, "bounce: " + why); }
+    private boolean apply(String providerRef, DeliveryState state, String detail) {
+        Origin o = byProviderRef.get(providerRef);
+        return o != null && service.onReceipt(o.notificationId(), o.attempt(), state, detail);
+    }
+}
+
+// ---- ext: priority lanes -- a flood of CRITICAL must not starve the marketing queue for ever
+/**
+ * One queue ordered by priority is right until somebody floods the top class: LOW then never runs. The
+ * production answer is a lane per class with its own workers and its own bound, so each class is guaranteed a
+ * share of the pool instead of competing for it. Same service, same guards, same senders: only the routing in
+ * front changes, which is the test that the engine was factored correctly.
+ */
+final class PriorityLanes {
+    private final Map<Priority, NotificationService> lanes = new EnumMap<>(Priority.class);
+    /** Give each class its own workers. CRITICAL gets few but is never behind anything; LOW gets the leftovers. */
+    PriorityLanes lane(Priority p, NotificationService service) { lanes.put(p, service); return this; }
+    /** Route by class. The caller's code does not change at all. */
+    DeliveryRecord submit(Notification n) {
+        NotificationService s = lanes.get(n.priority());
+        if (s == null) throw new IllegalStateException("no lane for " + n.priority());
+        return s.submit(n);
+    }
+    void startAll() { lanes.values().forEach(NotificationService::start); }
+    void shutdownAll() { lanes.values().forEach(NotificationService::shutdown); }
+    /** The cheaper half-measure when you do not want four pools: age a record's effective priority while it waits. */
+    static int effectivePriority(Priority declared, long waitedMs, long ageEveryMs) {
+        return Math.max(0, declared.ordinal() - (int) (waitedMs / ageEveryMs));
+    }
+}
+
+// ---- ext: batching for email -- twenty alerts in a minute should be one digest
+/**
+ * Batching belongs ABOVE the engine, not inside a Sender: a Sender that buffered would have to answer SENT
+ * before the provider had seen anything, and that lie is exactly what the three-way SendResult exists to avoid.
+ * So the collector holds submits for a window, then submits ONE notification whose parameters are the joined
+ * lines. Every guard, retry and receipt then works on the digest, unchanged.
+ */
+final class DigestCollector {
+    private final NotificationService service; private final long windowMs; private final int maxLines;
+    private final Map<String, List<String>> pending = new HashMap<>();
+    private final Map<String, Long> openedAtMs = new HashMap<>();
+    private final Clock clock;
+    DigestCollector(NotificationService service, Clock clock, long windowMs, int maxLines) {
+        this.service = service; this.clock = clock; this.windowMs = windowMs; this.maxLines = maxLines;
+    }
+    /** Add one line for a user. Returns the digest's record when this line closed the batch, otherwise null. */
+    synchronized DeliveryRecord add(String userId, String line) {
+        List<String> lines = pending.computeIfAbsent(userId, k -> new ArrayList<>());
+        openedAtMs.putIfAbsent(userId, clock.nowMs());
+        lines.add(line);
+        boolean full = lines.size() >= maxLines;
+        boolean old = clock.nowMs() - openedAtMs.get(userId) >= windowMs;
+        return (full || old) ? flush(userId) : null;
+    }
+    /** Send whatever is held for this user as one message. Called by the timer as well, for a half-full batch. */
+    synchronized DeliveryRecord flush(String userId) {
+        List<String> lines = pending.remove(userId);
+        openedAtMs.remove(userId);
+        if (lines == null || lines.isEmpty()) return null;
+        return service.submit(Notification.to(userId, Channel.EMAIL, "digest")
+                .category("transactional")
+                .dedupeKey("digest-" + userId + "-" + clock.nowMs())
+                .params(Map.of("count", String.valueOf(lines.size()), "lines", String.join("; ", lines)))
+                .build());
+    }
+}
+
+// ---- ext: campaign pacing -- a million marketing pushes must not become one spike
+/**
+ * A campaign is a million submits, and submitting them in a loop puts a million records in the queue in a
+ * second. Pacing spreads them across a window using the same injected Scheduler the retries use: batch k goes in
+ * at start + k * (window / batches). Nothing else changes, and every message is still an ordinary notification,
+ * so opt-outs, caps and quiet hours all still apply to it.
+ */
+final class CampaignPacer {
+    private final NotificationService service; private final Scheduler scheduler;
+    CampaignPacer(NotificationService service, Scheduler scheduler) { this.service = service; this.scheduler = scheduler; }
+    /** Spread `all` evenly across `windowMs` in `batches` chunks. Returns immediately; the scheduler does the rest. */
+    void run(List<Notification> all, long windowMs, int batches) {
+        int size = Math.max(1, (all.size() + batches - 1) / batches);
+        for (int b = 0, from = 0; from < all.size(); b++, from += size) {
+            List<Notification> chunk = all.subList(from, Math.min(all.size(), from + size));
+            long delay = (long) b * windowMs / batches;
+            scheduler.schedule(() -> chunk.forEach(service::submit), delay);
+        }
+    }
+}
+
+// ---- ext: persistence and the outbox -- the same CAS, written in SQL
+/**
+ * Everything in memory today becomes two tables. The whole in-memory design survives because the rank rule maps
+ * straight onto a conditional UPDATE: the database refuses the stale write exactly as the compare-and-set does.
+ *
+ *   INSERT INTO notification (id, payload, rank) VALUES (?, ?, 0) ON CONFLICT (id) DO NOTHING;
+ *   UPDATE notification SET state = ?, attempt = ?, rank = ? WHERE id = ? AND rank < ?;
+ *
+ * The INSERT is the de-dup claim (Postgres) or SET key value NX PX ttl (Redis). The UPDATE is moveTo(). A row
+ * updated is a transition accepted; zero rows updated is moveTo() returning false. The outbox pattern then makes
+ * the hand-off to the queue crash-safe: the submit transaction writes the row AND an outbox row, and a relay
+ * reads the outbox and enqueues, so a crash between "recorded" and "queued" is recovered instead of lost.
+ */
+interface NotificationRepository {
+    /** The de-dup claim as a database row. False means somebody already inserted this id. */
+    boolean insertIfAbsent(String notificationId, String payload);
+    /** The conditional update. False means a newer rank is already stored, so this write is stale and dropped. */
+    boolean advance(String notificationId, DeliveryState state, int attempt, long rank);
+    /** What the row says now, for a support screen or for recovery after a restart. */
+    Progress read(String notificationId);
+}
+
+/** A map that behaves exactly like those two SQL statements, so the semantics can be tested without a database. */
+final class InMemoryRepository implements NotificationRepository {
+    private final ConcurrentHashMap<String, Progress> rows = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> payloads = new ConcurrentHashMap<>();
+    public boolean insertIfAbsent(String notificationId, String payload) {
+        boolean first = payloads.putIfAbsent(notificationId, payload) == null;
+        if (first) rows.put(notificationId, new Progress(0, DeliveryState.CREATED, "inserted"));
+        return first;
+    }
+    public boolean advance(String notificationId, DeliveryState state, int attempt, long rank) {
+        while (true) {
+            Progress current = rows.get(notificationId);
+            if (current == null) return false;
+            if (rank <= current.rank()) return false;                       // WHERE rank < ? matched no rows
+            if (rows.replace(notificationId, current, new Progress(attempt, state, "persisted"))) return true;
+        }
+    }
+    public Progress read(String notificationId) { return rows.get(notificationId); }
+}
+
+/** Writes every accepted transition through to the repository. A listener, so the engine never learns about SQL. */
+final class OutboxListener implements DeliveryListener {
+    private final NotificationRepository repo;
+    OutboxListener(NotificationRepository repo) { this.repo = repo; }
+    public void onTransition(DeliveryRecord r, DeliveryState from, DeliveryState to, String detail) {
+        repo.insertIfAbsent(r.notification().id(), r.notification().toString());
+        repo.advance(r.notification().id(), to, r.attempt(), Progress.rankOf(r.attempt(), to));
+    }
+}
+
+// ---- ext: exactly once is impossible -- and the code says so out loud
+/**
+ * There is no exactly-once send to a remote gateway, and pretending otherwise is the mistake this design exists
+ * to avoid. The gateway call has three outcomes, not two: yes, no, and no answer. On "no answer" you must choose
+ * between never sending (and losing real messages when the reply was merely lost) and sending again (and risking
+ * a duplicate). This service chooses at-least-once and then removes the duplicate at the only place it can be
+ * removed -- the provider -- by carrying the SAME idempotency key on every attempt. That is effectively-once:
+ * at-least-once delivery plus an idempotent receiver. UNKNOWN is the state that makes the choice visible instead
+ * of hiding it behind a boolean.
+ */
+final class EffectivelyOnce {
+    /** What a retry looks like from the provider's side: same key, so the second call is recognised, not resent. */
+    static String explain(DeliveryRecord record) {
+        Notification n = record.notification();
+        return "key=" + n.idempotencyKey() + " attempt=" + record.attempt() + " state=" + record.state()
+             + " -> the provider sees one key and collapses attempts 2..n into the first accepted send";
+    }
+    /** The only honest reconciliation for a record stuck at UNKNOWN when the budget runs out: ask, do not guess. */
+    static String reconcile(DeliveryRecord record) {
+        return record.state() == DeliveryState.UNKNOWN || record.state() == DeliveryState.SENDING
+                ? "query the provider by " + record.notification().idempotencyKey() + " and set the state from THEIR answer"
+                : "nothing to reconcile: " + record.state();
+    }
+}
+
+// ---- ext: jittered backoff -- ten thousand retries must not come back in the same millisecond
+/** Wraps any retry policy and spreads each wait over [50%, 100%] of it, so a recovered provider is not stampeded. */
+final class JitteredBackoff implements RetryPolicy {
+    private final RetryPolicy base; private final Random random;
+    JitteredBackoff(RetryPolicy base, Random random) { this.base = base; this.random = random; }
+    public boolean shouldRetry(int attemptsSoFar) { return base.shouldRetry(attemptsSoFar); }
+    public long backoffMs(int attemptsSoFar) {
+        long full = base.backoffMs(attemptsSoFar);
+        return full / 2 + (long) (random.nextDouble() * (full / 2.0));
+    }
+}
+
+// ---- ext: ten instances behind a load balancer -- and evicting what nobody is using
+/**
+ * Two in-memory stores are all that stop this running on ten machines. The de-dup store becomes one Redis call,
+ * SET key 1 NX PX ttl, which is the same single atomic claim putIfAbsent was; the per-channel token bucket
+ * becomes a small Lua script that refills and spends in one round trip. The queue becomes a broker with a topic
+ * per priority class. Nothing in the engine changes, because it never knew where the stores lived.
+ *
+ * The version below is the in-memory one plus the sweep that a TTL gives you for free in Redis: without it, a
+ * process that has seen ten million keys holds ten million entries for ever.
+ */
+final class SweepingDedupeStore implements DedupeStore {
+    private final ConcurrentHashMap<String, Long> expiryByKey = new ConcurrentHashMap<>();
+    public boolean claim(String key, long nowMs, long ttlMs) {
+        while (true) {
+            Long previous = expiryByKey.putIfAbsent(key, nowMs + ttlMs);    // Redis: SET key 1 NX PX ttlMs
+            if (previous == null) return true;
+            if (previous > nowMs) return false;
+            if (expiryByKey.replace(key, previous, nowMs + ttlMs)) return true;
+        }
+    }
+    public void release(String key) { expiryByKey.remove(key); }            // Redis: DEL key
+    /** Drop every key whose window has closed. Run it on the timer; Redis does this for you. */
+    int sweep(long nowMs) {
+        int before = expiryByKey.size();
+        expiryByKey.entrySet().removeIf(e -> e.getValue() <= nowMs);
+        return before - expiryByKey.size();
+    }
+    int size() { return expiryByKey.size(); }
+}
+
+/** Runs every extension above, so the follow-up answers on page 05 are code that has actually executed. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        long[] now = { 1_000_000L };
+        Clock clock = () -> now[0];
+        Scheduler inline = (task, delayMs) -> task.run();
+
+        InMemoryTemplates templates = new InMemoryTemplates()
+                .register("promo", Channel.PUSH, new MessageTemplate("{{pct}}% off", "ends midnight"))
+                .register("otp", Channel.SMS, new MessageTemplate("OTP", "{{code}} is your code"))
+                .register("digest", Channel.EMAIL, new MessageTemplate("{{count}} updates", "{{lines}}"))
+                .register("alert", Channel.IN_APP, new MessageTemplate("ALERT", "{{what}}"));
+        InMemoryDirectory people = new InMemoryDirectory()
+                .add(new Recipient("u1", "ravi@example.com", "+91900000001", "tok-1", 5))
+                .add(new Recipient("u2", "meera@example.com", "+91900000002", "tok-2", 5));
+
+        // 1. a new channel: one class, one line in the registry
+        WhatsAppSender whatsapp = new WhatsAppSender();
+        NotificationService wa = new NotificationService(1, 1_000);
+        wa.configure(templates, people, new ExponentialBackoff(2, 1, 10), List.of(),
+                Map.of(Channel.IN_APP, whatsapp), clock, inline);
+        wa.start();
+        DeliveryRecord viaWhatsApp = wa.submit(Notification.to("u1", Channel.IN_APP, "alert").params(Map.of("what", "card used in Dubai")).build());
+        wa.awaitIdle(2_000);
+        System.out.println("new channel: " + viaWhatsApp.state() + " after " + whatsapp.calls() + " call, zero engine edits");
+        wa.shutdown();
+
+        // 2 + 3. the circuit breaker and the rate limiter, both wrapping the same sender
+        FlakySmsSender broken = new FlakySmsSender(99, false);                 // never recovers
+        CircuitBreakerSender breaker = new CircuitBreakerSender(broken, 2, 60_000, clock);
+        NotificationService cb = new NotificationService(1, 1_000);
+        cb.configure(templates, people, new ExponentialBackoff(5, 1, 10), List.of(),
+                Map.of(Channel.SMS, breaker), clock, inline);
+        cb.start();
+        DeliveryRecord doomed = cb.submit(Notification.to("u1", Channel.SMS, "otp").params(Map.of("code", "1")).build());
+        cb.awaitIdle(2_000);
+        System.out.println("circuit breaker: " + doomed.state() + " after " + doomed.attempt() + " attempts; "
+                + breaker.shortCircuited() + " of them never touched the network; open=" + breaker.isOpen());
+        cb.shutdown();
+
+        PushSender rawPush = new PushSender();
+        RateLimitedSender limited = new RateLimitedSender(rawPush, 2, 0.0001, clock);   // two, then effectively none
+        NotificationService rl = new NotificationService(1, 1_000);
+        rl.configure(templates, people, new ExponentialBackoff(1, 1, 10), List.of(),
+                Map.of(Channel.PUSH, limited), clock, inline);
+        rl.start();
+        int sent = 0;
+        for (int i = 0; i < 5; i++) {
+            DeliveryRecord r = rl.submit(Notification.to("u1", Channel.PUSH, "promo").params(Map.of("pct", "5")).build());
+            rl.awaitIdle(2_000);
+            if (r.state() == DeliveryState.SENT) sent++;
+        }
+        System.out.println("rate limiter: five submits, " + sent + " reached the gateway (" + rawPush.calls() + " real calls)");
+        rl.shutdown();
+
+        // 4. delivery receipts
+        PushSender plain = new PushSender();
+        NotificationService receipts = new NotificationService(1, 1_000);
+        receipts.configure(templates, people, new ExponentialBackoff(2, 1, 10), List.of(),
+                Map.of(Channel.PUSH, plain), clock, inline);
+        ReceiptWebhook webhook = new ReceiptWebhook(receipts);
+        receipts.addListener(webhook);
+        receipts.start();
+        DeliveryRecord watched = receipts.submit(Notification.to("u2", Channel.PUSH, "promo").params(Map.of("pct", "7")).build());
+        receipts.awaitIdle(2_000);
+        String providerRef = watched.detail();
+        boolean first = webhook.deliveredAt(providerRef), repeat = webhook.deliveredAt(providerRef);
+        System.out.println("receipts: " + watched.state() + "; first callback applied=" + first + ", the same callback again=" + repeat);
+        receipts.shutdown();
+
+        // 5. priority lanes
+        NotificationService critical = new NotificationService(1, 100), low = new NotificationService(1, 100);
+        for (NotificationService s : List.of(critical, low))
+            s.configure(templates, people, new ExponentialBackoff(2, 1, 10), List.of(), Map.of(Channel.PUSH, new PushSender()), clock, inline);
+        PriorityLanes lanes = new PriorityLanes().lane(Priority.CRITICAL, critical).lane(Priority.LOW, low);
+        lanes.startAll();
+        lanes.submit(Notification.to("u1", Channel.PUSH, "promo").priority(Priority.CRITICAL).params(Map.of("pct", "1")).build());
+        lanes.submit(Notification.to("u1", Channel.PUSH, "promo").priority(Priority.LOW).params(Map.of("pct", "2")).build());
+        critical.awaitIdle(2_000); low.awaitIdle(2_000);
+        System.out.println("lanes: a LOW message still ran while CRITICAL was busy; ageing after 10 min gives LOW rank "
+                + PriorityLanes.effectivePriority(Priority.LOW, 600_000, 300_000));
+        lanes.shutdownAll();
+
+        // 6 + 7. digests and campaign pacing
+        EmailSender mail = new EmailSender();
+        NotificationService bulk = new NotificationService(2, 10_000);
+        bulk.configure(templates, people, new ExponentialBackoff(2, 1, 10), List.of(),
+                Map.of(Channel.EMAIL, mail, Channel.PUSH, new PushSender()), clock, inline);
+        bulk.start();
+        DigestCollector digest = new DigestCollector(bulk, clock, 60_000, 3);
+        digest.add("u1", "invoice 1 paid"); digest.add("u1", "invoice 2 paid");
+        DeliveryRecord sentDigest = digest.add("u1", "invoice 3 paid");
+        bulk.awaitIdle(2_000);
+        System.out.println("digest: three events became " + (sentDigest == null ? 0 : 1) + " email, state " + sentDigest.state());
+
+        List<Notification> campaign = new ArrayList<>();
+        for (int i = 0; i < 20; i++) campaign.add(Notification.to("u2", Channel.PUSH, "promo").priority(Priority.LOW).params(Map.of("pct", "3")).build());
+        new CampaignPacer(bulk, inline).run(campaign, 3_600_000, 4);
+        bulk.awaitIdle(3_000);
+        System.out.println("pacing: a 20-message campaign went out in 4 batches instead of one spike");
+        bulk.shutdown();
+
+        // 8. persistence: the conditional UPDATE refuses the stale write exactly as the CAS does
+        InMemoryRepository repo = new InMemoryRepository();
+        repo.insertIfAbsent("n-1", "payload");
+        boolean twice = repo.insertIfAbsent("n-1", "payload");
+        repo.advance("n-1", DeliveryState.QUEUED, 1, Progress.rankOf(1, DeliveryState.QUEUED));
+        repo.advance("n-1", DeliveryState.SENDING, 1, Progress.rankOf(1, DeliveryState.SENDING));
+        repo.advance("n-1", DeliveryState.SENT, 2, Progress.rankOf(2, DeliveryState.SENT));
+        boolean stale = repo.advance("n-1", DeliveryState.SENT, 1, Progress.rankOf(1, DeliveryState.SENT));
+        System.out.println("repository: second insert=" + twice + ", stale update=" + stale + ", row now " + repo.read("n-1").state());
+
+        // 9. effectively once, said out loud
+        System.out.println("effectively once: " + EffectivelyOnce.explain(watched));
+        System.out.println("reconcile:        " + EffectivelyOnce.reconcile(doomed));
+
+        // 10. jitter
+        RetryPolicy jittered = new JitteredBackoff(new ExponentialBackoff(5, 1_000, 30_000), new Random(7));
+        System.out.println("jitter: three waits that would all have been 2000 ms -> "
+                + jittered.backoffMs(2) + ", " + jittered.backoffMs(2) + ", " + jittered.backoffMs(2) + " ms");
+
+        // 11. the shared store, and the sweep a TTL gives you for free
+        SweepingDedupeStore shared = new SweepingDedupeStore();
+        shared.claim("a", now[0], 10); shared.claim("b", now[0], 10_000);
+        now[0] += 100;
+        System.out.println("shared store: " + shared.size() + " keys, swept " + shared.sweep(now[0]) + ", " + shared.size() + " left");
+    }
+}

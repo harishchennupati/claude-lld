@@ -1,0 +1,795 @@
+# Print in Order LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"mt-print-series/Main.java").read_text()
+ext   = (H/"mt-print-series/Extensions.java").read_text()
+tests = (H/"mt-print-series/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+220])
+    j = next(m for m in marks if m > i and b in ext[m:m+220])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+# what the code must do: one turn, and the end of the run
+pf = _D
+turn_boxes = [("a thread arrives", "any of the N threads"),
+              ("take the lock", "interruptibly"),
+              ("is it my turn?", "the guard, on the counter"),
+              ("print and advance", "both inside the lock"),
+              ("wake the others, unlock", "listeners only after")]
+pf += _tx(88, 51, "one turn", "var(--acc)", 13)
+for k, (t, sub) in enumerate(turn_boxes):
+    x = 150 + k*220
+    pf += _bx(x, 24, 195, 54, t, sub, acc=(k == 2))
+    if k < 4: pf += _ar("M%s 51 H%s" % (x+195, x+220), True)
+pf += _ar("M620 78 V112", dash=True) + _bx(490, 112, 400, 34, "not my turn: sleep on the condition", "and the lock is released while it sleeps", dash=True)
+pf += _ar("M760 112 V82", True)
+pf += _tx(612, 101, "no", "var(--muted)", 10, "end")
+pf += _tx(772, 101, "woken &rarr; check again", "var(--acc)", 10, "start")
+pf += _tx(615, 168, "a wake only means &quot;look again&quot;, never &quot;the turn is yours&quot; &mdash; which is why the check is a while loop and not an if", "var(--muted)", 11)
+
+end_boxes = [("the last number is printed", "the counter passes n"),
+             ("done() is true for everyone", "the same test every guard loop runs"),
+             ("one last signalAll", "under the lock"),
+             ("every sleeper wakes and leaves", "nobody is parked at the end")]
+pf += _tx(88, 223, "the end", "var(--acc)", 13)
+for k, (t, sub) in enumerate(end_boxes):
+    x = 150 + k*270
+    pf += _bx(x, 196, 245, 54, t, sub, acc=(k == 3))
+    if k < 3: pf += _ar("M%s 223 H%s" % (x+245, x+270), True)
+pf += _tx(88, 288, "read", "var(--acc)", 13)
+pf += _tx(150, 288, "at any moment, from any thread: what has been printed so far, and whose turn it is &mdash; one lock, one consistent answer", "var(--text)", 12, "start")
+pf += _tx(615, 322, "the same series run a thousand times prints the same characters in the same order; every token is printed once, by exactly one thread; and no thread is asleep when the run ends", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 336, pf)
+
+# one run, replayed -- the numbers are the ones Main.java prints
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("t = 0 ms   four threads start", ["FizzBuzz to 20,000, four threads", "one latch releases them together",
+                                         "i = 1: only number's guard is true"], False),
+      ("t = 0-68 ms   20,000 turns", ["lock, test the guard, print, wake", "32,000 wakes, 16,000 wasted",
+                                      "wasted = looked, not mine, slept"], True),
+      ("t = 68 ms   i reaches 20,001", ["the last turn signals once more", "all four wake, all four see done()",
+                                        "each signals on the way out"], False),
+      ("t = 68 ms   the count", ["20,000 tokens, 90,075 characters", "0 duplicated, 0 missing, 0 wrong",
+                                 "and the same string on every run"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>N threads share one output sequence and print it in one fixed order, from 1 to n; each thread prints only its own tokens.</li>
+<li>FooBar: two threads alternate. ZeroEvenOdd: three threads, zero before every number. FizzBuzz: four threads, the number decides.</li>
+<li>One engine serves all three: only the guards and the actions change, never the waiting.</li>
+<li>A thread that is not up yet must sleep, not spin: no thread may burn a core waiting for its turn.</li>
+<li>The run ends when the counter passes n, and every thread leaves &mdash; including the ones asleep.</li>
+<li>The sequence can be read back as a string, so a test can compare it character for character.</li>
+<li>The run can be stopped early on a signal, and what was printed before the stop stays intact.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Deterministic: the same series, run a thousand times, prints exactly the same characters.</li>
+<li>Exactly once: no token printed twice, none skipped, whatever the thread scheduler does.</li>
+<li>No deadlock and no lost wakeup: every change of the shared state is followed by a signal under the same lock.</li>
+<li>O(1) per turn: the guard is one comparison, the print is one append, the counter is one increment.</li>
+<li>The per-thread rule swaps without touching the turn loop; the destination of the tokens swaps too.</li>
+<li>A slow or broken listener can never stall or corrupt the order.</li>
+<li>One JVM, in memory, one run at a time per printer (say it; durability is a follow-up).</li></ul></div></div>
+'''
+
+PROMPT = ('"Give me three threads that print 0, then 1, then 0, then 2, then 0, then 3, and so on to n &mdash; one '
+          'thread only ever prints zeros, one only odd numbers, one only even. Then show me the same code doing '
+          'FizzBuzz with four threads. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>Several threads have to write into one sequence, and the '
+ 'order of that sequence is the whole product. Each thread owns a part of the job &mdash; one prints zeros, one '
+ 'prints odd numbers, one prints even &mdash; and none of them may print until the others have printed what comes '
+ 'before. The threads run at the same time and the operating system decides who gets a core when, so left alone they '
+ 'would interleave and the output would be different on every run. Nobody may sit in a loop asking &quot;is it my '
+ 'turn yet&quot;, because that burns a whole CPU to wait, so a thread whose turn has not come has to go to sleep and '
+ 'somebody has to wake it at the right moment. The one thing that must always be true: the output is the same '
+ 'characters in the same order on every single run, every token is printed exactly once by exactly one thread, and '
+ 'when the last number is out no thread is left asleep. The same shape answers three interview favourites &mdash; '
+ 'FooBar, ZeroEvenOdd, FizzBuzz &mdash; which is the real thing being tested.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: a class that compiles and a '
+ '<code>main</code> that starts the threads and prints a sequence you can read. The interviewer watches, in this '
+ 'order: the questions you ask before typing (how many threads, and does the next actor depend on the data, are the '
+ 'first two); which types exist and who owns which state; one turn end to end, including the waiting; the race you '
+ 'are defending against, named out loud; whether the wait is a <code>while</code> and not an <code>if</code>, and '
+ 'why; what is inside the lock and what is deliberately outside it; how every thread gets out at the end. Then the '
+ 'twists: add a third thread; do FizzBuzz with the same engine; do it with semaphores instead; the output goes to a '
+ 'slow socket; the threads join and leave mid-run; now build H2O.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>One engine for all three variants, or three separate answers?</td><td>One engine</td><td>A guard plus an action behind an interface, handed in per thread (moves 1, 3)</td></tr>'
+ '<tr><td>Is the next actor fixed, or does the data decide it?</td><td>The data decides &mdash; FizzBuzz needs it</td><td>Guards that every waiter re-checks, instead of a hard-wired hand-off order (moves 4, 6)</td></tr>'
+ '<tr><td>How many threads: two, three, four, or any number?</td><td>Any number; two to four in the examples</td><td>A list of roles and one thread each, not a class per thread (moves 1, 5)</td></tr>'
+ '<tr><td>Is n fixed up front, or is this an endless stream I must stop?</td><td>Fixed, with a stop signal as a follow-up</td><td><code>done()</code> is <code>i &gt; n</code>, and a flag the wait loops already read (moves 6, 12)</td></tr>'
+ '<tr><td>Must the tokens go to <code>System.out</code> live, or may I hand back the sequence?</td><td>Hand back the sequence; the sink is swappable</td><td>A one-method <code>Sink</code>, so a test can assert characters (moves 3, 12)</td></tr>'
+ '<tr><td>Is fairness or starvation a requirement, or only the order?</td><td>Only the order</td><td>A non-fair lock; the guards already fix who goes next (moves 7, 8)</td></tr>'
+ '<tr><td>How many wakeups may I waste? Is the thread count going to grow?</td><td>Two to four now, keep the door open</td><td>One shared condition today, one per role on the ladder (moves 7, 8)</td></tr>'
+ '<tr><td>One JVM, in memory?</td><td>Yes</td><td>No durability yet; the append-only log is a follow-up (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One run, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> one engine for all three variants; the next actor can depend on the '
+ 'number, so every waiter re-checks its own guard; n is fixed and a stop signal is a follow-up; the tokens go into '
+ 'a sequence I hand back, and the destination is swappable; the only guarantee is order, not fairness. Named as out '
+ 'of scope: durability, more than one run at a time on one printer, distribution &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes; and what a threading problem tempts you to make a class and must not
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "N THREADS print one SERIES of TOKENS; each one WAITS until it is its TURN, prints, advances the COUNTER and hands the turn on", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 190, "Series", "counter, phase, the record", 1),
+                          (240, 185, "MonitorPrinter", "the lock and the condition", 1),
+                          (445, 180, "Role", "a guard and an action", 0),
+                          (645, 165, "Token", "a string, not ours", 0),
+                          (830, 175, "foo / zero / fizz", "threads, not classes", 0),
+                          (1025, 178, "the waiting room", "the lock keeps it", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a rule, a payload, a thread, or a queue of sleepers that the lock maintains for us", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("hold the counter and the record", "Series  (owns i, phase, the text)", "s.i++  /  s.emit(token)"),
+                                       ("decide whether it is my turn", "Role  (owns nothing: a pure rule)", "role.ready(s)"),
+                                       ("print one token and advance", "Role, writing on the Series", "role.act(s)"),
+                                       ("sleep until somebody says look again", "MonitorPrinter  (owns the lock)", "turn.await() / signalAll()"),
+                                       ("run one participant's whole life", "MonitorPrinter  (sees all three)", "serve(series, role)")]):
+    y = 20 + k*54
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 312, "only the printer can see the blackboard AND the condition, so the printer is the orchestrator; foo is not a class, it is a thread running one Role", "var(--muted)", 11)
+m2 += _tx(615, 332, "and notice the verb with no class at all: waiting. It is a queue of parked threads owned by the lock, and await / signal are the only way to touch it", "var(--muted)", 11)
+MV[2] = _mv(1230, 345, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 78, 230, 110, "MonitorPrinter", "configure(sink, clock, deadline)", acc=True)
+for k, (t, sub, impl, isub) in enumerate([("Role", "when may I act, what do I print", "foo / zero / even / odd / fizz / buzz", "one lambda pair per participant"),
+                                          ("SeriesPrinter", "how the turn is handed over", "Monitor / Condition / Semaphore", "the build itself is a rule"),
+                                          ("Sink", "where a finished token goes", "none / System.out / a queue drained later", "swapped without touching the loop"),
+                                          ("Clock", "where a deadline comes from", "System::currentTimeMillis, or a fake", "a lambda is a valid implementation"),
+                                          ("StepObserver", "who wants to know", "RoleTally, a dashboard, a log line", "called after the unlock, never inside")]):
+    y = 20 + k*54
+    m3 += _ar("M260 133 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 290, 44, t, sub, dash=True)
+    m3 += _bx(750, y, 430, 44, impl, isub) + _ar("M750 %s H690" % (y+22))
+m3 += _tx(615, 312, "dashed green = handed in. The printer never builds a rule, so &quot;now add a baz thread&quot; is a new guard and one more element in a list, not an edit to the turn loop", "var(--muted)", 11)
+m3 += _tx(615, 332, "and one wrapper takes the whole interface instead: AuditRole implements Role and wraps ANY role to record who printed what &mdash; the engine never learns it is being watched", "var(--acc)", 11)
+MV[3] = _mv(1230, 345, m3)
+
+# move 4: threads and time -- the gap between reading the counter and writing it
+m4 = _D
+m4 += _tx(25, 62, "thread fizz", "var(--acc)", 12, "start") + _tx(25, 132, "thread number", "var(--acc)", 12, "start") + _tx(25, 202, "the counter i", "var(--acc)", 12, "start")
+cols = [150, 355, 560, 765]
+m4 += _bx(cols[0], 40, 190, 44, "reads i = 3", "3 % 3 == 0: my turn")
+m4 += _bx(cols[2], 40, 190, 44, "prints fizz, i = 4", "", acc=True)
+m4 += _bx(cols[1], 110, 190, 44, "reads a stale i = 2", "2 % 3 != 0: my turn too")
+m4 += _bx(cols[3], 110, 190, 44, "prints 2 again, i = 3", "", acc=True)
+for k, v in enumerate(["3", "3", "4", "3"]):
+    m4 += _bx(cols[k]+52, 180, 85, 34, v, "", acc=(k == 3))
+m4 += '<rect x="140" y="28" width="415" height="136" rx="6" fill="none" stroke="%s" stroke-dasharray="5 4"/>' % RED
+m4 += _tx(347, 20, "the gap: both read the counter, neither saw the other", RED, 11)
+m4 += '<path d="M140 234 H940" stroke="var(--line)" stroke-width="1.5"/>'
+for k, t in enumerate(["t1", "t2", "t3", "t4"]):
+    m4 += '<path d="M%s 229 V239" stroke="var(--line)"/>' % (cols[k]+94) + _tx(cols[k]+94, 255, t, "var(--muted)", 11)
+m4 += _tx(965, 239, "time &rarr;", "var(--muted)", 11)
+m4 += _bx(980, 60, 235, 100, "one lock", "guard test and print: ONE step", acc=True)
+m4 += _tx(1210, 182, "the waiting room hangs off that same lock,", "var(--muted)", 10.5, "end")
+m4 += _tx(1210, 200, "so nobody can sleep on a number that is moving", "var(--muted)", 10.5, "end")
+m4 += _tx(615, 287, "2 is printed twice, 3 is never printed, and the counter went backwards: the guard was true when it was read and false when it was acted on", RED, 11)
+MV[4] = _mv(1230, 302, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("whose turn is it right now?", "one int i, and a guard that is one comparison", "O(1)"),
+                                      ("is it my turn, for me specifically?", "role.ready(s): i % 3 == 0, or phase == 1", "O(1) per role"),
+                                      ("who should be woken next?", "nobody keeps a list: each guard answers for itself", "O(1) / O(t) to aim"),
+                                      ("who is asleep right now?", "the Condition's own queue of parked threads", "O(1) park / wake"),
+                                      ("what has been printed so far?", "one StringBuilder, appended under the lock", "O(1) amortised"),
+                                      ("how many participants are there?", "an int k on the blackboard, read by the guards", "O(1)")]):
+    y = 18 + k*46
+    m5 += _bx(30, y, 330, 38, q, "the question") + _ar("M360 %s H420" % (y+19), True)
+    m5 += _bx(420, y, 570, 38, shape, "the shape", acc=True) + _ar("M990 %s H1015" % (y+19), True) + _bx(1015, y, 190, 38, cost, "")
+m5 += _tx(615, 312, "nothing scans the output, nothing allocates per turn beyond the token itself, and there is no list of waiters of our own: each Condition already keeps one", "var(--muted)", 11)
+MV[5] = _mv(1230, 326, m5)
+
+# move 6: the life of one turn, on a time line, and the ORDER
+m6 = _D
+m6 += _tx(700, 16, "still not my turn &rarr; sleep again: this arrow is exactly why the check is a while, not an if", "var(--acc)", 11)
+m6 += _ar("M890 55 V30 H520 V55", True)
+steps6 = [(140, 150, "serve(s, role)", "one thread, one role"), (300, 140, "take the lock", "interruptibly"),
+          (450, 185, "park on the condition", "the lock is RELEASED"), (655, 130, "woken", "somebody printed"),
+          (805, 165, "check the guard again", "under the lock"), (990, 215, "print, advance, signal", "then unlock, in that order")]
+for k, (x, w, t, sub) in enumerate(steps6):
+    m6 += _bx(x, 55, w, 42, t, sub, acc=(k in (2, 4)))
+    if k < 5: m6 += _ar("M%s 76 H%s" % (x+w, steps6[k+1][0]), True)
+m6 += _tx(25, 80, "one turn", "var(--acc)", 12, "start") + _tx(25, 140, "the lock", "var(--acc)", 12, "start")
+m6 += '<rect x="300" y="122" width="150" height="32" rx="4" fill="var(--bg3)" stroke="var(--acc)"/>' + _tx(375, 143, "held by us", "var(--text)", 10.5)
+m6 += '<rect x="450" y="122" width="355" height="32" rx="4" fill="var(--bg3)" stroke="var(--line)" stroke-dasharray="5 3"/>' + _tx(627, 143, "held by NOBODY &mdash; await() gave it up while we slept", "var(--muted)", 10.5)
+m6 += '<rect x="805" y="122" width="400" height="32" rx="4" fill="var(--bg3)" stroke="var(--acc)"/>' + _tx(1005, 143, "held by us again, re-acquired before await() returned", "var(--text)", 10.5)
+m6 += '<rect x="20" y="180" width="1190" height="220" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(615, 202, "the order inside one turn, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1  lock.lockInterruptibly()        so a thread that ends up parked can still be cancelled",
+                       "2  while (!done &amp;&amp; !role.ready(s)) turn.await()        while, not if: a wake means \"look again\", never \"the turn is yours\"",
+                       "3  if (done) { turn.signalAll(); return; }        the way out, and it wakes the rest on the way",
+                       "4  token = role.act(s)        the guard was re-tested one line ago, so this is the same instant",
+                       "5  s.emit(token)        the append is INSIDE the lock, because the ORDER is the product",
+                       "6  turn.signalAll()        still under the lock, so the change and the wake cannot be separated",
+                       "7  unlock in a finally        an exception must never leave the lock held",
+                       "8  then the listeners, outside the lock, in a try/catch"]):
+    m6 += _tx(35, 226 + k*20, l, "var(--text)", 11, "start")
+m6 += _tx(35, 392, "a role that throws at step 4 signals the others before it rethrows, so nobody is stranded, and the counter is exactly where it was &mdash; the caller sees an exception, never a hang", "var(--muted)", 11, "start")
+MV[6] = _mv(1230, 415, m6)
+
+# move 7: what is inside the lock, and four threads at the same instant
+m7 = _D + _card(30, 20, 560, 140, "inside the lock: about sixty-five nanoseconds",
+                ["one guard test: a modulo and a comparison", "one append to a StringBuilder, one i++",
+                 "one signalAll onto the condition's queue", "measured: 65 ns per turn on one thread, no waiting",
+                 "nothing in here can block. Ever."], acc=True)
+m7 += _ar("M590 90 H650", True) + _tx(620, 80, "unlock", "var(--acc)", 10.5)
+m7 += _card(650, 20, 550, 140, "outside the lock: microseconds to milliseconds",
+            ["parking and unparking a thread: about 2 us", "the listeners, after the unlock, in a try/catch",
+             "a slow destination: a socket, a file, a screen", "the thread's own work before its next turn"])
+m7 += _tx(615, 182, "one token with four threads: what signalAll actually costs, and what an aimed signal saves", "var(--text)", 12)
+lanes = [("fizz  (acts)", "acts", 0), ("number", "wakes, still not mine, sleeps", 1), ("buzz", "wakes, still not mine, sleeps", 1), ("fizzbuzz", "wakes, still not mine, sleeps", 1)]
+for k, (lab, what, wasted) in enumerate(lanes):
+    y = 214 + k*30
+    m7 += _tx(25, y + 15, lab, "var(--muted)", 10.5, "start")
+    m7 += '<rect x="150" y="%s" width="480" height="22" rx="4" fill="var(--bg3)" stroke="%s"/>' % (y, "var(--acc)" if not wasted else "var(--line)")
+    m7 += _tx(390, y + 15, what, RED if wasted else "var(--acc)", 10.5)
+    m7 += '<rect x="680" y="%s" width="480" height="22" rx="4" fill="var(--bg3)" stroke="%s"/>' % (y, "var(--acc)" if k < 2 else "var(--line)")
+    m7 += _tx(920, y + 15, ["acts", "one aimed signal: exactly the next actor", "not woken at all", "not woken at all"][k],
+              "var(--acc)" if k < 2 else "var(--muted)", 10.5)
+m7 += _tx(390, 206, "signalAll: one crowd", "var(--acc)", 11)
+m7 += _tx(920, 206, "one condition per role: signal", "var(--acc)", 11)
+m7 += _tx(615, 356, "measured on FizzBuzz to 20,000 with four threads: signalAll made 32,000 wakes of which 16,000 were wasted, and took 3.4 us a token;", "var(--muted)", 11)
+m7 += _tx(615, 376, "one condition per role made 16,000 wakes, wasted none, and took 2.1 us a token. The lock is 65 ns of that. The rest is putting threads to sleep and waking them again.", "var(--muted)", 11)
+MV[7] = _mv(1230, 390, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + _tx(290, 32, "round robin, 50,000 tokens, measured on this machine", "var(--text)", 12)
+cols8 = [("threads", 12), ("ns per token", 110), ("wakes per token", 250), ("wasted per token", 400)]
+rows8 = [[("1", "var(--acc)"), ("65", None), ("0", None), ("0", None)],
+         [("2", "var(--acc)"), ("1,800", None), ("1.0", None), ("0.0", None)],
+         [("3", "var(--text)"), ("2,000 - 4,000", None), ("1.0 - 2.0", None), ("0.0 - 1.0", None)],
+         [("4", "var(--text)"), ("3,500 - 6,000", None), ("1.7 - 3.0", None), ("0.7 - 2.0", None)],
+         [("10", "var(--text)"), ("4,000 - 8,000", None), ("2.0 - 3.7", None), ("1.0 - 2.7", None)]]
+m8 += _table(20, 44, cols8, rows8, rowh=28, widths=540)
+m8 += _tx(290, 232, "one thread never waits: that row is the lock, the guard and the append alone.", "var(--acc)", 11)
+m8 += _tx(290, 250, "every row below it is the price of parking a thread and waking it again.", "var(--acc)", 11)
+m8 += _tx(290, 268, "past two threads the reading swings by half run to run: read the shape.", "var(--muted)", 11)
+m8 += _tx(890, 32, "the ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1   one lock, one condition, signalAll", "2 to 4 threads: simplest, correct for any guard set"),
+                              ("2   one condition per role, aimed signal", "no wasted wakes; 3.4 us -> 2.1 us a token at four threads"),
+                              ("3   a semaphore baton, no lock at all", "the permit IS the turn; release/acquire is the memory fence")]):
+    m8 += _bx(600, 48 + k*58, 600, 46, t, sub, acc=(k == 0))
+m8 += _tx(900, 232, "rung 3 gives up the one thing rung 1 had: a waiter that re-checks its own", "var(--muted)", 11)
+m8 += _tx(900, 250, "guard. And it is not even faster here &mdash; 2.4 us against rung 2's 2.1 &mdash;", "var(--muted)", 11)
+m8 += _tx(900, 268, "so climb it for the idea, not for the clock.", "var(--muted)", 11)
+MV[8] = _mv(1230, 282, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("if instead of while around await", "re-test the guard in a loop, always; test 5 &mdash; 400 tokens under a storm of stray signals"),
+                                ("notify() on one shared wait set", "notifyAll, or one Condition per role; five builds in ExtDemo return the same string"),
+                                ("the append moved outside the lock", "emit under the lock &mdash; the ORDER is the product; tests 1, 2, 3"),
+                                ("a guard set with a hole in it", "the deadline turns a stall into an exception; test 11 &mdash; fails in 620 ms"),
+                                ("a role that throws half way through", "signal the others, then rethrow; test 12 &mdash; 9 turns committed, nobody stranded"),
+                                ("a waiter is interrupted while parked", "the finally releases the lock; test 16 &mdash; the run fails at its deadline, the printer still works"),
+                                ("nobody wakes the sleepers at the end", "the last turn and stop() both signalAll; tests 13 and 14")]):
+    y = 18 + k*42
+    m9 += _bx(30, y, 330, 38, bad, "") + _ar("M360 %s H380" % (y+19), True) + _bx(380, y, 820, 38, fix, "", acc=True)
+m9 += _tx(615, 338, "eighteen checks in FailureTests.java, every wait on a deadline and a forty-five second watchdog behind the lot: a turn-taking test that hangs is a failed turn-taking test", "var(--muted)", 11)
+MV[9] = _mv(1230, 352, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 200), ("the line in the code", 290), ("what it buys", 830)]
+rows10 = [[("Monitor object", "var(--text)"), ("move 4", None), ("one ReentrantLock + one Condition, private to the printer", None), ("the blackboard is only touched under the lock", None)],
+          [("Strategy", "var(--text)"), ("move 3", None), ("interface Role { ready(s); act(s); } &mdash; one Rule per thread", None), ("foo, zero and fizz are data, not branches", None)],
+          [("Strategy again", "var(--text)"), ("move 3", None), ("interface SeriesPrinter, five implementations", None), ("the hand-off swaps; no guard changes", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("AuditRole implements Role and wraps one", None), ("an audit trail with no edit to the engine", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("observers.publish(...) after the unlock, in a try/catch", None), ("a dashboard can never stall a turn", None)],
+          [("State", "var(--text)"), ("move 6", None), ("the while loop IS the state machine of one turn", None), ("a wake goes back to the check, never to the print", None)],
+          [("Producer-Consumer's cousin", "var(--text)"), ("every move", None), ("wait for a condition, act, signal &mdash; the monitor protocol", None), ("say the name: this is the shape, without a buffer", None)],
+          [("Factory", "var(--muted)"), ("nearly", None), ("Roles.fizzBuzz() returns List.of(...) &mdash; one static method", "var(--muted)"), ("it earns the full name when a series arrives from config", "var(--muted)")],
+          [("Singleton", "var(--muted)"), ("not here", None), ("a printer is built per run and handed its roles", "var(--muted)"), ("a test builds a fresh one per case", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("never", None), ("configure(sink, clock, deadline): three arguments", "var(--muted)"), ("a builder here would be pure ceremony", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 372, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 388, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 430), ("the line that shows it", 530)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Series holds the state. Role decides. The printer synchronises. Three reasons, three types.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("foobarbaz and H2O are new guard sets; serve() is not touched", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("role.ready(s); role.act(s);  never \"is this the fizz one?\" &mdash; AuditRole drops straight in", None)],
+          [("I", "var(--acc)"), ("small interfaces: one job each", None), ("move 3", None), ("Sink, Clock and StepObserver have one method; Role has a guard and an action", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; be handed the rest", None), ("moves 3, 6", None), ("configure(sink, clock, deadline): a test hands in a clock already past the deadline", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "add a baz thread; now do H2O", "a new guard set behind Role; the turn loop is not touched", "", "move 3"),
+        ("someone new wants to know", "which thread printed what", "AuditRole around any role, or one more observer after the unlock", "", "moves 3 + 4"),
+        ("a new step in a life", "an endless stream I can stop", "a flag the wait loops already read, then signalAll on the way out", "", "move 6"),
+        ("a new invariant across participants", "threads join and leave mid-run", "the same lock: bump k under it and start the thread inside it", "the guard is (i - 1) % k, so exactly one is still true at every step", "moves 4 + 5"),
+        ("state that must outlive the process", "the sequence must survive a restart", "the counter becomes a committed offset in an append-only log", "append, hand the turn on, commit the offset last: a crash replays one token", "moves 5 + 6")]):
+    y = 20 + k*58
+    m12 += _bx(30, y, 330, 48, t, sub) + _ar("M360 %s H420" % (y+24), True) + _bx(420, y, 660, 48, fix, sub2, acc=True) + _tx(1150, y+29, mv, "var(--muted)", 11)
+m12 += _tx(615, 330, "for all five the lock, the condition and the while loop are untouched; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 345, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class &mdash; and on a threading problem, notice what does not.",
+ "Read the sentence again: <b>N threads</b> print one <b>series</b> of <b>tokens</b>; each one <b>waits</b> until it is "
+ "its <b>turn</b>, prints, advances the <b>counter</b> and hands the turn on. The counter, the turn flag and the record "
+ "of what has been printed all change, and they change together, so they are one class: the <code>Series</code>, the "
+ "blackboard everybody looks at. The lock and the condition also have state &mdash; who holds it, who is asleep on it "
+ "&mdash; and they belong to the thing that runs the turn loop: <code>MonitorPrinter</code>. What a participant does "
+ "has no state at all: it is a question (\"is it my turn?\") and an act (\"print this, advance that\"), so it is an "
+ "interface, <code>Role</code>. Then the three that a threading problem tempts you to make classes and must not. The "
+ "token is a string the caller wanted, not ours. A thread is not an object here: <code>foo</code> is not a class, it is "
+ "a thread running one <code>Role</code>, and writing a <code>FooThread</code> is the classic wrong turn. And the "
+ "waiting room is not a list you keep &mdash; it is the queue of parked threads the lock already maintains for each "
+ "<code>Condition</code>, reached only through <code>await</code> and <code>signal</code>.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "Holding the counter and the record touches <code>i</code>, <code>phase</code> and the text, so those live on the "
+ "<code>Series</code>. Deciding whether it is my turn touches nothing at all &mdash; it is a question asked of the "
+ "blackboard &mdash; so it is a pure rule, <code>role.ready(s)</code>, and printing is the same rule writing back, "
+ "<code>role.act(s)</code>. Sleeping until somebody says look again touches the lock and its condition, so it belongs "
+ "to the only object that owns them. Running one participant's whole life touches all three at once, so "
+ "<code>serve(series, role)</code> lives on the printer, which is what makes the printer the orchestrator. That is "
+ "also the answer to the question interviewers like here: why is there no <code>ZeroThread</code>? Because zero owns "
+ "no state the design cares about. It is a thread, and its only relationship with the design is that it runs one "
+ "rule.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind a one-method interface and is handed in.",
+ "Five things will change, and each becomes an interface the printer is <i>given</i> rather than builds. The "
+ "per-thread rule will change on the very next question &mdash; foo and bar today, zero, even and odd next, four "
+ "FizzBuzz guards after that &mdash; so <code>Role</code> is the first and most important seam, and a participant is "
+ "a pair of lambdas rather than a file. The other four are the same idea applied once each: <code>SeriesPrinter</code> "
+ "because the interviewer will ask for semaphores, <code>Sink</code> because a test wants a string and production "
+ "wants a socket, <code>Clock</code> because a test cannot afford to wait five seconds for a deadline, and "
+ "<code>StepObserver</code> because somebody will want to watch. This is where the patterns are born, not announced. A swappable rule behind an interface "
+ "is <b>Strategy</b>, and it is here twice over. A wrapper that adds behaviour to the whole interface is "
+ "<b>Decorator</b>, and here it is <code>AuditRole</code>, which records who printed what and delegates &mdash; the "
+ "engine never learns it is being watched. A printer that says \"a token landed\" without knowing what a dashboard is, "
+ "is <b>Observer</b>.", 3),
+("Move 4: state that many threads change at the same time gets one owner and one lock.",
+ "Four FizzBuzz threads, no lock. The fizz thread reads <code>i = 3</code>, sees that three divides it and concludes "
+ "it is its turn. The number thread is working from a value of <code>i</code> it read a moment ago, or from a copy "
+ "sitting in its own core's cache, and it sees 2 &mdash; not divisible by three or five &mdash; so it concludes it is "
+ "<i>its</i> turn. Both are now going to print and both are going to write the counter: 2 comes out twice, 3 never "
+ "comes out at all, and the counter goes backwards. The gap is between reading the counter and acting on it, and the "
+ "only fix is to make the read and the write one step. So the counter, the phase, the participant count and the "
+ "output all belong to one object, and every path in and out goes through one lock &mdash; that shape has a name, the "
+ "<b>monitor object</b>. The waiting room hangs off the same lock on purpose: a thread that is about to sleep tests "
+ "the guard and goes to sleep <i>without</i> releasing the lock in between, which is what makes \"I checked and then I "
+ "slept\" one indivisible act. Anything that only listens is called after the unlock, never inside it.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "This system has almost no collections, and that is worth saying out loud, because the instinct is to build a queue "
+ "of waiting threads and a table of who goes next. Neither exists. \"Whose turn is it?\" is one <code>int</code>, and "
+ "\"is it my turn?\" is one comparison per role: <code>i % 3 == 0</code>, or <code>phase == 1</code>. \"Who should be "
+ "woken next?\" needs no structure at all, because every waiter can answer it for itself &mdash; which is precisely "
+ "why this design handles FizzBuzz, where the number decides the next actor and no fixed hand-off order exists. "
+ "\"Who is asleep?\" is the <code>Condition</code>'s own queue of parked threads, so parking is O(1) and waking is "
+ "O(1). The one field that looks like bookkeeping earns its place: <code>k</code>, the participant count, is what lets "
+ "the round-robin guard read <code>(i - 1) % k</code> and therefore lets k change while the series is running. "
+ "Nothing scans, nothing allocates per turn beyond the token itself.", 5),
+("Move 6: one turn has a life cycle, and the order of the steps inside it is the design.",
+ "Follow one turn along the clock. It takes the lock &mdash; interruptibly, so a thread that ends up parked can still "
+ "be cancelled. It finds that it is not its turn and calls <code>turn.await()</code>, which does the thing that makes "
+ "the whole design work: it releases the lock while the thread sleeps, and re-acquires it before returning. Another "
+ "thread prints and signals; this thread wakes up &mdash; but a wake only means \"look again\", so it re-tests its own "
+ "guard. Two things make that re-test necessary: the wake was broadcast to everybody, so it was very likely meant for "
+ "someone else, and the JVM is allowed to return from <code>await</code> for no reason at all, which is a spurious "
+ "wakeup. That is why the wait is a <code>while</code> and never an <code>if</code>; the arrow from \"woken\" goes "
+ "back to the check, not forward to the print. Only when the guard is true does it print and advance, both still "
+ "inside the lock because the order of the output <i>is</i> the product, then signal everybody, then unlock in a "
+ "<code>finally</code>, then tell the listeners. A role that throws at the printing step signals the others before it "
+ "rethrows, so nobody is stranded, and the caller gets an exception rather than a hang.", 6),
+("Move 7: yes, one lock means one at a time. Ask for how long, and what is inside it.",
+ "Inside the lock there is one modulo, one comparison, one append and one signal: measured on one thread with nothing "
+ "to contend with, a whole turn is about sixty-five nanoseconds. Everything expensive is outside it &mdash; the "
+ "listeners, the slow destination, the thread's own work &mdash; because nothing that can block is allowed inside. So "
+ "the lock is not the cost; putting a thread to sleep and waking it up again is, and that is about two microseconds "
+ "each time. The picture shows why. With one shared condition, the thread that prints wakes all three of the others; "
+ "one of them can act and two look, find their guard still false, and go back to sleep. On FizzBuzz to 20,000 with "
+ "four threads that is 32,000 wakes of which 16,000 are wasted, and 3.4 microseconds a token; aiming the wake at the "
+ "one thread the turn just made ready halves both, to 16,000 wakes and 2.1 microseconds. That is the honest answer to "
+ "\"is everything now one by one\": yes, and the one-by-one part costs sixty-five nanoseconds. The rest is the "
+ "hand-off.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "Measure before you climb. A round robin of 50,000 tokens on this machine: one thread, which never waits, is 65 "
+ "nanoseconds a token; two threads is 1,800. That one step is the whole lesson &mdash; nearly thirty times slower, "
+ "and it is not the lock, it is the first park and unpark. Past two threads the reading swings by half from one run "
+ "to the next, so read the shape rather than the digits: the curve tracks wasted wakes per token, which is zero at "
+ "two threads and one to three at ten. Then the ladder, cheapest first. Rung one is what is already written: one "
+ "lock, one condition, <code>signalAll</code>. Rung two keeps the lock and gives each role its own "
+ "<code>Condition</code>, so the thread that just printed can find the single role whose guard is now true and signal "
+ "only that one. Rung three drops the lock altogether: each role holds its own permit, and the acting thread releases "
+ "the permit of whoever goes next &mdash; <code>release</code> and <code>acquire</code> are a happens-before edge, so "
+ "the counter written "
+ "by one thread is visible to the next without a single <code>synchronized</code> block. What rung three gives up is "
+ "the thing rung one had, a waiter that re-checks for itself: somebody now has to work out who goes next before "
+ "releasing. And say the "
+ "unflattering part out loud, because it is the senior half of the answer &mdash; on this machine rung three is not "
+ "even faster than rung two, 2.4 microseconds a token against 2.1. You climb to rung three for the idea that a permit "
+ "can be a turn, not for the clock.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "An <code>if</code> instead of a <code>while</code> around the wait, so a broadcast or spurious wakeup lets a thread "
+ "print out of turn &mdash; under a thread that does nothing but <code>signalAll</code>, the broken version got the "
+ "sequence wrong in forty rounds out of forty. A single <code>notify()</code> on one shared wait set, which hands the "
+ "one wakeup to an arbitrary sleeper, very likely one whose guard is false, so the thread that could have acted "
+ "sleeps forever. Moving the append outside the lock, which is the subtle one: the <i>decision</i> is protected but "
+ "the <i>order</i> is not, and the order is the product. A guard set with a hole in it, so nobody can act and the "
+ "program hangs &mdash; the deadline turns that into an exception in 620 milliseconds instead. A role that throws half "
+ "way through a turn. A waiter that somebody interrupts. And a shutdown that never wakes the sleepers. Each of those "
+ "is a few lines in FailureTests.java: eighteen checks, every wait on a deadline, and a forty-five second watchdog "
+ "behind the lot.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every name in that table is the result of a move, and naming them in that order is what an interviewer is "
+ "listening for: <b>monitor object</b> from move 4, <b>Strategy</b> twice from move 3, <b>Decorator</b> from the same "
+ "move's <code>AuditRole</code>, <b>Observer</b> from move 4's rule that a listener is never inside the lock, and "
+ "<b>State</b> from move 6, where the <code>while</code> loop literally is the state machine of one turn. Say the "
+ "family name too, because interviewers notice when you do not: this is the monitor protocol, producer-consumer "
+ "without a buffer. Then say what is <i>not</i> earned, which is the half most candidates skip. Factory is nearly: "
+ "<code>Roles.fizzBuzz()</code> does build a family, but it is one static method returning a list, and it earns the "
+ "full name the day a series arrives as a string from configuration. Singleton earned nothing, which is exactly why a "
+ "test can build a fresh printer per case. Builder never: three arguments to <code>configure</code>.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "SOLID is not a list to recite here; it is the check that the moves did their job, and the table gives each letter "
+ "its one line of code. Three of them are worth saying out loud in the room. S is the split that carries everything: "
+ "because the blackboard, the rule and the synchronisation are three types, the guards can be unit-tested with no "
+ "threads at all. O is the one the interviewer will test on purpose: adding a baz thread, or switching to H2O, is a "
+ "new guard set and one more element in a list, and <code>serve</code> is never edited. D is what makes the awkward "
+ "cases testable: the printer is handed its clock, so a test can supply one whose every reading is a thousand seconds "
+ "later and watch the printer give up in six milliseconds of real time.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "The first three rows are read straight off the picture and take no thought: a new guard set, one more observer, one "
+ "more flag that the wait loops already read. The last two are the ones worth rehearsing. Threads that join and leave "
+ "mid-run work only because the guard is <code>(i - 1) % k</code> with k read from the blackboard: bump k under the "
+ "lock and start the newcomer's thread inside the same critical section, and exactly one guard is still true at every "
+ "step. Surviving a restart is about order, not storage: append the token and make it durable, hand the turn on, and "
+ "commit the counter <i>last</i>, so a crash replays one token rather than losing one, and whoever reads the log has "
+ "to tolerate a repeat. For all five twists the lock, the condition and the while loop do not move, and that is the "
+ "test that the derivation was right.", 12),
+]
+DERIVATION_LEAD = ("The same twelve moves as every other page here, with the threading ones doing the work: the shared "
+ "state and its one lock (move 4), the wait protocol &mdash; check under the lock, wait in a loop, signal after the "
+ "change (move 6), what is inside the lock and what N threads at once actually cost (move 7), and the ladder from one "
+ "shared condition to one per thread to no lock at all (move 8). Nothing is chosen up front, and no pattern is named "
+ "before the move that produced it.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the caller, and everything handed in
+put("caller", 10, 20, 250, "your main / a test", [], ["Roles.fizzBuzz(): List&lt;Role&gt;", "printer.run(n, roles)"])
+put("sink", 10, 115, 250, "Sink", [], ["emit(token)  [lock held]"], "interface")
+put("sysout", 10, 195, 120, "SystemOutSink", [], ["writes at once"], "ext")
+put("deferred", 140, 195, 120, "DeferredSink", [], ["queue, drain later"], "ext")
+put("clock", 10, 285, 250, "Clock", [], ["nowMs(): long"], "interface")
+put("obs", 10, 375, 250, "StepObserver", [], ["onStep(role, token, at)"], "interface")
+put("tally", 10, 455, 250, "RoleTally", ["counts: Map&lt;String,Integer&gt;"], ["onStep: one per role"])
+put("observers", 10, 565, 250, "Observers", ["list: CopyOnWriteArrayList"], ["publish(...)  [after unlock]"])
+# centre: the contract, the aggregate root, the blackboard
+put("iface", 330, 20, 370, "SeriesPrinter", [],
+    ["run(n, roles): String", "name(): String", "wakeups() / wastedWakeups()", "stop()"], "interface")
+put("monitor", 330, 175, 370, "MonitorPrinter",
+    ["lock: ReentrantLock", "turn: Condition", "observers: Observers", "sink / clock / deadlineMs", "stopped: volatile boolean"],
+    ["run(n, roles): String", "serve(series, role)   [the turn loop]", "configure(sink, clock, deadline)",
+     "addObserver(o)", "stop() / nudge()"])
+put("series", 330, 435, 370, "Series",
+    ["n: int", "i: int, the counter", "phase: int, whose turn", "k: int, how many participants", "text: StringBuilder"],
+    ["done(): boolean", "emit(token)  [lock held]", "text(): String"])
+# right: the per-thread rule and its decorator
+put("role", 745, 175, 235, "Role", [], ["name(): String", "ready(s): boolean", "act(s): String"], "interface")
+put("rule", 745, 290, 235, "Rule", ["guard: Predicate", "body: Function"], ["two lambdas, one role"])
+put("audit", 745, 410, 235, "AuditRole", ["inner: Role", "trail: List"], ["records, then delegates"], "ext")
+put("roles", 745, 530, 235, "Roles", [], ["fooBar() / zeroEvenOdd()", "fizzBuzz() / roundRobin(k)"])
+# far right: the thread starter and the two other builds
+put("crew", 1015, 20, 205, "Crew", [], ["race(...): Result", "one latch, one deadline"])
+put("cond", 1015, 175, 205, "ConditionPrinter", ["waits: Condition[]"], ["signal, not signalAll"])
+put("sem", 1015, 300, 205, "SemaphorePrinter", ["batons: Semaphore[]"], ["no lock at all"])
+
+def raw(x, y, w, h, title, sub, chips):
+    """the waiting room: not a class, so it is drawn as what it is -- a queue of parked threads"""
+    g = '<g transform="translate(%s %s)"><rect width="%s" height="%s" rx="6" fill="var(--bg3)" stroke="var(--acc)" stroke-dasharray="5 3"/>' % (x, y, w, h)
+    g += '<text x="%s" y="22" text-anchor="middle" font-size="12.5" fill="var(--acc)">%s</text>' % (w/2, title)
+    for k, c in enumerate(chips):
+        g += '<rect x="%s" y="34" width="76" height="22" rx="11" fill="#12302a" stroke="var(--acc)"/>' % (18 + k*86)
+        g += '<text x="%s" y="49" text-anchor="middle" font-size="11" fill="var(--text)">%s</text>' % (56 + k*86, c)
+    g += '<text x="%s" y="49" font-size="10.5" fill="var(--muted)">%s</text>' % (18 + len(chips)*86 + 10, sub)
+    return g + '</g>'
+
+def card(x, y, w, h, title, lines):
+    g = '<g transform="translate(%s %s)"><rect width="%s" height="%s" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' % (x, y, w, h)
+    g += '<text x="%s" y="20" text-anchor="middle" font-size="12" fill="var(--acc)">%s</text>' % (w/2, title)
+    for k, l in enumerate(lines):
+        g += '<text x="12" y="%s" font-size="10.5" fill="var(--muted)">%s</text>' % (40 + k*17, l)
+    return g + '</g>'
+
+EDGES = [
+ # the three builds implement one contract
+ ln(B["monitor"]["t"], B["iface"]["b"], "inherit"),
+ '<path d="M1015 220 H998 V150 H712" fill="none" stroke="var(--muted)" stroke-width="1.3"/>',
+ '<path d="M1015 345 H985 V150" fill="none" stroke="var(--muted)" stroke-width="1.3"/>',
+ ln((712, 150), (700, 90), "inherit", "", [(712, 90)]),
+ ln(B["crew"]["l"], (700, 55), "assoc", "starts the threads"),
+ # the printer owns the blackboard and the listener list
+ ln((480, 385), (480, 435), "compose", "one Series per run"),
+ ln((330, 320), B["observers"]["r"], "compose", "", [(308, 320), (308, 602)]),
+ # the seams
+ ln(B["series"]["l"], B["sink"]["r"], "assoc", "", [(318, 520), (318, 142)]),
+ ln((70, 195), (135, 172), "inherit", "", [(70, 182), (135, 182)]),
+ ln((200, 195), (135, 172), "inherit", "", [(200, 182), (135, 182)]),
+ ln(B["clock"]["r"], (330, 250), "inject", "", [(292, 312), (292, 250)]),
+ ln((330, 355), B["obs"]["r"], "notify", "", [(325, 355), (325, 402)]),
+ ln(B["tally"]["t"], B["obs"]["b"], "inherit"),
+ # the per-thread rule
+ ln(B["rule"]["t"], B["role"]["b"], "inherit"),
+ ln(B["audit"]["r"], B["role"]["r"], "inherit", "", [(998, 455), (998, 218)]),
+ ln(B["audit"]["t"], B["rule"]["b"], "assoc", "wraps any Role"),
+ ln(B["roles"]["l"], (700, 300), "inject", "", [(726, 565), (726, 300)]),
+ _tx(733, 279, "handed to run()", "var(--acc)", 10.5, "start"),
+ # the waiting room, and what the three builds trade
+ raw(330, 645, 560, 80, "the waiting room &mdash; threads asleep on turn", "await() gave the lock back", ["number", "buzz", "fizzbuzz"]),
+ ln((480, 605), (480, 645), "compose"),
+ card(920, 645, 310, 80, "what the three builds trade",
+      ["signalAll: t - 1 wakes a token, 16,000 wasted",
+       "one condition per role: 1 wake, none wasted",
+       "a semaphore baton: 1 wake, and no lock at all"]),
+ _tx(615, 740, "the waiting room is not a class: it is the queue of parked threads the lock keeps for its Condition, reached only through await() and signal()", "var(--muted)", 11),
+]
+UMLSVG = uml_svg(1230, 795, EDGES, legend_y=768)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the type name. A dashed green border means an interface; '
+ '&laquo;ext&raquo; means the class lives in Extensions.java rather than in Main.java. Middle: its fields, the state '
+ 'it holds. Bottom: its methods, with <code>[lock held]</code> on the two calls that are only ever made from inside '
+ 'the critical section and <code>[after unlock]</code> on the one that must never be. <b>The arrows.</b> Hollow '
+ 'triangle = implements. Filled diamond = owns: the printer owns its lock, its condition, its listener list and the '
+ '<code>Series</code> it builds for each run, and they die with it. Dashed green = handed in through '
+ '<code>configure()</code> or as an argument to <code>run</code>. Dotted blue = notifies. <b>Where state lives:</b> '
+ 'every mutable field in this design is inside <code>Series</code> or inside <code>MonitorPrinter</code>, and both are '
+ 'reachable only under the one lock &mdash; that is the whole safety argument, and it is why a <code>Role</code> is '
+ 'handed the series rather than being given fields of its own. The waiting room at the bottom is not a class either: '
+ 'it is the queue of parked threads the lock keeps for its <code>Condition</code>. Two more builds live in '
+ 'Extensions.java behind the same interface &mdash; <code>synchronized</code>/<code>wait</code>/<code>notifyAll</code> '
+ 'and a <code>Phaser</code> barrier &mdash; and both are on page 05.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does and what it guarantees; read only those first for the shape, then the bodies. Each '
+ 'copy button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s reference code, '
+ 'with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (eighteen checks, every wait on a '
+ 'deadline; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six clarifying questions (one engine or three, and does the data decide the next actor, '
+ 'first); then type in the order of Main.java: the <code>Sink</code> and <code>Clock</code> interfaces, the '
+ '<code>Series</code> blackboard with no threading in it at all, the <code>Role</code> interface and the lambda-backed '
+ '<code>Rule</code>, the three guard sets in <code>Roles</code>, then <code>MonitorPrinter</code> &mdash; the lock, the '
+ 'condition, and <code>serve</code> with its order &mdash; then the thread starter with its latch and its deadline, '
+ 'then a main that runs FooBar, ZeroEvenOdd and FizzBuzz and repeats one of them three hundred times to prove the '
+ 'output never changes.</div></div>')
+
+FU = [
+("Mid-round: trace which thread emitted each token. Do not touch the coordinator.", "twist", 5,
+ "Nothing in the engine changes, because what a participant does was already a rule handed in. This is one new class "
+ "that implements <code>Role</code>, holds the role it wraps, records the name and the token, and delegates &mdash; "
+ "the Decorator. The turn loop, the guards and the other roles stay byte for byte the same; the call site changes by "
+ "one line per role, or by one call to <code>AuditRole.wrap</code> for the whole list. One detail worth saying out "
+ "loud: <code>act</code> runs with the lock held, so the trail can be a plain <code>ArrayList</code> &mdash; only one "
+ "thread is ever inside it. If you wanted the trail from outside the lock instead, that is the observer, not the "
+ "decorator.",
+ X("an audit trail", "two more series")),
+("Why is the wait a while loop and not an if? Show me what breaks.", "design", 5,
+ "Because a wakeup is not a promise. Two things happen between the signal and this thread actually running: the wake "
+ "was broadcast to every sleeper, so it was probably meant for somebody else, and the JVM is allowed to return from "
+ "<code>await</code> for no reason at all, which is a spurious wakeup. With an <code>if</code>, the thread carries on "
+ "and prints out of turn. With a <code>while</code>, it re-tests its guard and goes back to sleep, which costs one "
+ "extra comparison. The picture on page 02 move 6 is the proof: the arrow from \"woken\" goes back to \"check\", never "
+ "forward to \"print\". ExtDemo runs the broken version with a thread doing nothing but <code>signalAll</code>, and it "
+ "printed the wrong sequence in forty rounds out of forty; the correct version under the same storm is byte-perfect, "
+ "which is check 5 in FailureTests.java.",
+ sect(src, "private void serve(Series s, Role role)", "final class ConditionPrinter") + "\n" + X("if instead of while", "busy-waiting")),
+("Ten threads, six hundred numbers, strict order. Prove it is not luck.", "non-functional", 8,
+ "The proof is a count, not an argument. Three hundred separate runs of the same series must produce byte-identical "
+ "output: if the order were luck, one of the three hundred would differ. An observer counts the tokens per role from "
+ "outside the lock, so a duplicate or an omission shows up as a wrong count rather than as a wrong-looking string. A "
+ "second check hammers the run with a thread that does nothing but <code>signalAll</code>, which forces the stolen "
+ "and spurious wakeups the while loop is there to absorb, and asserts both that the output is still exact and that "
+ "the storm really landed. Every join has a deadline with a forty-five second watchdog behind it, so a lost wakeup "
+ "fails the test instead of hanging the build.",
+ T("        // 4. the race", "        // 6. ten threads")),
+("One lock, and every thread wakes on every token. Have you serialised the whole thing? What is above this?", "non-functional", 10,
+ "Measure first, and the measurement says the lock is not the problem: one thread doing 50,000 turns is 65 "
+ "nanoseconds a turn, because the locked part is a modulo, a comparison, an append and a signal. What costs is "
+ "parking a thread and waking it again, about two microseconds a time, and the number that tracks it is wasted wakes "
+ "per token. So the first fix is not architecture, it is to stop waking threads that cannot act. Rung two does "
+ "exactly that: one <code>Condition</code> per role, and the thread that just printed scans the guards, finds the "
+ "single role the turn made ready, and signals only that one. On FizzBuzz to 20,000 with four threads that is 32,000 "
+ "wakes down to 16,000, wasted wakes to zero, and 3.4 microseconds a token down to 2.1.",
+ sect(src, "final class ConditionPrinter", "final class SemaphorePrinter")),
+("Do it with semaphores instead. No lock at all.", "twist", 10,
+ "One <code>Semaphore</code> per role, all of them empty except the one whose guard holds on an untouched series. A "
+ "thread touches the blackboard only while it holds its own permit, so there is exactly one writer at any instant and "
+ "no lock is needed. When it has printed, it works out who goes next from the new state and releases that role's "
+ "permit. Two things to say out loud. First, why it is safe without <code>volatile</code> anywhere: "
+ "<code>release</code> and <code>acquire</code> are a happens-before edge, so everything the previous holder wrote is "
+ "visible to the next one. Second, what it gives up: nobody re-checks a guard any more, so the acting thread has to "
+ "compute the successor before it lets go &mdash; which is fine here because the guards are a partition, and is the "
+ "reason a naive baton version cannot do FizzBuzz, where the next actor depends on the number. The acquire is timed, "
+ "so a baton that is never passed fails instead of hanging.",
+ sect(src, "final class SemaphorePrinter", "final class RoleTally")),
+("Write it with synchronized, wait and notify. Where exactly does notify() lose a wakeup?", "functional", 5,
+ "The shape is identical: <code>synchronized</code> instead of <code>lock()</code>, <code>monitor.wait()</code> "
+ "instead of <code>await()</code>, <code>notifyAll()</code> instead of <code>signalAll()</code>, and the same "
+ "<code>while</code> around the wait. The one thing that cannot be changed is the plural. An object has exactly one "
+ "wait set, so <code>notify()</code> picks an arbitrary sleeper; with four FizzBuzz threads the chance that it picks "
+ "the one whose guard is now true is one in three, and when it picks wrong that thread re-checks, finds nothing, and "
+ "goes back to sleep &mdash; the wakeup is spent and the thread that could have acted is never told. That is a lost "
+ "wakeup and it is a hang, not a wrong answer. You cannot aim a wake-up with one wait set; that is exactly what one "
+ "<code>Condition</code> per role buys, and it is why <code>ReentrantLock</code> exists.",
+ X("the classic synchronized", "if instead of while")),
+("Why not just spin until it is my turn? It would be faster.", "non-functional", 5,
+ "Sometimes it is, and that is the trap. Spinning is correct here &mdash; the guard test and the print are still one "
+ "step under the lock &mdash; and on an idle machine with fewer threads than cores it can beat blocking, because it "
+ "never pays the two microseconds of a park and an unpark. The measurement is the answer. With two threads on this "
+ "ten-core machine you cannot tell the two apart: about 2.5 microseconds a token either way, and which one wins "
+ "changes between runs. At four threads they are still inside that noise. At thirty-two threads on ten cores the gap "
+ "stops being subtle, and it is there on every single run: about 50 microseconds a token spinning against about 15 "
+ "blocking. A spinner holds a core whether or not it has anything to do, so as soon as there "
+ "are more participants than cores every spinner is stealing time from the one thread that could make progress. "
+ "<code>Thread.onSpinWait()</code> tells the CPU what is happening but does not give the core back. Say the rule: "
+ "spin only when the wait is shorter than a context switch and you know the thread count.",
+ X("busy-waiting", "stream it live")),
+("The tokens go to a socket now, and it is slow. What changes, and what must not?", "twist", 8,
+ "What must not change is where the <i>order</i> is decided: the append to the sequence stays inside the lock, "
+ "because the order is the product and two threads publishing after the unlock would publish in whatever order the "
+ "scheduler liked. What changes is what \"publish\" means. A sink that writes straight through is called with the "
+ "lock held, so a millisecond per token stalls every other thread: the demo's twenty-token run takes 60 milliseconds "
+ "that way. The fix is to split the decision from the I/O &mdash; the sink under the lock only adds the token to a "
+ "queue, which is a few nanoseconds, and one background thread does the slow write afterwards. The same twenty-token "
+ "run then finishes in under a millisecond and the flush lands later, in order, because the queue is FIFO and the "
+ "tokens entered it under the lock. Decide under the lock, do the I/O outside it.",
+ X("stream it live", "a roster that grows")),
+("Add a third thread so it prints foobarbaz. Then do Building-H2O. Where does your engine stop being enough?", "twist", 8,
+ "Both are new guard sets and nothing else. Foobarbaz turns the boolean flag into a three-value phase and adds a role "
+ "whose action closes the round; the turn loop is not touched. H2O reuses the same field as a count of how many "
+ "hydrogens this molecule has had, so H may act while that count is below two and O only when it is exactly two, and "
+ "two threads produce HHO for every molecule. Then say where the engine stops being enough, because that is the "
+ "senior signal. The real H2O problem has many H threads and many O threads and does not ask for an order at all: it "
+ "asks that every group of three contains two hydrogens and one oxygen, in any order. That is a barrier, not a turn, "
+ "and a turn flag cannot express it &mdash; a <code>Semaphore(2)</code> for hydrogen, a <code>Semaphore(1)</code> for "
+ "oxygen and a <code>CyclicBarrier(3)</code> is the shape that can.",
+ X("two more series", "the classic synchronized")),
+("Make it an endless stream I can stop, and let threads join while it is running.", "twist", 8,
+ "Two different moves. Stopping is a flag: <code>stop()</code> sets it under the lock and calls "
+ "<code>signalAll</code>, because a shutdown is the one change that concerns every waiter at once, and the flag is "
+ "already read inside the same wait loops, so a closing signal cannot be lost. The demo runs FizzBuzz with n at "
+ "<code>Integer.MAX_VALUE</code>, stops it after fifty milliseconds, and gets back every character printed up to that "
+ "moment &mdash; fifty thousand or so, a different count every run &mdash; with every thread finished. A growing roster is the other move: the printer keeps its thread list and "
+ "a newcomer joins under the lock &mdash; bump the participant count and start its thread inside the same critical "
+ "section. It works because the round-robin guard reads <code>(i - 1) % k</code> from the blackboard, so changing k "
+ "leaves exactly one guard true at every step; and even if the signal arrives before the newcomer is asleep, it "
+ "re-checks its guard before deciding to wait, so nothing is lost.",
+ X("a roster that grows", "a Phaser instead")),
+("A role throws half way through a turn, or the guard set has a hole in it. What happens then?", "functional", 8,
+ "Neither may hang, and that is the whole answer. A role that throws is caught while the lock is still held: the "
+ "printer signals the others so that nobody is stranded on a change that never came, then rethrows, and the "
+ "<code>finally</code> releases the lock, so an exception can never leave the lock held. The counter is exactly where "
+ "it was, so the turns that committed are intact &mdash; the test makes a role throw on its fifth turn and asserts "
+ "that exactly nine turns were published. A guard set with a hole is worse, because nothing is wrong: every thread is "
+ "correctly asleep and no guard is true, which is a stall, not a deadlock. The deadline catches it: every run joins "
+ "its threads against a budget, and when the budget passes the printer stops them, interrupts them and throws with "
+ "the value of the counter in the message. The test removes one FizzBuzz role and gets an exception in 620 "
+ "milliseconds instead of a build that never ends.",
+ T("        // 11. a stall", "        // 13. stop()")),
+("Where does time come from, how do you test a deadline without waiting for it, and how would this survive a restart?", "design", 8,
+ "Time is an interface with one method, handed in through <code>configure</code>, and the deadline arithmetic is the "
+ "only thing that uses it. That is why a test can supply a clock whose every reading is a thousand seconds later than "
+ "the last: the budget is already gone on the first check, and the printer gives up in six milliseconds of real time "
+ "instead of five seconds, which is asserted. The real parking still uses the operating system's timer, so what the "
+ "fake clock proves is the arithmetic, not the sleep. Surviving a restart is the same two fields with the "
+ "<code>StringBuilder</code> replaced by an append-only file: append the token and make it durable, hand the turn on, "
+ "and commit the counter <i>last</i>. That order is the design &mdash; a crash between the append and the commit "
+ "replays one token, so delivery is at-least-once and whoever reads the log must tolerate a repeat; exactly-once "
+ "needs the token and the offset written in one transaction.",
+ T("        // 15. the deadline", "        // 16. an interrupt") + "\n" +
+ "// surviving a restart: the same design, with the record made durable and the counter committed last\n"
+ "void emitDurable(Series s, String token) throws IOException {\n"
+ "    log.append(token);          // 1. the irreversible step: the token is on disk\n"
+ "    log.flush();                //    ... and durable, before anything else believes it happened\n"
+ "    s.i++;                      // 2. only now does the in-memory counter move\n"
+ "    offsets.commit(s.i);        // 3. the offset is committed LAST\n"
+ "}\n"
+ "// a crash between 1 and 3 replays exactly one token on restart: at-least-once, so the reader must be idempotent.\n"
+ "// exactly-once needs the token and the offset in one transaction, which is a database, not a file.\n"),
+("Which pattern is where, and would a Factory or a Builder earn its place?", "design", 4,
+ "None of them was chosen up front, and the order you name them in is the answer: a <b>monitor object</b> from move "
+ "4, <b>Strategy</b> twice from move 3 (the per-thread rule, and the build that hands the turn over), "
+ "<b>Decorator</b> from the same move's <code>AuditRole</code>, <b>Observer</b> from move 4's rule that a listener is "
+ "never inside the lock, and <b>State</b> from move 6, where the <code>while</code> loop is the state machine of one "
+ "turn. The family name is the monitor protocol: producer-consumer without a buffer. Factory is nearly earned by "
+ "<code>Roles</code> and fully earned the day a series name arrives from configuration; Builder never does here, "
+ "because <code>configure</code> takes three arguments. Page 02 moves 10 and 11 have the whole table, SOLID "
+ "included.",
+ "// Monitor object (move 4): private state, one lock, and every path in takes it\n"
+ "private final ReentrantLock lock;\n"
+ "private final Condition turn;                   // one crowd, so every waiter re-checks its own guard\n\n"
+ "// Strategy, twice (move 3): the per-thread rule, and the build that hands the turn over\n"
+ "interface Role { String name(); boolean ready(Series s); String act(Series s); }\n"
+ "interface SeriesPrinter { String run(int n, List<Role> roles) throws InterruptedException; }\n\n"
+ "// State (move 6): the while loop IS the state machine -- a wake goes back to the check, never to the print\n"
+ "while (!stopped && !s.done() && !role.ready(s)) turn.await();\n\n"
+ "// Factory: nearly. It earns the full name the day this line reads Roles.of(config.get(\"series\"))\n"
+ "static List<Role> fizzBuzz() { return List.of(new Rule(...), new Rule(...), new Rule(...), new Rule(...)); }\n"),
+("Could one of these threads starve? Should the lock be fair?", "non-functional", 4,
+ "No, and no &mdash; and knowing why is the point. Starvation means a thread that is ready to work never gets to. "
+ "Here the guards are a partition of the series, so every role's turn arrives on a fixed schedule whatever order the "
+ "lock is handed out in: the round-robin test proves it, with every one of the ten threads emitting exactly its own "
+ "200 tokens out of 2,000 on the ordinary unfair lock. A fair lock hands itself to the thread that has queued "
+ "longest instead of to whoever happens to be running, which here only changes who wins a race that every loser was "
+ "going straight back to sleep from. It normally costs throughput too, though on this problem even that is lost in "
+ "the noise, because every hand-off already parks a thread. So the honest answer is that fairness fixes a problem "
+ "this design cannot have &mdash; say that, rather than reaching for the knob.",
+ X("fairness and starvation", "an interrupt while")),
+("Somebody interrupts one of these threads while it is parked. Who is left holding the lock?", "functional", 5,
+ "Nobody, and that is entirely down to the <code>finally</code>. <code>await()</code> throws "
+ "<code>InterruptedException</code>, the exception leaves <code>serve</code> through the <code>finally</code> that "
+ "unlocks, and the interrupted thread is gone for good. Its role's turns will now never come, so the remaining "
+ "threads wait for a hand-off that never arrives &mdash; and this is where the deadline earns its keep: the run ends "
+ "with an <code>IllegalStateException</code> saying a thread is still waiting, instead of a build that hangs. The "
+ "printer itself is undamaged, which is the claim the test makes: the very same object runs a clean FizzBuzz "
+ "immediately afterwards, which it could not do if the lock had been left held. Two details to say out loud: the "
+ "wait is <code>lockInterruptibly</code>, so a thread queueing for the lock can be cancelled too, and "
+ "<code>Crew</code> catches the exception and re-sets the interrupt flag rather than swallowing it.",
+ X("an interrupt while", "Runs every extension")),
+("What does java.util.concurrent already give you here? Would you write any of this in production?", "design", 5,
+ "Almost none of it, and saying so is the senior half of the answer. The order in this problem is a hand-off between "
+ "named threads, and the library ships the hand-off primitives: a <code>Semaphore</code> is the baton, a "
+ "<code>CountDownLatch</code> is a one-shot start gun, a <code>CyclicBarrier</code> or a <code>Phaser</code> is a "
+ "re-usable meeting point, an <code>Exchanger</code> or a <code>SynchronousQueue</code> hands a value across. The "
+ "<code>Phaser</code> build here is the shortest correct one on the page, and it carries the lesson worth "
+ "remembering: a barrier is a fence, not a lock, so one token needs TWO trips of it &mdash; the first half of a round "
+ "where every thread only reads its guard, the second where the one thread whose guard was true writes. Fuse those "
+ "halves and the readers are reading the counter while the writer increments it; the first version of that class did, "
+ "and printed <code>1fizz24buzz</code>. In production this whole problem is usually a single thread with a queue: "
+ "you pay several microseconds a token to have four threads do what one thread could do in sixty-five.",
+ X("a Phaser instead", "fairness and starvation")),
+]
+
+build(dict(
+    slug="mt-print-series", title="Print in Order",
+    subtitle="LLD &middot; multi-threading &middot; Java &middot; OpenJDK 21: demo, 18 failure tests and five builds that agree character for character",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

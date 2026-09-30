@@ -1,0 +1,159 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    /** A wallet with the standard rules, a generous daily cap and no fee, for the tests that do not care about policy. */
+    static WalletService plain() {
+        WalletService w = new WalletService("bank", "fee", Currency.INR);
+        w.configure(List.of(new SameCurrencyRule()), new NoFee());
+        return w;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. fifty threads transfer between the SAME two accounts in BOTH directions at once. Two things must
+        //    hold: the total is conserved to the paise, and the run finishes at all (locking in id order is the
+        //    reason it cannot deadlock; without it this test hangs).
+        WalletService busy = plain();
+        busy.open("x", AccountType.USER, Currency.INR);
+        busy.open("y", AccountType.USER, Currency.INR);
+        busy.topUp("f-x", "x", Money.rupees("500.00"));
+        busy.topUp("f-y", "y", Money.rupees("500.00"));
+        long start = busy.balanceOf("x") + busy.balanceOf("y");
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Integer>> sent = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final int n = i;
+            sent.add(pool.submit(() -> {
+                go.await();
+                String from = n % 2 == 0 ? "x" : "y", to = n % 2 == 0 ? "y" : "x";
+                try { busy.transfer("r-" + n, from, to, Money.rupees("1.00"), "round " + n); return 1; }
+                catch (TransferRejected r) { return 0; }
+            }));
+        }
+        go.countDown();
+        int settled = 0;
+        for (Future<Integer> f : sent) settled += f.get(5, TimeUnit.SECONDS);   // a deadlock would time out here
+        pool.shutdown();
+        check(settled == 50, "all 50 two-way transfers finished: no deadlock (" + settled + "/50)");
+        check(busy.balanceOf("x") + busy.balanceOf("y") == start, "the total is conserved to the paise after the race");
+        check(busy.reconcile(), "every cached balance still equals the fold of the journal");
+
+        // 2. not enough money: the transfer is refused and NOTHING is written -- not a balance, not a journal line
+        WalletService poor = plain();
+        poor.open("ann", AccountType.USER, Currency.INR);
+        poor.open("ben", AccountType.USER, Currency.INR);
+        poor.topUp("t1", "ann", Money.rupees("100.00"));
+        long annBefore = poor.balanceOf("ann"), benBefore = poor.balanceOf("ben");
+        int linesBefore = poor.ledger().journal().size();
+        try {
+            poor.transfer("k1", "ann", "ben", Money.rupees("100.01"), "one paise too far");
+            check(false, "a transfer larger than the balance must be refused");
+        } catch (TransferRejected e) { check(true, "refused: " + e.getMessage()); }
+        check(poor.balanceOf("ann") == annBefore && poor.balanceOf("ben") == benBefore, "neither balance moved");
+        check(poor.ledger().journal().size() == linesBefore, "the journal has no half-written posting");
+        check(poor.byKey("k1").status() == TxnStatus.FAILED, "the attempt is recorded as FAILED, with its reason");
+
+        // 3. a retried request applies once. The same key returns the same transaction, and a key whose attempt
+        //    failed is refused again for the same reason instead of quietly trying a second time.
+        WalletService idem = plain();
+        idem.open("ann", AccountType.USER, Currency.INR);
+        idem.open("ben", AccountType.USER, Currency.INR);
+        idem.topUp("t1", "ann", Money.rupees("500.00"));
+        Transaction first = idem.transfer("pay-42", "ann", "ben", Money.rupees("200.00"), "rent");
+        Transaction again = idem.transfer("pay-42", "ann", "ben", Money.rupees("200.00"), "rent");
+        check(first == again, "the same idempotency key returned the very same transaction");
+        check(idem.balanceOf("ben") == Money.rupees("200.00"), "and the money moved exactly once");
+        check(idem.ledger().entriesFor("ben").size() == 1, "one journal line for ben, not two");
+        try {
+            idem.transfer("dud", "ann", "ben", Money.rupees("9000.00"), "no chance");
+            check(false, "unreachable");
+        } catch (TransferRejected e) { /* the first attempt */ }
+        try {
+            idem.transfer("dud", "ann", "ben", Money.rupees("9000.00"), "no chance");
+            check(false, "a retry of a failed key must be refused too");
+        } catch (TransferRejected e) { check(true, "a retry of a failed key replays the refusal: " + e.getMessage()); }
+
+        // 4. a frozen account can neither send nor receive; a closed one cannot be reopened, and cannot be
+        //    closed at all while it still holds money
+        WalletService fz = plain();
+        fz.open("ann", AccountType.USER, Currency.INR);
+        fz.open("ben", AccountType.USER, Currency.INR);
+        fz.topUp("t1", "ann", Money.rupees("300.00"));
+        fz.account("ben").setStatus(AccountStatus.FROZEN);
+        try { fz.transfer("k1", "ann", "ben", Money.rupees("10.00"), "in"); check(false, "a frozen receiver must refuse"); }
+        catch (TransferRejected e) { check(true, "frozen receiver refused: " + e.getMessage()); }
+        fz.account("ben").setStatus(AccountStatus.ACTIVE);
+        fz.account("ann").setStatus(AccountStatus.FROZEN);
+        try { fz.transfer("k2", "ann", "ben", Money.rupees("10.00"), "out"); check(false, "a frozen sender must refuse"); }
+        catch (TransferRejected e) { check(true, "frozen sender refused: " + e.getMessage()); }
+        check(fz.balanceOf("ann") == Money.rupees("300.00"), "the frozen account's balance is untouched");
+        try { fz.account("ann").setStatus(AccountStatus.CLOSED); check(false, "closing an account with money must be refused"); }
+        catch (IllegalStateException e) { check(true, "cannot close an account holding money: " + e.getMessage()); }
+
+        // 5. the daily cap, with time handed in: the cap bites, the refusal writes nothing, and tomorrow is a
+        //    fresh day -- which is only testable because the clock is injected
+        WalletService cap = new WalletService("bank", "fee", Currency.INR);
+        long[] now = { 1_700_000_000_000L };
+        cap.setClock(() -> now[0]);
+        cap.configure(List.of(new SameCurrencyRule(), new DailyLimitRule(Money.rupees("1000.00"))), new NoFee());
+        cap.open("ann", AccountType.USER, Currency.INR);
+        cap.open("ben", AccountType.USER, Currency.INR);
+        cap.topUp("t1", "ann", Money.rupees("5000.00"));
+        cap.transfer("d1", "ann", "ben", Money.rupees("600.00"), "morning");
+        cap.transfer("d2", "ann", "ben", Money.rupees("400.00"), "noon");
+        long spent = cap.balanceOf("ben");
+        try { cap.transfer("d3", "ann", "ben", Money.rupees("0.01"), "one paise over"); check(false, "the cap must bite"); }
+        catch (TransferRejected e) { check(true, "daily cap refused the next paise: " + e.getMessage()); }
+        check(cap.balanceOf("ben") == spent, "the capped transfer moved nothing");
+        now[0] += 86_400_000L;                                                  // tomorrow
+        cap.transfer("d4", "ann", "ben", Money.rupees("900.00"), "next day");
+        check(cap.balanceOf("ben") == spent + Money.rupees("900.00"), "a new day resets the counter");
+
+        // 6. a reversal writes the OPPOSITE posting; it never edits an entry and never sets a balance by hand
+        WalletService rev = new WalletService("bank", "fee", Currency.INR);
+        rev.configure(List.of(new SameCurrencyRule()), new MerchantFlatFee(Money.rupees("2.00")));
+        rev.open("ann", AccountType.USER, Currency.INR);
+        rev.open("shop", AccountType.MERCHANT, Currency.INR);
+        rev.topUp("t1", "ann", Money.rupees("500.00"));
+        long annStart = rev.balanceOf("ann");
+        Transaction paid = rev.transfer("buy", "ann", "shop", Money.rupees("120.00"), "kettle");
+        List<LedgerEntry> original = rev.ledger().entriesFor("shop");
+        rev.reverse("rev-1", paid.id());
+        check(rev.balanceOf("ann") == annStart, "the sender is back to the paise, fee included");
+        check(rev.balanceOf("shop") == 0 && rev.balanceOf("fee") == 0, "the merchant and the fee account are back to zero");
+        check(rev.txn(paid.id()).status() == TxnStatus.REVERSED, "the original transaction is marked REVERSED");
+        check(rev.ledger().entriesFor("shop").size() == original.size() + 1, "the reversal ADDED a line, it did not edit one");
+        check(rev.ledger().entriesFor("shop").get(0).equals(original.get(0)), "the original entry is byte-for-byte what it was");
+        try { rev.reverse("rev-2", paid.id()); check(false, "reversing twice must be refused"); }
+        catch (TransferRejected e) { check(true, "a second reversal is refused: " + e.getMessage()); }
+
+        // 7. the journal is the truth: replaying it must reproduce every cached balance, and every balance in
+        //    the system must add up to exactly zero
+        check(rev.reconcile(), "after the reversal the wallet still reconciles");
+        long total = 0;
+        for (String id : rev.ledger().accountsSeen()) {
+            check(rev.balanceOf(id) == rev.ledger().replay(id), "replaying the journal reproduces " + id + "'s balance");
+            total += rev.balanceOf(id);
+        }
+        check(total == 0, "every balance in the wallet adds up to exactly zero");
+
+        // 8. a listener that throws must not break the money path
+        WalletService noisy = plain();
+        noisy.open("ann", AccountType.USER, Currency.INR);
+        noisy.open("ben", AccountType.USER, Currency.INR);
+        noisy.addListener(t -> { throw new RuntimeException("push gateway is down"); });
+        noisy.topUp("t1", "ann", Money.rupees("100.00"));
+        Transaction landed = noisy.transfer("k1", "ann", "ben", Money.rupees("40.00"), "chai");
+        check(landed.status() == TxnStatus.COMPLETED && noisy.balanceOf("ben") == Money.rupees("40.00"),
+              "the transfer landed although the listener threw");
+        check(noisy.reconcile(), "and the books still reconcile");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

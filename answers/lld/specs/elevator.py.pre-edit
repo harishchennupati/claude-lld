@@ -1,0 +1,594 @@
+# Elevator System LLD workbench: problem -> twelve moves -> class diagram -> the whole code -> follow-ups.
+# Content only; the frame, the guard and the page come from lld_engine.build(spec).
+import sys, pathlib
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+SRC = H / "elevator"
+M = (SRC / "Main.java").read_text()
+E = (SRC / "Extensions.java").read_text()
+T = (SRC / "FailureTests.java").read_text()
+def X(a, b=None):
+    """slice a plain comment-delimited block out of Extensions.java"""
+    i = E.index("// ---- ext: " + a)
+    j = E.index("// ---- ext: " + b, i) if b else len(E)
+    return E[i:j].rstrip() + "\n"
+def XE(a):
+    """slice from an ext marker to just before the ExtDemo runner"""
+    return E[E.index("// ---- ext: " + a):E.index("/** Runs every extension")].rstrip() + "\n"
+def block(src, a, b):
+    return src[src.index(a):src.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ problem page pictures
+# what the code must do: a hall call, then the sweep, with the query as a line
+pf = _D
+rows = [("hall call", 30, [("a rider presses UP on 2", "a floor and a direction"),
+                           ("score the cars in service", "nearest, then the shortest queue"),
+                           ("that car takes floor 2", "into its up leg; the bank records it"),
+                           ("the panel updates", "where that car is now")]),
+        ("the sweep", 165, [("one tick of the world", "one floor, or one door cycle"),
+                            ("a stop on this leg?", "open; the call leaves the index"),
+                            ("the rider presses 12 inside", "bound to this car only"),
+                            ("nothing ahead: turn", "the other leg is served next")])]
+for lab, y, boxes in rows:
+    pf += _tx(80, y + 31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 150 + k * 270
+        pf += _bx(x, y, 250, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x + 250, y + 27, x + 270), True)
+pf += _ar("M545 84 V95", dash=True) + _bx(420, 95, 250, 40, "no car can take it: it waits", "", dash=True)
+pf += _tx(80, 266, "query", "var(--acc)", 13) + _tx(150, 266,
+      "at any moment, without scanning the stops: where is every car?  how long until one reaches floor 7?",
+      "var(--text)", 12, "start")
+pf += _tx(615, 305, "many riders press at the same instant: one hall call must be answered by exactly one car, and never half-assigned", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 320, pf)
+
+# one morning, replayed
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("08:15:00  floor 2 presses UP", ["cars stand at 0, and 15 to 19", "estimates: 2 floors, or 13 and up", "car 0 is sent, and recorded", "car 0 up leg: {2}"], True),
+      ("08:15:02  car 0 opens at 2", ["the call leaves the index", "waited 2000 ms by the clock", "the rider presses 12 inside", "car 0 up leg: {12}"], False),
+      ("08:15:03  floor 6 presses UP", ["car 0 is at 3 and climbing: 3 floors", "the nearest idle car: 9 floors", "car 0 takes it on the way", "car 0 up leg: {6, 12}"], False),
+      ("08:15:04  a rider presses 1", ["floor 1 joins the DOWN leg", "12 is still ahead, so no turn", "6, then 12, then down to 1", "trace: 4 5 6 6 .. 12 12 11 .. 1"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k * 290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x + 125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x + 125)
+    pe += _card(x, 60, 250, 110, t, lines, acc=acc)
+P_EX = _mv(1230, 185, pe)
+
+# ============================================================ the twelve move pictures
+MV = {}
+
+# 1: the sentence, and which nouns have state
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(615, 47,
+     "a RIDER presses a HALL BUTTON on a FLOOR; the BANK sends a CAR; the car works through its STOPS; the DOORS open; a PANEL shows where it is", "var(--text)", 12.5)
+for (x, w, t, sub, acc) in [(30, 210, "ElevatorSystem", "the cars, the calls, the lock", 1),
+                            (250, 200, "ElevatorCar", "floor, heading, doors", 1),
+                            (470, 180, "StopSet", "two sorted sets", 1),
+                            (670, 160, "HallCall", "floor + direction", 1),
+                            (850, 170, "Hall button", "no state: a caller", 0),
+                            (1040, 170, "Panel", "a listener, not a model", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w / 2))
+m1 += _tx(615, 190, "solid = has its own state, becomes a class.   dashed = no state of its own: a caller or a listener", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([
+        ("press UP on floor 7", "ElevatorSystem  (cars + the call index + lock)", "bank.requestHall(7, UP)"),
+        ("press 12 inside car 0", "ElevatorCar  (owns its two stop sets)", "car.pressFloor(12)"),
+        ("move a floor, or cycle the doors", "ElevatorCar  (floor, heading, doors)", "car.step(doorPolicy)"),
+        ("decide which car answers", "nobody: it is a rule, not state", "strategy.pick(cars, call)")]):
+    y = 24 + k * 56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y + 22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y + 22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 270, "a verb whose state is spread over two classes goes to the class that owns both: the bank owns the cars and the index, so dispatch is its method", "var(--muted)", 11)
+MV[2] = _mv(1230, 285, m2)
+
+# 3: rules the interviewer can change -> one-method interfaces, handed in
+m3 = _D + _bx(30, 90, 220, 90, "ElevatorSystem", "configure(dispatch, doors)", acc=True)
+for k, (t, sub, impls) in enumerate([
+        ("DispatchStrategy", "nearest today, up-peak at nine", "NearestCar / UpPeak / Zoned / LoadAware"),
+        ("DoorPolicy", "one tick now, three at the lobby", "FixedDwell / LobbyDwell"),
+        ("ElevatorObserver", "who wants to know a car moved", "DisplayPanel / MaintenanceMonitor"),
+        ("Clock", "the tick now, a real clock later", "the test's clock / System::currentTimeMillis")]):
+    y = 24 + k * 60
+    m3 += _ar("M250 135 H330 V%s H400" % (y + 22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 440, 44, impls, "the classes that can be handed in") + _ar("M760 %s H700" % (y + 22))
+m3 += _tx(615, 285, "dashed green = handed in. the bank never builds these, so a new rule is a new class and one changed line", "var(--muted)", 11)
+MV[3] = _mv(1230, 300, m3)
+
+# 4: two riders, one button, the gap
+m4 = _D + _bx(30, 30, 170, 44, "rider A", "presses 7 UP") + _bx(30, 110, 170, 44, "rider B", "presses 7 UP")
+m4 += _bx(340, 70, 180, 44, "nobody owes 7 UP", "yet", acc=True)
+m4 += _ar("M200 52 H340 V70") + _ar("M200 132 H340 V114") + _tx(270, 40, "reads", "var(--muted)", 10.5) + _tx(270, 160, "reads", "var(--muted)", 10.5)
+m4 += '<rect x="550" y="20" width="300" height="145" rx="6" fill="none" stroke="#f38ba8" stroke-dasharray="4 3"/>'
+m4 += _tx(700, 45, "the gap", "#f38ba8", 12) + _tx(700, 70, "both saw it unowed, both dispatch:", "#f38ba8", 11)
+m4 += _tx(700, 90, "two cars sent to floor 7,", "#f38ba8", 11) + _tx(700, 110, "one arrives to an empty hallway", "#f38ba8", 11)
+m4 += _tx(700, 145, "fix: look up, score, take, record: ONE step", "var(--text)", 11)
+m4 += _bx(880, 40, 320, 100, "ElevatorSystem.lock", "check the index, score, accept, record", acc=True)
+m4 += _tx(1040, 165, "the lock lives where the shared state lives", "var(--muted)", 10.5)
+m4 += _tx(1040, 185, "panels are told after unlock, never inside it", "var(--muted)", 10.5)
+MV[4] = _mv(1230, 200, m4)
+
+# 5: each collection, its question, its shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([
+        ("what is my next stop going up?", "NavigableSet&lt;Integer&gt; up  .higher(floor)", "O(log n)"),
+        ("is anything still ahead of me?", "the same two sets  .higher / .lower", "O(log n), no scan"),
+        ("the two legs, keyed by direction", "EnumMap&lt;Direction, NavigableSet&lt;Integer&gt;&gt;", "an array index"),
+        ("who owes this hall call?", "Map&lt;HallCall, carId&gt;   a record is a key", "O(1)"),
+        ("where is car 3 right now?", "car.snapshot(): one volatile field", "O(1), no lock")]):
+    y = 20 + k * 50
+    m5 += _bx(30, y, 360, 40, q, "the question") + _ar("M390 %s H450" % (y + 20), True)
+    m5 += _bx(450, y, 520, 40, shape, "the shape", acc=True) + _ar("M970 %s H1030" % (y + 20), True)
+    m5 += _bx(1030, y, 170, 40, cost, "")
+m5 += _tx(615, 290, "pressing 5 three times is one stop because a set dedupes; every sweep question is a lookup, so nothing scans inside the lock", "var(--muted)", 11)
+MV[5] = _mv(1230, 305, m5)
+
+# 6: the state machine, and the order at the critical step
+m6 = _D + _bx(30, 50, 150, 44, "IDLE", "no stops owed")
+m6 += _bx(240, 50, 230, 44, "MOVING_UP / DOWN", "one floor per tick", acc=True)
+m6 += _bx(540, 50, 180, 44, "DOORS_OPEN", "one door per tick", acc=True)
+m6 += _ar("M180 72 H240", True) + _tx(210, 42, "a stop", "var(--muted)", 10)
+m6 += _ar("M470 72 H540", True) + _tx(505, 42, "arrived", "var(--muted)", 10)
+m6 += _ar("M630 94 Q 540 150 420 94") + _tx(525, 143, "doors close, stops remain", "var(--muted)", 10.5)
+m6 += _ar("M290 94 Q 190 168 105 94") + _tx(190, 170, "no stops left", "var(--muted)", 10.5)
+m6 += _ar("M300 50 Q 355 8 410 50") + _tx(355, 22, "nothing ahead: reverse the leg -- this is LOOK", "var(--acc)", 10.5)
+m6 += _ar("M300 96 V190", dash=True) + _tx(360, 176, "emergency stop", "var(--muted)", 10.5)
+m6 += _bx(30, 190, 690, 42, "MAINTENANCE", "an emergency stop halts the car here and hands its hall calls back to the bank's queue", dash=True)
+m6 += '<rect x="760" y="20" width="450" height="212" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(985, 44, "the order inside requestHall, and why", "var(--text)", 12)
+for k, l in enumerate(["1 reject a floor this building does not have", "2 already lit? return the same car, do nothing else",
+                       "3 score the cars that are in service", "4 the winner TAKES THE STOP (it may refuse)",
+                       "5 only now: write down who owes the call", "a refusal leaves every set exactly as it was and",
+                       "the call waits on the queue; the next tick offers it again"]):
+    m6 += _tx(775, 68 + k * 22, l, "var(--muted)" if k > 4 else "var(--text)", 11, "start")
+m6 += _tx(615, 255, "a car state plus one rule: nothing is written down until a car has actually taken the stop. An emergency stop is the same rule backwards.", "var(--muted)", 11)
+MV[6] = _mv(1230, 270, m6)
+
+# 7: what is inside the lock, and ten buttons at the same instant
+m7 = _D + _card(30, 20, 540, 165, "inside the lock: about 2.5 microseconds",
+                ["look the call up in the index: is it already lit?", "score six cars from their snapshots: two set lookups each",
+                 "the winner inserts one floor into a TreeSet", "write who owes it; copy six snapshots",
+                 "a tick: six cars stepped, then waiting calls re-offered"], acc=True)
+m7 += _ar("M570 100 H640", True) + _tx(605, 90, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 165, "outside the lock: milliseconds to seconds",
+            ["the panel above the doors: a serial write, ~5 ms", "the maintenance monitor: counting and a log line",
+             "the door motor: 2 seconds", "the rider walking in: 10 seconds", "the next tick: 500 ms away"])
+m7 += _tx(615, 205, "ten buttons pressed at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k * 118
+    m7 += _bx(x, 220, 106, 40, "press %d" % (k + 1), "waits %s us" % ("0" if k == 0 else "%.1f" % (k * 2.5)), acc=(k == 9))
+m7 += _tx(615, 290, "the tenth rider waits twenty-two microseconds for the lock and then two seconds for a door to open: one at a time is true, and nobody can tell", "var(--muted)", 11)
+MV[7] = _mv(1230, 305, m7)
+
+# 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one lock for six cars: is it a bottleneck?", "var(--text)", 12)
+for k, l in enumerate(["a hall call holds it ~2.5 us: one lookup, six scores, one insert",
+                       "morning peak in a twenty-floor tower: ~3 presses a second",
+                       "ticks: two a second, six cars, ~3 us each: ~6 us a second",
+                       "~14 us of lock in every 1,000,000 us; two presses collide twice a day",
+                       "the weak spot: a tick re-scores every waiting call in the lock"]):
+    m8 += _tx(35, 66 + k * 24, l, RED if k == 4 else "var(--muted)", 11, "start")
+m8 += _tx(880, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 stop re-scoring waiting calls every tick", "offer them again only when a car frees up or comes back into service"),
+                              ("2 a lock per car, taken after the index lock", "cars on different sweeps stop waiting for each other"),
+                              ("3 one thread per car with a mailbox", "a press becomes a queued command; snapshots stay the only shared read")]):
+    m8 += _bx(600, 58 + k * 50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# 9: what can go wrong, and the test for each
+m9 = _D
+for k, (t, sub, fix) in enumerate([
+        ("two riders, one button", "two cars sent, one empty trip", "index + score + accept in one locked step; test: 40 threads, one latch, one car"),
+        ("a car in maintenance", "calls fed to a dead car", "the dispatcher filters it out; test: every car down, the call queues instead"),
+        ("floor 99 in a 20-floor tower", "a stop nobody can reach", "validate at the boundary; test: three rejections, nothing owed afterwards"),
+        ("the sweep turns early", "the top floor starves", "turn only when nothing is ahead; test: the floor trace never dips first"),
+        ("an emergency stop", "the queue is swallowed with the car", "hand the calls back; test: the call is pending, then another car owes it"),
+        ("the panel throws", "the tick dies with it", "publish after unlock, catch; test: a throwing panel, the car still climbs")]):
+    y = 24 + k * 46
+    m9 += _bx(30, y, 290, 40, t, sub) + _ar("M320 %s H380" % (y + 20), True) + _bx(380, y, 820, 40, fix, "", acc=True)
+m9 += _tx(615, 315, "every claim the design makes has a failure test: FailureTests.java runs eight of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 330, m9)
+
+# 10: the patterns, named after the fact
+cols = [("pattern", 12), ("born in", 200), ("the line in the code", 290), ("what it buys", 830)]
+rows = [[("Strategy", "var(--text)"), ("move 3", None), ("interface DispatchStrategy { ElevatorCar pick(cars, call); }  via configure()", None), ("change which car answers without opening the bank", None)],
+        [("Decorator", "var(--text)"), ("move 3", None), ("ZonedDispatch(base): filter the candidates, then base.pick(allowed, call)", None), ("add zoning on top of any scoring rule", None)],
+        [("Observer", "var(--text)"), ("move 3", None), ("publish(snaps) after unlock; DisplayPanel and MaintenanceMonitor", None), ("panels hear; the bank never knows what a screen is", None)],
+        [("State", "var(--text)"), ("move 6", None), ("enum CarState + step(): a door cycle OR a floor, never both", None), ("driving with the doors open cannot be written", None)],
+        [("Command", "var(--muted)"), ("rung 3", None), ("the mailbox in move 8: a press becomes a queued object", "var(--muted)"), ("earned only when each car gets its own thread", "var(--muted)")],
+        [("Singleton", "var(--muted)"), ("not here", None), ("the bank is constructed and handed in: one controller may run several banks", "var(--muted)"), ("a getInstance() would have been wrong here", "var(--muted)")],
+        [("Factory, Builder, Visitor", "var(--muted)"), ("not yet", None), ("cars arrive built; a factory pays when a building is read from a config file", "var(--muted)"), ("say 'not yet, and here is what would make me'", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols, rows, rowh=30, widths=1190)
+m10 += _tx(615, 275, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 290, m10)
+
+# 11: SOLID as a check on the moves
+cols = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows = [[("S", "var(--acc)"), ("one reason to change per class (each owns one state)", None), ("move 2", None), ("StopSet: the sweep. ElevatorCar: its own physics. ElevatorSystem: dispatch and the lock", None)],
+        [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("up-peak = one new class + one changed configure() line", None)],
+        [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("dispatch.pick(eligible, call);  never 'is it the zoned one?'", None)],
+        [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("DispatchStrategy, DoorPolicy, ElevatorObserver, Clock: one method each", None)],
+        [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 9", None), ("bank.setClock(() -&gt; now[0]);   bank.configure(new UpPeakDispatch(0, 19), doors)", None)]]
+m11 = _D + _table(20, 20, cols, rows, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# 12: every twist is one of five moves
+m12 = _D
+tw = [("a new rule", "up-peak, energy, destination dispatch", "a new class behind DispatchStrategy + one configure line", "", "move 3"),
+      ("someone new wants to know", "a lobby kiosk, analytics, the fire panel", "one more observer; no car and no sweep changes", "", "move 3"),
+      ("a new step in a life", "fire recall, independent service, out of service", "a new CarState + one row in the tick's transition table", "", "move 6"),
+      ("a new invariant across cars", "a zone must always keep one car free", "both claims inside the SAME locked step: all or nothing", "", "move 4"),
+      ("state that must outlive the process", "forty buildings, one controller", "the index behind a repository interface; the claim becomes",
+       "UPDATE hall_call SET car_id=? WHERE floor=? AND car_id IS NULL: the database's compare-and-set", "move 5 + this one")]
+for k, (t, sub, fix, fsub, mv) in enumerate(tw):
+    y = 24 + k * 54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y + 22), True) + _bx(420, y, 660, 44, fix, fsub, acc=True) + _tx(1150, y + 27, mv, "var(--muted)", 11)
+m12 += _tx(615, 310, "for all five the cars and the sweep do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+# ============================================================ the class diagram
+uml_reset()
+put("hallp", 10, 20, 240, "HallPanelButtons", ["bank: ElevatorSystem", "floor: int"], ["up(): int   /   down(): int"])
+put("carp", 10, 140, 240, "CarPanelButtons", ["bank: ElevatorSystem", "carId: int"], ["press(destination)"])
+put("obs", 10, 290, 240, "ElevatorObserver", [], ["onChange(s: CarSnapshot)"], "interface")
+put("panel", 10, 390, 240, "DisplayPanel", ["watchedCar: int"], ["onChange(s) &rarr; print"])
+put("mon", 10, 510, 240, "MaintenanceMonitor", ["travelled: Map&lt;carId, int&gt;"], ["onChange(s)  (synchronized)", "floorsTravelled(carId): int"])
+put("sys", 300, 20, 310, "ElevatorSystem",
+    ["cars: List&lt;ElevatorCar&gt;", "assigned: Map&lt;HallCall, carId&gt;", "pending: Set&lt;HallCall&gt;",
+     "raisedAtMs: Map&lt;HallCall, long&gt;", "lock: ReentrantLock", "dispatch: DispatchStrategy",
+     "doorPolicy: DoorPolicy", "clock: Clock"],
+    ["configure(dispatch, doors)", "requestHall(floor, dir): int", "requestCar(carId, floor)", "tick()",
+     "takeOutOfService(carId)", "recallAll(floor)", "snapshots(): List&lt;CarSnapshot&gt;", "estimateFloorsToServe(call): int"])
+put("car", 300, 360, 310, "ElevatorCar",
+    ["id, bottomFloor, topFloor: int", "floor: int", "heading: Direction", "state: CarState", "doors: DoorState",
+     "stops: StopSet", "held: Set&lt;HallCall&gt;", "published: volatile CarSnapshot"],
+    ["accept(call): boolean", "pressFloor(dest): boolean", "step(policy): List&lt;HallCall&gt;",
+     "dropStops(): List&lt;HallCall&gt;", "goOutOfService(): List&lt;HallCall&gt;", "snapshot(): CarSnapshot"])
+put("stops", 300, 670, 310, "StopSet", ["legs: EnumMap&lt;Direction, TreeSet&gt;"],
+    ["add(leg, floor) / clear(leg, floor)", "servesOnLeg(floor, leg): boolean", "hasStopAhead(from, leg): boolean", "chooseDirection(from): Direction"])
+put("disp", 680, 20, 250, "DispatchStrategy", [], ["pick(cars, call): ElevatorCar"], "interface")
+put("near", 680, 110, 250, "NearestCarStrategy", ["bottom, top: int"], ["pick(): the lowest cost", "cost(snap, call, lo, hi): int"])
+put("zoned", 680, 235, 250, "ZonedDispatch", ["base: DispatchStrategy", "zones: Map&lt;carId, int[]&gt;"], ["pick(): filter, then base"])
+put("uppeak", 680, 360, 250, "UpPeak | LoadAware", [], ["pick(): a different bias"])
+put("dpol", 680, 450, 250, "DoorPolicy", [], ["dwellTicks(carId, floor): int"], "interface")
+put("dwell", 680, 540, 250, "FixedDwell | LobbyDwell", [], ["dwellTicks(): 1, or 3 at the lobby"])
+put("clock", 680, 630, 250, "Clock", [], ["nowMs(): long"], "interface")
+put("hc", 970, 20, 250, "HallCall", ["floor: int", "direction: Direction"], [], "record")
+put("snap", 970, 120, 250, "CarSnapshot", ["carId, floor: int", "heading: Direction", "state: CarState", "doors: DoorState", "pendingStops: int"], [], "record")
+put("dir", 970, 270, 250, "Direction", ["UP, DOWN, IDLE"], ["opposite() / delta()"], "enum")
+put("cst", 970, 380, 250, "CarState", ["IDLE, MOVING_UP, MOVING_DOWN,", "DOORS_OPEN, MAINTENANCE"], [], "enum")
+put("dst", 970, 480, 250, "DoorState", ["OPEN, CLOSED"], [], "enum")
+
+edges = [
+    ln(B["hallp"]["r"], (B["sys"]["l"][0], B["hallp"]["r"][1]), "assoc", "presses"),
+    ln(B["carp"]["r"], (B["sys"]["l"][0], B["carp"]["r"][1]), "assoc", "presses"),
+    ln(B["sys"]["b"], B["car"]["t"], "compose", "cars 1..*"),
+    ln(B["car"]["b"], B["stops"]["t"], "compose", "its two legs"),
+    ln((610, 129), B["disp"]["l"], "inject", "", [(646, 129), (646, 47)]),
+    _tx(650, 36, "configure", "var(--muted)", 10.5),
+    ln((610, 149), B["dpol"]["l"], "inject", "", [(634, 149), (634, 477)]),
+    ln((610, 169), B["clock"]["l"], "inject", "", [(622, 169), (622, 657)]),
+    ln(B["near"]["t"], B["disp"]["b"], "inherit"),
+    ln(B["zoned"]["l"], (B["disp"]["b"][0] - 50, B["disp"]["b"][1]), "inherit", "", [(658, 280), (658, 92)]),
+    ln(B["uppeak"]["l"], (B["disp"]["b"][0] + 50, B["disp"]["b"][1]), "inherit", "", [(670, 387), (670, 100)]),
+    ln(B["dwell"]["t"], B["dpol"]["b"], "inherit"),
+    ln((610, 92), B["hc"]["b"], "assoc", "", [(1095, 92)]),
+    _tx(1030, 107, "the index key", "var(--muted)", 10.5),
+    ln(B["car"]["r"], B["snap"]["l"], "assoc", "", [(644, 493), (644, 217), (950, 217), (950, 177)]),
+    _tx(652, 348, "publishes", "var(--muted)", 10.5, "start"),
+    ln(B["panel"]["t"], B["obs"]["b"], "inherit"),
+    ln(B["mon"]["r"], (B["obs"]["r"][0], B["obs"]["r"][1] + 14), "inherit", "", [(275, 555), (275, 331)]),
+    ln((B["sys"]["l"][0], B["obs"]["r"][1]), B["obs"]["r"], "notify", ""),
+]
+UMLSVG = uml_svg(1230, 840, edges, legend_y=815)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;record&raquo; = immutable data; '
+ '&laquo;enum&raquo; = a fixed list of values). Middle: its fields, the state it holds. Bottom: its methods. '
+ '<b>The arrows.</b> Hollow triangle = implements. Filled diamond = owns: the bank owns the cars, a car owns its stop set. '
+ 'Plain arrow = references: the bank keys its index by a hall call, a car publishes a snapshot. Dashed green = handed in '
+ 'through <code>configure()</code>. Dotted blue = notifies. <b>Where state lives:</b> the car has its floor, its heading, its '
+ 'doors and its two sorted legs, and nothing else in the system may write them; the bank has the cars, the index of who owes '
+ 'which call, the queue of calls with no car yet, the injected rules and the one lock; a snapshot is a dead copy that anyone '
+ 'may read from any thread. The three enums on the right are named in the fields beside them. On the next step this diagram '
+ 'stays open in a second tab while you read the code.')
+
+# ============================================================ page 1: the problem
+PROMPT = ('"Design the lifts in an office tower. A handful of cars, twenty floors, buttons in the hallways and buttons inside '
+          'each car. Riders should not wait long and a car should not bounce up and down. I want working code, not a diagram. Go."')
+ASK_TABLE = '''<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>
+<tr><td>How many cars and floors, and can every car reach every floor?</td><td>Six cars, twenty floors, every car everywhere</td><td>A floor range on the car, and the zoned twist (moves 1, 12)</td></tr>
+<tr><td>What are we optimising: waiting time, travel time or energy?</td><td>Waiting time, and say the estimate out loud</td><td>The cost function behind the dispatch interface (move 3)</td></tr>
+<tr><td>Once a call is given to a car, is it stuck there?</td><td>Yes, sticky; moving it is a follow-up</td><td>One index entry per call, written once (moves 4, 6)</td></tr>
+<tr><td>Ticks or real time? Is a floor one step and a door another?</td><td>A tick: one floor, or one door cycle, never both</td><td>The state machine, and tests with no sleeps (moves 6, 9)</td></tr>
+<tr><td>Do buttons fire from many threads at the same instant?</td><td>Yes</td><td>One lock in the bank; the panels stay thin callers (moves 4, 7)</td></tr>
+<tr><td>Capacity and weight, out of service, fire recall?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr>
+<tr><td>One building, in memory, one process?</td><td>Yes</td><td>No repository yet; a follow-up adds one (move 12)</td></tr></table></div>'''
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>A hall call (a floor and a direction) goes to one car; a car call (a floor pressed inside) goes to that car only.</li>
+<li>A car sweeps: it keeps going one way, opens at every stop it owes on that leg, and turns only when nothing is left ahead.</li>
+<li>One tick moves each car one floor or cycles its doors, never both.</li>
+<li>Which car answers is a rule that can be swapped mid-round; so is how long the doors stay open.</li>
+<li>A car can be taken out of service, and the calls it owed must not be lost.</li>
+<li>Panels and a maintenance monitor are told whenever a car changes.</li>
+<li>Answer "where is every car?" and "how long until one reaches floor 7?" without scanning the stops.</li>
+<li>Reject a floor the building does not have.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many riders press at the same instant: one hall call is answered by exactly one car.</li>
+<li>No sweep question may scan: every one of them is a lookup on a sorted set, O(log n).</li>
+<li>The dispatch rule and the door rule are swappable without touching a car.</li>
+<li>One source of truth for who owes which call: the bank's index.</li>
+<li>Nothing half-done: if no car takes a call it waits on a queue and is offered again on the next tick.</li>
+<li>Time is handed in, so waits are replayable and no test sleeps.</li>
+<li>In memory, one building, one process (say it; a follow-up adds persistence).</li></ul></div></div>
+'''
+PROBLEM_BODY = ('<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A tower with twenty floors and a handful of lift cars. There are two '
+ 'different buttons, and telling them apart is most of the design: the UP or DOWN button in a hallway belongs to the whole bank, '
+ 'because any car may answer it, while the floor button inside a car is bound to that one car and carries no direction at all. '
+ 'When a hallway button is pressed the system picks a car and gives it that stop; the car then drives itself, opening its doors at '
+ 'every floor it owes on the leg it is sweeping and turning round only when nothing is left ahead of it. A display panel above each '
+ 'door shows where its car is, and a maintenance monitor counts the floors travelled. Many riders press at the same instant, so one '
+ 'hall call must be answered by exactly one car and never by two. A car taken out of service mid-sweep must hand back the calls it '
+ 'owed rather than swallow them.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, with a <code>main</code> '
+ 'that presses buttons, ticks a simulated clock and prints where each car went. The interviewer is watching for, in this order: the '
+ 'questions you ask before typing; which classes exist and which one owns which state; a hall call and a car call working end to end; '
+ 'what happens when two riders press the same button at the same instant; where the rules that will change (which car answers, how long '
+ 'the doors stay open) live, so a change is a new class and not an edit; what happens to the queue when a car dies mid-sweep. Then the '
+ 'twists: express zones, capacity and weight, destination dispatch, fire service, many buildings.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>' + ASK_TABLE +
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> one building, in memory, one process; a tick is one floor or one door cycle, never both; '
+ 'a call is stuck to its car once given; ties go to the lowest car id so the bank is deterministic. Named as out of scope: capacity and '
+ 'weight, express zones, destination dispatch, fire recall, persistence; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 2: the twelve moves
+MOVES_TEXT = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the brief again: a <b>rider</b> presses a <b>hall button</b> on a <b>floor</b>; the <b>bank</b> sends a <b>car</b>; the car works "
+ "through its <b>stops</b>; the <b>doors</b> open; a <b>panel</b> shows where it is. A car has a floor, a direction, doors and the stops it "
+ "owes: a class. Those stops are not a plain list, and the questions asked of them are the whole algorithm, so they get a class of their own: "
+ "StopSet. A hall call is a floor plus a direction and nothing else, so it is a small immutable record, which also makes it a free map key. "
+ "The bank holds the cars, the index of who owes which call and the lock: a class, and the only writer. A hall button remembers nothing, so it "
+ "is a thin caller, not a model, and a floor is just an integer. The panel holds no state the system owns, so it is a listener.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Press UP on floor 7\" touches the cars, the index and the lock at once, and only the bank sees all three, so it is "
+ "<code>bank.requestHall(7, UP)</code>. \"Press 12 inside car 0\" touches one car's stop sets, so it is <code>car.pressFloor(12)</code>. "
+ "\"Move a floor, or cycle the doors\" touches that car's floor, heading and doors, so it is <code>car.step(policy)</code>. \"Decide which car "
+ "answers\" touches no state at all: it only reads. That is the tell that it is a rule rather than a method, and move 3 takes it away into an "
+ "interface. This is how a bank of small cars plus one orchestrator appears without anyone planning an architecture.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Which car answers will change: nearest today, up-peak at nine in the morning, load-aware when the building fills, zoned when they add an "
+ "express bank. How long the doors stay open will change: one tick now, three at the lobby, longer again for accessibility. Who wants to know "
+ "that a car moved will change: a panel today, a maintenance monitor and a fire board tomorrow. Where time comes from will change: a test's "
+ "clock now, a real one later. Each becomes a one-method interface the bank is <i>given</i> in <code>configure()</code> and never builds. This "
+ "is where the patterns come from, not the other way round: a swappable rule behind an interface is <b>Strategy</b>; a rule that filters and "
+ "then defers to the old one (zoning over nearest) is <b>Decorator</b>; a bank that announces 'this car changed' to whoever subscribed, without "
+ "knowing what a screen is, is <b>Observer</b>. I write them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two riders press UP on floor 7 in the same millisecond. Both look at the index, both see that nobody owes 7 UP, and both dispatch: two cars "
+ "drive to floor 7 and one of them arrives to an empty hallway. The gap is between \"nobody owes it\" and \"this car owes it\", so the lookup, "
+ "the scoring, the car taking the stop and the write into the index must be one step under one lock, in the class that owns all of it: the bank. "
+ "The second press then finds the call already lit and is handed back the same car, which is what a real lift does. Anything that only listens, "
+ "like the panel, is called after the lock is released and never inside it.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers without scanning.",
+ "\"What is my next stop going up?\" is <code>up.higher(floor)</code> on a sorted set: O(log n). \"Is anything still ahead of me?\" is the same "
+ "call against both legs, and it is the question that decides when to turn round, so it must never be a loop over floors. \"The two legs, keyed by "
+ "direction\" is an <code>EnumMap</code>, which is an array indexed by the enum's position, so there is no hashing at all. \"Who owes this hall "
+ "call?\" is a map keyed by the HallCall record, which gets equals and hashCode for free. \"Where is car 3?\" is one volatile field holding an "
+ "immutable snapshot, so a display never takes the lock. Sets also dedupe, which is why pressing 5 three times queues one stop. Every scan avoided "
+ "here is a scan that would otherwise have happened inside the lock.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "A car is IDLE with nothing owed, MOVING_UP or MOVING_DOWN while it sweeps, DOORS_OPEN while people get in and out, and MAINTENANCE when it is "
+ "pulled out of service. One rule ties the machine together: a tick is a door cycle or a floor, never both, so a car can never move with its doors "
+ "open. The sweep turns round only when nothing is owed ahead on this leg, which is the LOOK algorithm in one line, and the turn floor works "
+ "because after reversing the car checks the other leg at the floor it is already standing on. Then the order at the critical step: reject an "
+ "impossible floor, return the same car if the button is already lit, score the cars in service, let the winner take the stop, and only then write "
+ "down who owes it. If the car refuses, nothing has been written, the call goes on the waiting queue and the next tick offers it again. An emergency "
+ "stop runs the same rule backwards: the car hands its calls back before it stops existing as far as the bank is concerned.", 6),
+("Move 7: yes, the lock makes dispatch happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every press and every tick take the same lock, is the whole building now a queue? "
+ "It is, for about two and a half microseconds. Inside the lock there is one map lookup, six cost calculations that each do two sorted-set lookups, "
+ "one insert into a TreeSet, one map put and a copy of six small records. Everything slow is outside it: the panel above the doors writing to a "
+ "serial line, the maintenance monitor counting, the door motor taking two seconds, the rider walking in taking ten. So when ten buttons are pressed "
+ "at the same instant the tenth rider waits twenty-two microseconds for the lock and then two seconds for a door. One at a time is true, and nobody "
+ "in the building can tell, as long as nothing slow gets inside. The one thing inside that grows is the tick re-scoring every waiting call, which "
+ "is why it is the first rung of the ladder in the next move.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "Morning peak in a twenty-floor tower is about three presses a second, and the tick runs twice a second over six cars. That is roughly fourteen "
+ "microseconds of lock in every million: busy one part in seventy thousand, and two presses collide about twice a day. A door cycle takes two "
+ "seconds whatever the lock does, so the lock is not the thing riders feel. Then the ladder, in the order you would climb it: stop re-scoring every "
+ "waiting call on every tick and offer them again only when a car frees up; give each car its own lock, always taken after the index lock so "
+ "the order can never deadlock, and cars on different sweeps stop waiting for each other; finally give each car its own thread with a mailbox, which "
+ "turns a press into a queued command and leaves snapshots as the only shared read. Say the arithmetic first: climbing that ladder without it is "
+ "complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Two riders press one button (exactly one car may be sent). A car sits in maintenance (it must never be fed a call, and with every car down the "
+ "call must queue rather than vanish). Someone presses floor 99 in a twenty-floor tower (rejected at the boundary, nothing touched). The sweep "
+ "turns early (the top floor starves, so the floor trace must climb to the last stop before it dips). A car is stopped mid-sweep (its calls come "
+ "back to the queue and another car owes them a tick later). A panel throws (dispatch and the tick carry on). Pressing the same button three times "
+ "is one stop and one door opening. Waiting time comes from the injected clock, so a test can say a rider waited two thousand milliseconds without "
+ "sleeping. Each of these is a few lines in FailureTests.java; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every pattern on this page came out of a move, which is why each can be defended in one sentence: a rule that changes went behind an interface "
+ "(Strategy); a rule that filters the candidates and then defers to the old rule wraps it instead of replacing it (Decorator, which is what "
+ "ZonedDispatch is); the bank announces and the panels listen (Observer); the car's life is a fixed set of moves with one rule about what a tick may "
+ "do (State). Singleton did <i>not</i> earn a place here, and saying so out loud is worth marks: one controller may run several banks in several "
+ "buildings, so the bank is constructed and handed to the panels. Factory has not earned one either: cars arrive built, and it pays the day a "
+ "building is read from a config file. Command arrives only on the third rung of move 8's ladder, when a press becomes a queued object in a car's "
+ "mailbox. A pattern without a move behind it is decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "S: a class has one reason to change, which move 2 gave you. StopSet changes when the sweep changes, ElevatorCar when the physics change, "
+ "ElevatorSystem when dispatch or the invariant changes, a strategy when the cost changes; nobody does two of those. O: a new behaviour is a new "
+ "class and one changed line, never an opened one, which is why up-peak took nine lines and touched nothing. L: any implementation drops in and "
+ "nobody asks which one it got; the bank calls <code>dispatch.pick(eligible, call)</code> and never checks the concrete type. I: the four interfaces "
+ "have one method each, so a fake for a test is a lambda. D: the bank depends on the interfaces it is handed, which is exactly why a test can give "
+ "it a clock it controls and a rule that always refuses.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (up-peak, energy-optimal, destination dispatch) is a new class behind DispatchStrategy plus one configure line. Someone new who wants "
+ "to know (a lobby kiosk, analytics, the fire board) is one more observer, and no car changes. A new step in a life (fire recall, independent "
+ "service, out of service) is a new CarState plus one row in the tick's transition table. A new invariant across cars (a zone must always keep one "
+ "car free) is both claims inside the same locked step, all or nothing. State that must outlive the process (forty buildings behind one controller) "
+ "puts the index behind a repository interface, and the claim becomes a conditional update: set the car id where it is still null, one row updated "
+ "means you won it and zero means somebody else did. That is the database's compare-and-set, the same idea as the lock. For all five the cars and the "
+ "sweep do not change; that is the test that the derivation was right. Page 05 has the code for each.", 12),
+]
+MOVES = [(t, MV[k], txt) for (t, txt, k) in MOVES_TEXT]
+
+# ============================================================ page 5: follow-ups
+FU = [
+("It is 9am. Idle cars should wait in the lobby and up-calls from the ground floor should win. Do it without touching the bank.", "twist", 10,
+ "Which car answers is already an interface, so this is one new class. UpPeakDispatch scores each car with the same cost function the normal rule "
+ "uses, then takes five floors off the score of any idle car sitting at the lobby and adds three to any car already holding more than four stops. "
+ "The bank, the car and the sweep do not move; the only edit is the line that hands the rule in. Because it scores from published snapshots it is "
+ "safe to call from a button thread, exactly like the rule it replaces.",
+ X("the 9am rule change", "express and zoned cars")),
+("Two riders press UP on floor 7 in the same millisecond. Prove exactly one car is sent.", "non-functional", 10,
+ "The race lives between reading \"nobody owes 7 UP\" and writing \"car 1 owes it\". requestHall does the lookup, the scoring, the car's accept and "
+ "the index write inside one lock, so no other press can run in that gap. The proof: forty threads wait on one latch, the latch opens, all forty "
+ "press 7 UP, and the test collects the car ids they were given: one distinct car, one entry in the index, and exactly one stop across the whole "
+ "bank. The second part of the same test fires six different buttons at once and checks that seven calls produced seven stops, so nothing was "
+ "dropped and nothing was dispatched twice.",
+ block(T, "        // 1. forty riders press", "        // 2. a car in maintenance")),
+("One lock for the whole bank. Does that scale, or have you serialised the building?", "non-functional", 5,
+ "It scales, and the answer is arithmetic. The locked part of a press is one map lookup, six cost calculations of two sorted-set lookups each, one "
+ "TreeSet insert and one map put: about two and a half microseconds. Morning peak is around three presses a second and the tick runs twice a second, "
+ "so the lock is busy about fourteen microseconds in every million, and two presses collide roughly twice a day. A door cycle takes two seconds "
+ "regardless, so the lock is not what a rider feels. The ladder, if they push: stop re-scoring every waiting call on every tick; then a lock per car, "
+ "always taken after the index lock so the order cannot deadlock; then one thread per car with a mailbox, which removes the lock from the hot path "
+ "altogether and leaves snapshots as the only shared read.",
+ "// rung 1: the tick re-scores every waiting call inside the lock. Offer a waiting call again only when\n"
+ "//         something changed: a car freed up, came back into service, or a new car joined the bank.\n\n"
+ "// rung 2: a lock per car, always taken AFTER the index lock, so two locks can never be taken in two orders.\n"
+ "//   indexLock.lock();  try { chosen = score(...); } finally { indexLock.unlock(); }\n"
+ "//   chosen.lock.lock(); try { chosen.accept(call); }  finally { chosen.lock.unlock(); }\n\n"
+ "// rung 3: one owning thread per car with a mailbox; a press becomes a queued command, snapshots stay the only shared read.\n"
+ "//   BlockingQueue<Runnable> mailbox;  while (running) { mailbox.poll().run(); car.step(policy); }\n"),
+("A car is stopped in the middle of a sweep. What happens to the calls it was holding?", "functional", 10,
+ "Nothing is lost, because the car never owned the calls on its own: the bank's index owns them and the car holds a copy. goOutOfService drops the "
+ "car's stops, opens its doors where it stands, and returns every hall call it still owed. takeOutOfService then removes each of those from the "
+ "index and puts it back on the waiting queue, and the next tick offers them to the cars again, so another car picks them up. The riders inside get "
+ "out at the current floor, which is what the doors opening means. Fire recall is the same move with a different trigger: recallAll drops every car's "
+ "stops, sends them all to the recall floor, and a strategy that refuses everything keeps new presses on the queue until the release.",
+ block(M, "    List<HallCall> goOutOfService()", "    /**\n     * Forget every stop") +
+ "\n" + sect(M, "    void takeOutOfService(int carId)", "    /**\n     * Fire service and the like") +
+ "\n" + X("fire service", "the cheap query")),
+("The lobby board asks \"how long until a car reaches 7?\" a thousand times a second. Make it cheap.", "non-functional", 5,
+ "No new structure and no lock. Every car republishes an immutable CarSnapshot into one volatile field after each change, so reading where all six "
+ "cars are is six field reads. The board then scores those snapshots with the same cost function the dispatcher uses and multiplies by the seconds "
+ "per floor. That is O(cars) with no scan of anybody's stops, and it has a second benefit worth saying out loud: the number the rider is shown and "
+ "the decision the bank made come from the same arithmetic, so they can never disagree.",
+ X("the cheap query", "persistence")),
+("Cars 1 to 3 serve the low rise, cars 4 to 6 the high rise. Express zones.", "twist", 10,
+ "A car already carries the floors it can reach, and the bank filters candidates by that before scoring, so a zoned car needs nothing new in the "
+ "car. The policy version is one decorator: ZonedDispatch is handed the normal rule and a map of car to floor range, drops every candidate whose "
+ "zone does not cover the call, and hands what is left to the rule underneath. If no car in the zone can take it, it returns null and the call waits "
+ "on the queue instead of being forced onto the wrong car. The sweep never hears about zones at all.",
+ X("express and zoned cars", "capacity and weight")),
+("Destination dispatch: riders type the floor they want on a keypad in the lobby.", "twist", 10,
+ "The keypad knows more than a button does, so use it. DestinationConsole takes \"I am on 0, I want 12\", tells the strategy where this rider is "
+ "going, and then presses the ordinary hall button. DestinationDispatch looks for a car it is already gathering riders for that same floor; if it "
+ "finds one, that car wins, otherwise it defers to the normal rule and remembers the pairing. Once a car is chosen the console presses the "
+ "destination inside it on the rider's behalf and tells them which car to stand in front of. It is still only a DispatchStrategy: neither the bank "
+ "nor the car changes a line.",
+ X("destination dispatch", "fire service")),
+("Capacity and weight: a full car should stop answering hall calls.", "twist", 10,
+ "Load is tracked beside the car so the base stays capacity-free. CarLoad counts riders and kilos and refuses a boarding that would pass either "
+ "limit, changing nothing when it refuses. CapacityAwareDispatch then filters full cars out of the candidates and defers to the rule underneath, "
+ "which is the same decorator shape as zoning. A full car keeps sweeping and keeps serving the stops it already owes; it simply stops being offered "
+ "new ones, and if every car is full the call waits on the queue.",
+ X("capacity and weight", "spread the work")),
+("Persist it. Or: one controller for forty buildings.", "twist", 5,
+ "The index of who owes which call goes behind a repository interface, and the in-memory map becomes one implementation. The services do not "
+ "change. The claim, which today is a put under a lock, becomes a conditional update: set the car id on that call's row where it is still null. One "
+ "row updated means this controller won it, zero rows means another controller did and it must pick again. That is the database's compare-and-set, "
+ "the same idea as the lock, one atomic step deciding the winner, and it is what lets two controllers share one bank.",
+ XE("persistence")),
+("Where does time come from, and how do you test a two-tick dwell without sleeping?", "design", 5,
+ "The bank has a Clock it was handed, and it stamps the moment a hall button was first pressed and works out the wait when the doors open; nothing "
+ "in the system reads the wall clock. The tick itself is the other half: a tick is one floor or one door cycle, so a test drives the world forward "
+ "by calling tick and asserting, with no sleeps and no flakiness. The failure test below hands in a clock it moves by five hundred milliseconds per "
+ "tick, presses floor 3 and checks the recorded wait is exactly two thousand milliseconds.",
+ "// the bank stamps the first press and closes the wait when the doors open, both from the injected clock\n"
+ "raisedAtMs.putIfAbsent(call, clock.nowMs());              // in requestHall, under the lock\n"
+ "Long raised = raisedAtMs.remove(served);                  // in tick(), when a car served it\n"
+ "if (raised != null) { totalWaitMs += now - raised; servedCalls++; }\n\n"
+ + block(T, "        // 8. waiting time is read", "        System.out.println(failures")),
+("Which pattern is where, and why did each one earn its place?", "design", 5,
+ "None of them was chosen up front; each is what a move produced. Strategy is move 3: which car answers and how long the doors stay open are rules "
+ "that will change, so each sits behind a one-method interface the bank is handed. Decorator is zoning and capacity: both filter the candidates and "
+ "then defer to the rule underneath rather than replacing it. Observer is move 3 as well, and move 4 is why it is published after the lock: the bank "
+ "announces that a car changed and has no idea what a panel is. State is move 6: the car's life written down, with the rule that a tick is a door "
+ "cycle or a floor. Singleton is deliberately absent, because one controller may run several banks. Factory has not earned a place yet: it does the "
+ "day a building is read from configuration.",
+ "// Strategy: a rule behind an interface, handed in\ninterface DispatchStrategy { ElevatorCar pick(List<ElevatorCar> cars, HallCall call); }\n"
+ "void configure(DispatchStrategy d, DoorPolicy p) { this.dispatch = d; this.doorPolicy = p; }\n\n"
+ "// Decorator: filter the candidates, then defer to the rule underneath\n"
+ "class ZonedDispatch implements DispatchStrategy { private final DispatchStrategy base; /* ... base.pick(allowed, call) */ }\n\n"
+ "// Observer: the bank announces; it does not know what a screen is\n"
+ "interface ElevatorObserver { void onChange(CarSnapshot s); }\n"
+ "for (CarSnapshot s : snaps) for (ElevatorObserver o : observers) try { o.onChange(s); } catch (RuntimeException e) { /* logged */ }   // after unlock\n\n"
+ "// State: the car's life, and the rule that one tick is one thing\n"
+ "enum CarState { IDLE, MOVING_UP, MOVING_DOWN, DOORS_OPEN, MAINTENANCE }\n"
+ "if (doors == DoorState.OPEN) { /* the doors own this tick; the car does not move */ }\n"),
+("Which SOLID letter is where in this code?", "design", 5,
+ "S: each class has one reason to change. StopSet owns the sweep questions, ElevatorCar owns its own physics, ElevatorSystem owns dispatch and the "
+ "lock, a strategy owns the cost; nobody does two of those. O: up-peak, zoning and capacity were each a new class and one changed line, and the bank "
+ "never opened. L: any DispatchStrategy drops in and the bank never checks which one it got. I: the four interfaces have one method each, so a test "
+ "fake is a lambda. D: the bank depends on the interfaces it is handed in configure and setClock, which is exactly why the failure tests can hand it "
+ "a clock they control and a panel that throws.",
+ "// S: one reason to change each\nclass StopSet { /* the sweep questions */ }   class ElevatorCar { /* its own physics */ }   class ElevatorSystem { /* dispatch + the lock */ }\n"
+ "// O: new behaviour = new class, one changed line, nothing opened\nbank.configure(new ZonedDispatch(new NearestCarStrategy(0, 19), zones), new LobbyDwellPolicy(0, 3, 1));\n"
+ "// L: any implementation drops in; the bank never checks the concrete type\nElevatorCar chosen = dispatch.pick(eligible, call);\n"
+ "// I: one method per interface\ninterface DoorPolicy { int dwellTicks(int carId, int floor); }\n"
+ "// D: depend on the interface, hand in the implementation; tests hand in fakes\nbank.setClock(() -> now[0]);   bank.addObserver(s -> { throw new RuntimeException(\"panel is down\"); });\n"),
+("Enum states or ElevatorCar subclasses? Where would you use a Factory?", "design", 3,
+ "Enum, until a state gains behaviour of its own. IDLE, MOVING_UP, DOORS_OPEN and MAINTENANCE differ only in what the next tick may do, which is "
+ "data: a few branches in one method you can read end to end. A subclass pays when a kind of car really behaves differently, such as a freight car "
+ "with its own door timing and a key switch, and even then the cheap version is a different DoorPolicy rather than a new class of car. Factory earns "
+ "its place when cars and zones are built from a configuration file: a registry that maps \"freight\" to a constructor turns adding a kind into one "
+ "registration instead of a growing switch.",
+ "// data, not classes: the state only decides what the next tick may do\nenum CarState { IDLE, MOVING_UP, MOVING_DOWN, DOORS_OPEN, MAINTENANCE }\n"
+ "if (doors == DoorState.OPEN) { /* close */ } else if (stops.servesOnLeg(floor, heading)) { /* open */ } else { floor += heading.delta(); }\n\n"
+ "// the cheap version of a 'different kind of car' is a different rule, not a subclass\nbank.configure(dispatch, new LobbyDwellPolicy(0, 3, 1));\n\n"
+ "// a factory only once cars are built from strings: a registry, so a new kind is one registration\n"
+ "Map<String, Function<Integer, ElevatorCar>> registry = Map.of(\"freight\", id -> new ElevatorCar(id, 0, 5, 0));\n"
+ "ElevatorCar c = registry.get(kind).apply(nextId);\n"),
+]
+
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your five to eight clarifying questions; then type in the order of Main.java: the three enums, the two records '
+ '(HallCall and CarSnapshot), StopSet with its four questions, ElevatorCar with accept, pressFloor and step, the two rule interfaces with one '
+ 'implementation each, the two observers, ElevatorSystem with its lock and the order inside requestHall, the thin panels, and a main that ticks '
+ 'the world and races forty threads at one button.</div></div>')
+
+spec = dict(
+    slug="elevator",
+    title="Elevator System",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: a tick-by-tick demo, 8 failure tests and a 40-thread race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead="Run these on any LLD (a lift bank, a parking lot, BookMyShow, Splitwise) and the class diagram, the lock, the tests, the "
+                    "patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is named "
+                    "before the move that produced it.",
+    moves=MOVES,
+    uml_svg=UMLSVG,
+    how_to_read=HOW_TO_READ,
+    code_intro="Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each class and method says "
+               "what it does and what it guarantees; read only those first for the shape, then the bodies for the mechanics. Each copy button "
+               "copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up's reference code, with an ExtDemo main "
+               "that runs them all) and FailureTests.java (eight claims proven; "
+               "<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).",
+    files=[("Main.java", M), ("Extensions.java", E), ("FailureTests.java", T)],
+    test_class="FailureTests",
+    followups=FU,
+    implement_card_html=IMPLEMENT_CARD,
+)
+build(spec)

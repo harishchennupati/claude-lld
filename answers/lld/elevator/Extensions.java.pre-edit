@@ -1,0 +1,281 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Reference code for every follow-up on page 05. Each block is a new class behind an existing seam:
+// nothing in Main.java is edited to add any of them.
+
+// ---- ext: the 9am rule change. Idle cars wait in the lobby and up-calls from the lobby win.
+/**
+ * Morning rush: bias the score so an idle car near the lobby wins an up-call, and a car already carrying a
+ * crowd loses. Wraps the normal rule instead of replacing it, so the physics of the estimate stay shared.
+ */
+class UpPeakDispatch implements DispatchStrategy {
+    private final int bottom, top;
+    UpPeakDispatch(int bottom, int top) { this.bottom = bottom; this.top = top; }
+
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        ElevatorCar best = null; int bestScore = Integer.MAX_VALUE;
+        for (ElevatorCar c : cars) {
+            CarSnapshot s = c.snapshot();
+            int score = NearestCarStrategy.cost(s, call, bottom, top);     // reuse the normal estimate
+            if (call.floor() == bottom && s.heading() == Direction.IDLE) score -= 5;   // park the idle ones at the lobby
+            if (s.pendingStops() > 4) score += 3;                                      // spread the crowd
+            if (score < bestScore) { best = c; bestScore = score; }
+        }
+        return best;
+    }
+}
+
+// ---- ext: express and zoned cars. A decorator: filter the candidates, then defer to any scorer.
+/**
+ * Zoning: cars are allowed only inside their zone, so a candidate outside it is dropped before scoring. The
+ * scoring rule underneath is untouched, and the LOOK sweep never hears about zones at all.
+ */
+class ZonedDispatch implements DispatchStrategy {
+    private final DispatchStrategy base;
+    private final Map<Integer, int[]> zones;                       // carId -> {lowest floor, highest floor}
+    ZonedDispatch(DispatchStrategy base, Map<Integer, int[]> zones) { this.base = base; this.zones = zones; }
+
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        List<ElevatorCar> allowed = new ArrayList<>();
+        for (ElevatorCar c : cars) {
+            int[] z = zones.get(c.id);
+            if (z == null || (call.floor() >= z[0] && call.floor() <= z[1])) allowed.add(c);
+        }
+        return allowed.isEmpty() ? null : base.pick(allowed, call);   // null = nobody may take it; it waits
+    }
+}
+
+// ---- ext: capacity and weight. Load is tracked beside the car so the base stays capacity-free.
+/** Riders and kilos on board one car, and the two limits that stop it answering another hall call. */
+class CarLoad {
+    final int maxRiders, maxKg;
+    private int riders, kg;
+    CarLoad(int maxRiders, int maxKg) { this.maxRiders = maxRiders; this.maxKg = maxKg; }
+    /** Someone stepped in. Returns false, changing nothing, if the car is already at a limit. */
+    synchronized boolean board(int weightKg) {
+        if (riders + 1 > maxRiders || kg + weightKg > maxKg) return false;
+        riders++; kg += weightKg; return true;
+    }
+    synchronized void leave(int weightKg) { riders = Math.max(0, riders - 1); kg = Math.max(0, kg - weightKg); }
+    synchronized boolean full() { return riders >= maxRiders || kg >= maxKg; }
+}
+
+/** Skip cars that are full, then defer to the rule underneath. A full car keeps sweeping; it just stops answering. */
+class CapacityAwareDispatch implements DispatchStrategy {
+    private final DispatchStrategy base;
+    private final Map<Integer, CarLoad> load;
+    CapacityAwareDispatch(DispatchStrategy base, Map<Integer, CarLoad> load) { this.base = base; this.load = load; }
+
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        List<ElevatorCar> roomy = new ArrayList<>();
+        for (ElevatorCar c : cars) { CarLoad l = load.get(c.id); if (l == null || !l.full()) roomy.add(c); }
+        return roomy.isEmpty() ? null : base.pick(roomy, call);
+    }
+}
+
+// ---- ext: spread the work instead of racing for the nearest car
+/** Nearest car, with each stop it already owes counted as two extra floors. Long queues lose. */
+class LoadAwareDispatch implements DispatchStrategy {
+    private final int bottom, top, floorsPerStop;
+    LoadAwareDispatch(int bottom, int top, int floorsPerStop) { this.bottom = bottom; this.top = top; this.floorsPerStop = floorsPerStop; }
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        ElevatorCar best = null; int bestScore = Integer.MAX_VALUE;
+        for (ElevatorCar c : cars) {
+            CarSnapshot s = c.snapshot();
+            int score = NearestCarStrategy.cost(s, call, bottom, top) + floorsPerStop * s.pendingStops();
+            if (score < bestScore) { best = c; bestScore = score; }
+        }
+        return best;
+    }
+}
+
+// ---- ext: the door rule changes too. The lobby needs longer doors than floor seventeen.
+/** Longer dwell at the lobby, the normal dwell everywhere else. One class, one configure() line. */
+class LobbyDwellPolicy implements DoorPolicy {
+    private final int lobbyFloor, lobbyTicks, normalTicks;
+    LobbyDwellPolicy(int lobbyFloor, int lobbyTicks, int normalTicks) {
+        this.lobbyFloor = lobbyFloor; this.lobbyTicks = lobbyTicks; this.normalTicks = normalTicks;
+    }
+    public int dwellTicks(int carId, int floor) { return floor == lobbyFloor ? lobbyTicks : normalTicks; }
+}
+
+// ---- ext: destination dispatch -- riders type where they are going in the lobby
+/**
+ * Destination dispatch: the rider declares the floor they want before boarding, so riders going to the same
+ * place are grouped into one car. It is still just a DispatchStrategy: the bank and the cars do not change.
+ */
+class DestinationDispatch implements DispatchStrategy {
+    private final DispatchStrategy base;
+    private final Map<HallCall, Integer> declared = new ConcurrentHashMap<>();          // call -> where that rider is going
+    private final Map<Integer, Set<Integer>> collecting = new ConcurrentHashMap<>();    // carId -> destinations it is gathering
+    DestinationDispatch(DispatchStrategy base) { this.base = base; }
+
+    /** The console says where this rider is going, before the button reaches the bank. */
+    void declare(HallCall call, int destination) { declared.put(call, destination); }
+
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        Integer to = declared.get(call);
+        if (to != null)
+            for (ElevatorCar c : cars)
+                if (collecting.getOrDefault(c.id, Set.of()).contains(to)) return c;     // same destination -> same car
+        ElevatorCar chosen = base.pick(cars, call);
+        if (chosen != null && to != null)
+            collecting.computeIfAbsent(chosen.id, k -> ConcurrentHashMap.newKeySet()).add(to);
+        return chosen;
+    }
+}
+
+/** The lobby keypad: takes "I am on 0, I want 12", and answers with the car to board. */
+class DestinationConsole {
+    private final ElevatorSystem bank;
+    private final DestinationDispatch rule;
+    DestinationConsole(ElevatorSystem bank, DestinationDispatch rule) { this.bank = bank; this.rule = rule; }
+
+    /** Returns the car this rider should stand in front of, or -1 if every car is busy and they must wait. */
+    int enter(int from, int to) {
+        Direction dir = to > from ? Direction.UP : Direction.DOWN;
+        HallCall call = new HallCall(from, dir);
+        rule.declare(call, to);
+        int carId = bank.requestHall(from, dir);
+        if (carId >= 0) bank.requestCar(carId, to);        // the destination is known, so press it for them
+        return carId;
+    }
+}
+
+// ---- ext: fire service -- refuse new calls and drive every car to the recall floor
+/** While fire service is on, no car answers a hall call; the presses queue and are served after the release. */
+class RefuseAllCalls implements DispatchStrategy {
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) { return null; }
+}
+
+/**
+ * Fire recall: stop answering, drop every stop, send every car to the recall floor. Nothing new is invented
+ * here -- it is one strategy swap plus the bank's recallAll, and the waiting calls survive the whole thing.
+ */
+class FireService {
+    private final ElevatorSystem bank;
+    private final int recallFloor;
+    FireService(ElevatorSystem bank, int recallFloor) { this.bank = bank; this.recallFloor = recallFloor; }
+
+    /** Engage: hall calls stop being answered and every car heads for the recall floor. */
+    void engage(DoorPolicy doors) { bank.configure(new RefuseAllCalls(), doors); bank.recallAll(recallFloor); }
+    /** True once every car is standing at the recall floor. */
+    boolean complete() {
+        for (CarSnapshot s : bank.snapshots()) if (s.floor() != recallFloor) return false;
+        return true;
+    }
+    /** Release: the normal rule comes back and the queued calls are picked up on the next tick. */
+    void release(DispatchStrategy normal, DoorPolicy doors) { bank.configure(normal, doors); }
+}
+
+// ---- ext: the cheap query -- "how long until a car reaches 7?" answered off snapshots, no lock
+/**
+ * The lobby board. It reads the published snapshots and scores them with the dispatcher's own cost function,
+ * so the number a rider is shown and the decision the bank made can never disagree.
+ */
+class EtaBoard {
+    private final ElevatorSystem bank;
+    private final int bottom, top;
+    private final long msPerFloor;
+    EtaBoard(ElevatorSystem bank, int bottom, int top, long msPerFloor) {
+        this.bank = bank; this.bottom = bottom; this.top = top; this.msPerFloor = msPerFloor;
+    }
+    /** Milliseconds until the soonest car could open its doors there. O(cars), no lock, no scan of stops. */
+    long etaMs(int floor, Direction direction) {
+        HallCall call = new HallCall(floor, direction);
+        int best = Integer.MAX_VALUE;
+        for (CarSnapshot s : bank.snapshots()) {                       // snapshots() reads volatile fields only
+            if (s.state() == CarState.MAINTENANCE) continue;
+            best = Math.min(best, NearestCarStrategy.cost(s, call, bottom, top));
+        }
+        return best == Integer.MAX_VALUE ? -1 : best * msPerFloor;
+    }
+}
+
+// ---- ext: persistence -- the assignment index becomes a repository, and the claim becomes a conditional UPDATE
+/**
+ * Who owes which call, behind an interface so it can live in a database when one controller serves forty
+ * buildings. claim() is the whole invariant: exactly one car may win a call.
+ */
+interface AssignmentRepository {
+    /** Claim the call for this car. False means another controller already claimed it; nothing was written. */
+    boolean claim(HallCall call, int carId);
+    /** Give the call up: it was served, or the car died. */
+    void release(HallCall call);
+    /** Which car owes it, if any. */
+    Optional<Integer> owner(HallCall call);
+}
+
+/** The in-memory one; putIfAbsent is compare-and-set, the same idea as the lock. */
+class InMemoryAssignmentRepository implements AssignmentRepository {
+    private final Map<HallCall, Integer> rows = new ConcurrentHashMap<>();
+    public boolean claim(HallCall call, int carId) { return rows.putIfAbsent(call, carId) == null; }
+    public void release(HallCall call)             { rows.remove(call); }
+    public Optional<Integer> owner(HallCall call)  { return Optional.ofNullable(rows.get(call)); }
+}
+// the same claim in SQL, once two controllers run on two machines:
+// UPDATE hall_call SET car_id = ? WHERE building = ? AND floor = ? AND direction = ? AND car_id IS NULL;
+//   -- 1 row updated = this controller won it;  0 rows = the other one did, and it must pick again
+
+/** Runs every extension once so the file is proven, not just written. */
+class ExtDemo {
+    public static void main(String[] args) {
+        int bottom = 0, top = 19;
+        List<ElevatorCar> cars = List.of(new ElevatorCar(0, bottom, top, 0),
+                                         new ElevatorCar(1, bottom, top, 9),
+                                         new ElevatorCar(2, bottom, top, 18));
+        ElevatorSystem bank = new ElevatorSystem(cars, bottom, top);
+        DispatchStrategy nearest = new NearestCarStrategy(bottom, top);
+
+        // 1. the 9am rule change: a new class and one configure line
+        bank.configure(new UpPeakDispatch(bottom, top), new LobbyDwellPolicy(0, 3, 1));
+        System.out.println("up-peak: a lobby up-call went to car " + bank.requestHall(0, Direction.UP));
+
+        // 2. zoning: cars 0-1 serve the low rise, car 2 the high rise
+        Map<Integer, int[]> zones = Map.of(0, new int[]{0, 9}, 1, new int[]{0, 9}, 2, new int[]{10, 19});
+        bank.configure(new ZonedDispatch(nearest, zones), new FixedDwellPolicy(1));
+        System.out.println("zoned: floor 15 went to car " + bank.requestHall(15, Direction.DOWN)
+                         + ", floor 4 went to car " + bank.requestHall(4, Direction.UP));
+
+        // 3. capacity: a full car is skipped, and the one with room answers
+        Map<Integer, CarLoad> load = new HashMap<>();
+        for (ElevatorCar c : cars) load.put(c.id, new CarLoad(8, 680));
+        while (load.get(1).board(70)) { }                         // car 1 is now full
+        bank.configure(new CapacityAwareDispatch(nearest, load), new FixedDwellPolicy(1));
+        System.out.println("capacity: car 1 is full, so floor 9 went to car " + bank.requestHall(9, Direction.UP));
+
+        // 4. load-aware: the car with the shortest queue wins a tie
+        bank.configure(new LoadAwareDispatch(bottom, top, 2), new FixedDwellPolicy(1));
+        System.out.println("load-aware: floor 12 went to car " + bank.requestHall(12, Direction.UP));
+
+        // 5. destination dispatch: two riders bound for 17 are grouped into one car
+        DestinationDispatch dd = new DestinationDispatch(nearest);
+        bank.configure(dd, new FixedDwellPolicy(1));
+        DestinationConsole console = new DestinationConsole(bank, dd);
+        int first = console.enter(0, 17), second = console.enter(0, 17);
+        System.out.println("destination dispatch: both riders for floor 17 board car " + first
+                         + " / " + second + " (must be the same car)");
+
+        // 6. the cheap query, off snapshots and with no lock
+        EtaBoard board = new EtaBoard(bank, bottom, top, 2000);
+        System.out.println("eta to floor 7 going up: " + board.etaMs(7, Direction.UP) + " ms");
+
+        // 7. fire service: refuse everything, empty the building, then release
+        FireService fire = new FireService(bank, 0);
+        fire.engage(new FixedDwellPolicy(1));
+        System.out.println("fire recall engaged; calls waiting = " + bank.pendingCalls().size());
+        for (int t = 0; t < 60 && !fire.complete(); t++) bank.tick();
+        System.out.println("every car at the recall floor: " + fire.complete());
+        fire.release(nearest, new FixedDwellPolicy(1));
+        bank.tick();
+        System.out.println("after the release the waiting calls are being served again: "
+                         + (bank.pendingCalls().size() < bank.outstandingCalls()));
+
+        // 8. persistence: the same claim, but a row instead of a map entry
+        AssignmentRepository repo = new InMemoryAssignmentRepository();
+        HallCall call = new HallCall(7, Direction.UP);
+        System.out.println("repository claim: first=" + repo.claim(call, 1) + " second=" + repo.claim(call, 2)
+                         + " owner=" + repo.owner(call).orElse(-1));
+    }
+}

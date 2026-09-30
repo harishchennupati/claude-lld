@@ -1,0 +1,422 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: 3-D Secure -- a pause in the middle of the life, and the resume that ends it
+/** A challenge the shopper must pass before the gateway will even try the acquirer. A URL and a one-time code. */
+record StepUpChallenge(String challengeId, String idemKey, String redirectUrl, String expectedOtp, long expiresMs) { }
+
+/**
+ * "Cards over five thousand need an OTP." The whole change is a pause between the request and the authorize call,
+ * so it sits in front of the gateway and nothing inside PaymentService moves.
+ *
+ * Inside the state machine the honest version is one more constant, PENDING_AUTH, with CREATED -> PENDING_AUTH ->
+ * AUTHORIZED | FAILED in the transition table -- two rows, and pay() returns before the acquirer is called. Here
+ * the challenge lives beside the gateway so the enum on page 03 stays exactly as it is drawn.
+ */
+class StepUpDesk {
+    private final PaymentService gateway; private final long thresholdPaise; private final Clock clock;
+    private final Map<String, StepUpChallenge> open = new ConcurrentHashMap<>();
+    private final AtomicLong nextId = new AtomicLong(1);
+
+    StepUpDesk(PaymentService gateway, long thresholdPaise, Clock clock) {
+        this.gateway = gateway; this.thresholdPaise = thresholdPaise; this.clock = clock;
+    }
+    /**
+     * Small card payments and every UPI payment go straight through. A big card payment comes back as a challenge
+     * instead of a payment: nothing has been claimed, nothing has been charged, and the idempotency key is still free.
+     */
+    Object pay(String idemKey, String merchantId, long paise, Currency currency, PaymentMethod method) {
+        if (method.type() != PaymentMethodType.CARD || paise <= thresholdPaise)
+            return gateway.pay(idemKey, merchantId, paise, currency, method);
+        StepUpChallenge c = new StepUpChallenge("chal_" + nextId.getAndIncrement(), idemKey,
+                "https://3ds.example/" + idemKey, "123456", clock.nowMs() + 300_000);
+        open.put(c.challengeId(), c);
+        return c;
+    }
+    /**
+     * The shopper typed the code. A wrong or expired code refuses and leaves the key free to try again; a right one
+     * enters the ordinary flow, which is why the whole of pay() -- idempotency, routing, the claim -- is unchanged.
+     */
+    Payment resume(String challengeId, String otp, String merchantId, long paise, Currency currency, PaymentMethod method) {
+        StepUpChallenge c = open.get(challengeId);
+        if (c == null) throw new PaymentRejected("no such challenge: " + challengeId);
+        if (clock.nowMs() > c.expiresMs()) { open.remove(challengeId); throw new PaymentRejected("the OTP page expired"); }
+        if (!c.expectedOtp().equals(otp)) throw new PaymentRejected("wrong OTP");
+        open.remove(challengeId);
+        return gateway.pay(c.idemKey(), merchantId, paise, currency, method);
+    }
+    /** How many shoppers are mid-OTP right now. A real one would expire these on a timer. */
+    int openChallenges() { return open.size(); }
+}
+
+// ---- ext: partial capture -- ship half the order today, the rest on Friday
+/**
+ * "Capture four hundred of the thousand you authorized." It is the mirror of the refund pair that is already in
+ * Main: a reserved counter and a settled counter, moved under the same lock, with the acquirer call between them.
+ *
+ * In Payment that is two more long fields, captureReserved and captureSettled, plus a PARTIALLY_CAPTURED self-loop
+ * in the transition table; refunds then check against captureSettled instead of the full amount. This desk keeps
+ * that book beside the payment so Main stays as page 03 draws it, and it enforces the same two rules: the captures
+ * never add up past what was authorized, and nothing is written until the acquirer says yes.
+ */
+class PartialCaptureDesk {
+    private final Map<String, long[]> captured = new ConcurrentHashMap<>();   // paymentId -> { settled paise }
+    private final PaymentProcessor acquirer;
+    PartialCaptureDesk(PaymentProcessor acquirer) { this.acquirer = acquirer; }
+
+    /** Capture part of an authorization. Returns the paise actually captured, or zero if it was refused. */
+    synchronized long capture(Payment p, long paise) {
+        long already = captured.computeIfAbsent(p.id(), k -> new long[1])[0];
+        if (paise <= 0 || already + paise > p.paise()) return 0;              // the check and the write are one step
+        ProcessorResult r = acquirer.capture(p.id() + ":cap" + already, p.acquirerRef(), paise);
+        if (r.outcome() != Outcome.CAPTURED) return 0;                        // refused: the book is untouched
+        captured.get(p.id())[0] = already + paise;
+        return paise;
+    }
+    /** How much of this authorization has actually moved. */
+    long capturedOf(String paymentId) { return captured.getOrDefault(paymentId, new long[1])[0]; }
+}
+
+// ---- ext: least-cost routing -- "stop routing by relationship, always take the cheapest healthy acquirer"
+/**
+ * A new routing rule is a new class and one line in configure(). Nothing in PaymentService is opened: it asks the
+ * policy for a list and tries them in order, and it has never known why the order is what it is.
+ */
+class LeastCostRouting implements RoutingPolicy {
+    public List<PaymentProcessor> route(PaymentMethodType type, Currency currency, long paise, List<PaymentProcessor> all) {
+        List<PaymentProcessor> able = new ArrayList<>();
+        for (PaymentProcessor p : all) if (p.supports(type, currency)) able.add(p);
+        able.sort(Comparator.comparingLong(PaymentProcessor::feeBps));        // cheapest first, the rest as failover
+        return able;
+    }
+}
+
+// ---- ext: the card-testing rule -- one class that is both a rule and a listener
+/**
+ * "Card testing hit us over the weekend: block a token after three declines in a minute." It looks like it touches
+ * the risk check, the failure path and the wiring. It touches none of them. The risk chain already asks every rule
+ * the same question and the listener bus already announces every failure, so the new rule is one class that
+ * implements both interfaces and one line that registers it twice.
+ */
+class CardTestingRule implements RiskRule, PaymentListener {
+    private final PaymentService gateway; private final int maxDeclines; private final long windowMs;
+    private final Map<String, Deque<Long>> declines = new ConcurrentHashMap<>();
+
+    CardTestingRule(PaymentService gateway, int maxDeclines, long windowMs) {
+        this.gateway = gateway; this.maxDeclines = maxDeclines; this.windowMs = windowMs;
+    }
+    /** The rule half: count this token's recent declines and refuse if there are too many. Reads only. */
+    public void check(String merchantId, long paise, PaymentMethod method, long nowMs) {
+        Deque<Long> recent = declines.get(method.token());
+        if (recent == null) return;
+        synchronized (recent) {
+            while (!recent.isEmpty() && nowMs - recent.peekFirst() > windowMs) recent.pollFirst();
+            if (recent.size() >= maxDeclines)
+                throw new PaymentRejected("card testing: " + recent.size() + " declines in " + (windowMs / 1000) + "s");
+        }
+    }
+    /**
+     * The listener half: a payment an ACQUIRER declined adds a timestamp to that token's window. A payment this
+     * rule itself refused has no acquirer on it, which is how the rule avoids counting its own refusals.
+     */
+    public void onEvent(PaymentEvent e) {
+        if (e.state() != PaymentState.FAILED || e.acquirer().isEmpty()) return;
+        String token = gateway.payment(e.paymentId()).method().token();
+        Deque<Long> recent = declines.computeIfAbsent(token, k -> new ArrayDeque<>());
+        synchronized (recent) { recent.addLast(e.atMs()); }
+    }
+    /** How many declines this token has inside the window right now. For a fraud screen. */
+    int declinesFor(String token) {
+        Deque<Long> recent = declines.get(token);
+        return recent == null ? 0 : recent.size();
+    }
+}
+
+// ---- ext: tokenisation -- the card number never enters the gateway at all
+/**
+ * PCI scope, in one class. The vault is the only thing that has ever seen a card number; it hands back a token and
+ * a display string, and everything downstream -- Payment, the audit log, the merchant webhook, the database --
+ * holds only those. Nothing in Main needs a redaction rule because nothing in Main ever had the number.
+ */
+class CardVault {
+    private final Map<String, String> pans = new ConcurrentHashMap<>();       // token -> PAN, inside the vault only
+    private final AtomicLong nextId = new AtomicLong(1);
+
+    /** Swap a card number for a token. The only method in the system that takes a PAN as an argument. */
+    PaymentMethod tokenise(String pan) {
+        if (pan == null || pan.length() < 12) throw new IllegalArgumentException("not a card number");
+        String token = "tok_" + nextId.getAndIncrement();
+        pans.put(token, pan);
+        return new PaymentMethod(PaymentMethodType.CARD, token, "**** " + pan.substring(pan.length() - 4));
+    }
+    /** Only the acquirer adapter, inside the vault's blast radius, ever asks for this. */
+    String panFor(String token) { return pans.get(token); }
+}
+
+// ---- ext: chargebacks -- the issuer takes the money back forty days later
+/** One dispute: the issuer pulled this much back, on this day, for this reason. Linked to a payment, never inside it. */
+record Chargeback(String id, String paymentId, long paise, String reasonCode, long atMs) { }
+
+/**
+ * A chargeback is not a refund: the money is already gone when we hear about it, so there is nothing to call the
+ * acquirer about. It is a fact to record and subtract from what the merchant is owed. The payment's own state is
+ * untouched, which is why the ledger and the settlement job read this book as well as the payments.
+ */
+class ChargebackDesk {
+    private final PaymentService gateway;
+    private final Map<String, List<Chargeback>> byMerchant = new ConcurrentHashMap<>();
+    private final Map<String, Chargeback> byPayment = new ConcurrentHashMap<>();
+    private final AtomicLong nextId = new AtomicLong(1);
+    ChargebackDesk(PaymentService gateway) { this.gateway = gateway; }
+
+    /** Record a dispute. Refuses a second one on the same payment: an issuer pulls the money back once. */
+    Chargeback raise(String paymentId, long paise, String reasonCode, long atMs) {
+        Payment p = gateway.payment(paymentId);
+        if (paise > p.capturedPaise() - p.refundedPaise())
+            throw new PaymentRejected("a chargeback cannot exceed what is still held: "
+                + Money.fmt(p.capturedPaise() - p.refundedPaise()));
+        Chargeback c = new Chargeback("cb_" + nextId.getAndIncrement(), paymentId, paise, reasonCode, atMs);
+        if (byPayment.putIfAbsent(paymentId, c) != null) throw new PaymentRejected(paymentId + " is already disputed");
+        byMerchant.computeIfAbsent(p.merchantId(), k -> new CopyOnWriteArrayList<>()).add(c);
+        return c;
+    }
+    /** What this merchant has lost to disputes. Subtracted from the payout. */
+    long disputedPaise(String merchantId) {
+        long total = 0;
+        for (Chargeback c : byMerchant.getOrDefault(merchantId, List.of())) total += c.paise();
+        return total;
+    }
+}
+
+// ---- ext: settlement -- what actually leaves our bank account for the merchant at the end of the day
+/** One day's payout: what was captured, less refunds, less our fees, less disputes. The number the merchant sees. */
+record Payout(String merchantId, long grossPaise, long refundedPaise, long feePaise, long disputedPaise, long netPaise) { }
+
+/**
+ * The end-of-day sweep. It reads the merchant's own payment list off the index, so a merchant with a thousand
+ * payments costs a thousand reads and a merchant with none costs nothing: it never scans the whole gateway.
+ */
+class SettlementJob {
+    private final PaymentService gateway; private final ChargebackDesk disputes;
+    SettlementJob(PaymentService gateway, ChargebackDesk disputes) { this.gateway = gateway; this.disputes = disputes; }
+
+    /** Build today's payout for one merchant. */
+    Payout payoutFor(String merchantId) {
+        long gross = 0, refunded = 0, fee = 0;
+        for (Payment p : gateway.paymentsOf(merchantId)) {
+            if (p.capturedPaise() == 0) continue;                            // authorized but never captured
+            gross += p.capturedPaise(); refunded += p.refundedPaise(); fee += p.feePaise();
+        }
+        long disputed = disputes.disputedPaise(merchantId);
+        return new Payout(merchantId, gross, refunded, fee, disputed, gross - refunded - fee - disputed);
+    }
+}
+
+// ---- ext: the double-entry ledger -- another listener, and the gateway does not change
+/** One immutable line of the books: money in or out of one account, as part of one payment. */
+record LedgerLine(String paymentId, String account, long signedPaise, String memo) { }
+
+/**
+ * Every movement written twice, so the books always add up to zero. It is a listener, which is the whole point:
+ * accounting arrived after the design and cost one class and one addListener call. It is fed events, not payments,
+ * so it cannot change a payment even by accident.
+ */
+class DoubleEntryLedger implements PaymentListener {
+    private final List<LedgerLine> lines = new CopyOnWriteArrayList<>();
+    private final Set<String> seen = ConcurrentHashMap.newKeySet();          // paymentId:state, so a replay posts once
+
+    public void onEvent(PaymentEvent e) {
+        String once = e.paymentId() + ":" + e.state();
+        if (!seen.add(once)) return;                                         // at-least-once delivery, posted once
+        if (e.state() == PaymentState.CAPTURED) {
+            lines.add(new LedgerLine(e.paymentId(), "acquirer_receivable", e.capturedPaise(), "capture"));
+            lines.add(new LedgerLine(e.paymentId(), "merchant_payable", -e.capturedPaise(), "capture"));
+        } else if (e.state() == PaymentState.PARTIALLY_REFUNDED || e.state() == PaymentState.REFUNDED) {
+            lines.add(new LedgerLine(e.paymentId(), "merchant_payable", e.refundedPaise(), "refund"));
+            lines.add(new LedgerLine(e.paymentId(), "acquirer_receivable", -e.refundedPaise(), "refund"));
+        }
+    }
+    /** The books must always sum to zero. If they do not, a posting was written one-sided. */
+    long imbalance() {
+        long sum = 0;
+        for (LedgerLine l : lines) sum += l.signedPaise();
+        return sum;
+    }
+    /** Every line, oldest first. */
+    List<LedgerLine> lines() { return List.copyOf(lines); }
+}
+
+// ---- ext: persistence -- the claim becomes a conditional UPDATE, and the webhook becomes an outbox row
+/**
+ * What a database gives us for free. Each method is the row-level version of something the in-memory gateway does
+ * with a map or a lock, which is the point: the design does not change shape when it grows a database.
+ */
+interface PaymentRepository {
+    /** INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. False means somebody else owns this key. */
+    boolean insertIfAbsent(String idemKey, String paymentId, long paise);
+    /** UPDATE payments SET state = ? WHERE id = ? AND state = ?. The database's own compare-and-set. */
+    boolean claim(String paymentId, PaymentState from, PaymentState to);
+    /** UPDATE payments SET state = ? WHERE id = ? AND rank_reached < ?. Rank in the WHERE clause, not in the code. */
+    boolean settle(String paymentId, PaymentState outcome, int rank);
+    /** What the row says now. */
+    PaymentState stateOf(String paymentId);
+}
+
+/** An in-memory stand-in that obeys exactly the contract above, so the shape can be demonstrated without a server. */
+class InMemoryPaymentRepository implements PaymentRepository {
+    private record Row(String paymentId, long paise, PaymentState state, int rank) { }
+    private final Map<String, Row> rows = new ConcurrentHashMap<>();
+    private final Map<String, String> keys = new ConcurrentHashMap<>();      // the unique index on idempotency_key
+
+    public synchronized boolean insertIfAbsent(String idemKey, String paymentId, long paise) {
+        if (keys.putIfAbsent(idemKey, paymentId) != null) return false;
+        rows.put(paymentId, new Row(paymentId, paise, PaymentState.CREATED, 0));
+        return true;
+    }
+    public synchronized boolean claim(String paymentId, PaymentState from, PaymentState to) {
+        Row r = rows.get(paymentId);
+        if (r == null || r.state() != from) return false;                    // the WHERE clause did not match: 0 rows
+        rows.put(paymentId, new Row(paymentId, r.paise(), to, r.rank()));
+        return true;
+    }
+    public synchronized boolean settle(String paymentId, PaymentState outcome, int rank) {
+        Row r = rows.get(paymentId);
+        if (r == null || rank <= r.rank() || !r.state().canGoTo(outcome)) return false;
+        rows.put(paymentId, new Row(paymentId, r.paise(), outcome, rank));
+        return true;
+    }
+    public PaymentState stateOf(String paymentId) {
+        Row r = rows.get(paymentId);
+        return r == null ? null : r.state();
+    }
+}
+
+/**
+ * The merchant webhook, once there are two servers. Writing the outbox row in the same transaction as the payment
+ * is what makes delivery exactly-as-often-as-the-payment-happened: no payment without a row, no row without a
+ * payment. A worker drains it, and because the row carries the payment id and state, a double delivery is the same
+ * at-least-once problem the merchant already handles.
+ */
+class Outbox {
+    private final Deque<PaymentEvent> pending = new ConcurrentLinkedDeque<>();
+    private final AtomicInteger delivered = new AtomicInteger();
+
+    /** Written inside the payment's transaction, so it cannot be lost and cannot exist on its own. */
+    void enqueue(PaymentEvent e) { pending.addLast(e); }
+    /** The worker: take rows and post them, leaving the ones that fail for the next run. */
+    int drain(WebhookEndpoint endpoint, String url, int max) {
+        int sent = 0;
+        for (int i = 0; i < max; i++) {
+            PaymentEvent e = pending.pollFirst();
+            if (e == null) break;
+            if (endpoint.post(url, e)) { delivered.incrementAndGet(); sent++; }
+            else { pending.addFirst(e); break; }                              // still down: stop, keep the order
+        }
+        return sent;
+    }
+    /** How many rows are still waiting. */
+    int depth() { return pending.size(); }
+    /** How many have gone out. */
+    int delivered() { return delivered.get(); }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) {
+        long[] now = { 1_700_000_000_000L };
+        Clock clock = () -> now[0];
+        CardAcquirer hdfc = new CardAcquirer("HDFC", 180, Currency.INR);
+        CardAcquirer axis = new CardAcquirer("AXIS", 120, Currency.INR);
+        PaymentService gw = new PaymentService();
+        gw.setClock(clock);
+        gw.addProcessor(hdfc); gw.addProcessor(axis);
+        gw.register(new Merchant("m_shop", "Shop", "https://shop.example/hooks"));
+
+        // least-cost routing: AXIS is cheaper, so it goes first -- one new class, one line in configure()
+        gw.configure(new LeastCostRouting(), new BpsFee(0), new RetrySafeFailuresOnly(2), List.of());
+        CardVault vault = new CardVault();
+        PaymentMethod card = vault.tokenise("4111111111111111");
+        System.out.println("tokenised: " + card + "  (the gateway never sees the number)");
+        Payment cheap = gw.pay("k-1", "m_shop", Money.rupees("1000.00"), Currency.INR, card);
+        System.out.println("least cost picked: " + cheap.acquirer() + " at " + axis.feeBps() + " bp");
+
+        // 3-D Secure: a big card payment comes back as a challenge, and the OTP resumes the ordinary flow
+        StepUpDesk step = new StepUpDesk(gw, Money.rupees("5000.00"), clock);
+        Object small = step.pay("k-2", "m_shop", Money.rupees("400.00"), Currency.INR, card);
+        System.out.println("small payment went straight through: " + (small instanceof Payment));
+        Object big = step.pay("k-3", "m_shop", Money.rupees("9000.00"), Currency.INR, card);
+        StepUpChallenge chal = (StepUpChallenge) big;
+        System.out.println("big payment paused at: " + chal.redirectUrl());
+        try { step.resume(chal.challengeId(), "000000", "m_shop", Money.rupees("9000.00"), Currency.INR, card); }
+        catch (PaymentRejected e) { System.out.println("wrong OTP: " + e.getMessage()); }
+        Object big2 = step.pay("k-3", "m_shop", Money.rupees("9000.00"), Currency.INR, card);
+        Payment stepped = step.resume(((StepUpChallenge) big2).challengeId(), "123456", "m_shop",
+                                      Money.rupees("9000.00"), Currency.INR, card);
+        System.out.println("after the OTP: " + stepped.state() + " " + Money.fmt(stepped.paise()));
+
+        // partial capture: four hundred today, the rest never; the captures can never add up past the authorization
+        PartialCaptureDesk partial = new PartialCaptureDesk(axis);
+        System.out.println("captured 400 of 1000: " + Money.fmt(partial.capture(cheap, Money.rupees("400.00"))));
+        System.out.println("then tried 700 more: " + Money.fmt(partial.capture(cheap, Money.rupees("700.00")))
+            + " (refused; still " + Money.fmt(partial.capturedOf(cheap.id())) + " captured)");
+
+        // the card-testing rule: one class, registered as a rule and as a listener, nothing else edited
+        PaymentService guarded = new PaymentService();
+        CardTestingRule testing = new CardTestingRule(guarded, 3, 60_000);
+        guarded.setClock(clock);
+        guarded.addProcessor(hdfc);
+        guarded.configure(new LeastCostRouting(), new BpsFee(0), new RetrySafeFailuresOnly(1), List.of(testing));
+        guarded.addListener(testing);
+        guarded.register(new Merchant("m_t", "T", "https://t.example/hooks"));
+        hdfc.mode(VendorMode.DECLINE);
+        for (int i = 1; i <= 4; i++) {
+            Payment p = guarded.pay("t-" + i, "m_t", Money.rupees("10.00"), Currency.INR, card);
+            System.out.println("  attempt " + i + ": " + p.state() + " (" + p.reason() + ")");
+        }
+        hdfc.mode(VendorMode.HEALTHY);
+        System.out.println("declines counted for the token: " + testing.declinesFor(card.token())
+            + " (the fourth attempt never reached an acquirer)");
+
+        // the double-entry ledger and the settlement job, both bolted on afterwards
+        DoubleEntryLedger books = new DoubleEntryLedger();
+        PaymentService counted = new PaymentService();
+        counted.setClock(clock);
+        counted.addProcessor(new UpiSwitch("NPCI", 0));
+        counted.configure(new LeastCostRouting(), new BpsFee(Money.rupees("2.00")), new RetrySafeFailuresOnly(1), List.of());
+        counted.addListener(books);
+        counted.register(new Merchant("m_u", "U", "https://u.example/hooks"));
+        PaymentMethod upi = new PaymentMethod(PaymentMethodType.UPI, "a@okaxis", "a@okaxis");
+        Payment u1 = counted.pay("u-1", "m_u", Money.rupees("1000.00"), Currency.INR, upi);
+        counted.refund("ur-1", u1.id(), Money.rupees("250.00"));
+        ChargebackDesk disputes = new ChargebackDesk(counted);
+        disputes.raise(u1.id(), Money.rupees("100.00"), "10.4 fraud", now[0] + 40L * 86_400_000L);
+        Payout payout = new SettlementJob(counted, disputes).payoutFor("m_u");
+        System.out.println("payout: gross " + Money.fmt(payout.grossPaise()) + " refunds " + Money.fmt(payout.refundedPaise())
+            + " fees " + Money.fmt(payout.feePaise()) + " disputes " + Money.fmt(payout.disputedPaise())
+            + " net " + Money.fmt(payout.netPaise()));
+        System.out.println("ledger lines: " + books.lines().size() + ", imbalance: " + books.imbalance() + " (must be 0)");
+
+        // persistence: the same claim, as a conditional UPDATE, and the outbox that replaces the in-line webhook
+        PaymentRepository repo = new InMemoryPaymentRepository();
+        System.out.println("insert with a fresh key: " + repo.insertIfAbsent("ord-77", "pay_77", Money.rupees("500.00")));
+        System.out.println("insert with the same key: " + repo.insertIfAbsent("ord-77", "pay_78", Money.rupees("500.00")));
+        System.out.println("first claim wins:  " + repo.claim("pay_77", PaymentState.CREATED, PaymentState.PENDING));
+        System.out.println("second claim loses: " + repo.claim("pay_77", PaymentState.CREATED, PaymentState.PENDING));
+        System.out.println("settle CAPTURED: " + repo.settle("pay_77", PaymentState.CAPTURED, 2)
+            + ", a replayed AUTHORIZED after it: " + repo.settle("pay_77", PaymentState.AUTHORIZED, 1)
+            + ", row is " + repo.stateOf("pay_77"));
+
+        Outbox outbox = new Outbox();
+        boolean[] merchantUp = { false };
+        WebhookEndpoint endpoint = (url, e) -> merchantUp[0];
+        outbox.enqueue(new PaymentEvent("pay_77", "m_shop", PaymentState.CAPTURED, 50000, 50000, 0, "AXIS", "", now[0]));
+        outbox.enqueue(new PaymentEvent("pay_77", "m_shop", PaymentState.REFUNDED, 50000, 50000, 50000, "AXIS", "", now[0]));
+        System.out.println("merchant down, drained " + outbox.drain(endpoint, "u", 10) + ", depth " + outbox.depth());
+        merchantUp[0] = true;
+        System.out.println("merchant back, drained " + outbox.drain(endpoint, "u", 10) + ", depth " + outbox.depth());
+    }
+}

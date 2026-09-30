@@ -1,0 +1,227 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Targeted failure tests: each block proves one claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+    static Player seat(String name, char mark, int index, Cell... script) { return new Player(name, new Symbol(mark, index), new ScriptedStrategy(script)); }
+    static Game playOut(Game g) { while (!g.state().isTerminal()) g.playAuto(); return g; }
+
+    public static void main(String[] args) throws Exception {
+        GameService service = new GameService();
+
+        // 1. fifty threads stamp the SAME square in the same instant. Exactly one may be accepted: the
+        //    turn, the emptiness check and the stamp are one indivisible step inside the game's lock.
+        Player eve = seat("Eve", 'X', 0), fin = seat("Fin", 'O', 1);
+        Game race = service.newGame("race", 3, List.of(eve, fin), null);
+        Cell centre = new Cell(1, 1);
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        Map<String, Integer> outcome = new ConcurrentHashMap<>();
+        List<Future<?>> shots = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final Player who = (i % 2 == 0) ? eve : fin;
+            shots.add(pool.submit(() -> {
+                go.await();
+                try { race.play(who, centre); outcome.merge("accepted", 1, Integer::sum); }
+                catch (InvalidMoveException e) { outcome.merge("rejected", 1, Integer::sum); }
+                return null;
+            }));
+        }
+        go.countDown();
+        for (Future<?> f : shots) f.get();
+        pool.shutdown();
+        check(outcome.getOrDefault("accepted", 0) == 1, "exactly one of fifty concurrent moves was accepted");
+        check(outcome.getOrDefault("rejected", 0) == 49, "the other forty-nine were refused with a typed reason");
+        check(race.filled() == 1 && race.history().size() == 1, "one mark on the board and one move in the history");
+        check(race.currentPlayer() == fin, "the turn rotated exactly once");
+
+        // 2. every rejection is typed, and writes nothing at all.
+        Player ann = seat("Ann", 'X', 0), bob = seat("Bob", 'O', 1);
+        Game g = service.newGame("rejects", 3, List.of(ann, bob), null);
+        g.play(ann, new Cell(0, 0));
+        String board = g.render(); int moves = g.history().size(); Player turn = g.currentPlayer();
+        check(reasonOf(() -> g.play(ann, new Cell(0, 1))) == InvalidMoveException.Reason.NOT_YOUR_TURN, "the wrong seat is refused: NOT_YOUR_TURN");
+        check(reasonOf(() -> g.play(bob, new Cell(0, 0))) == InvalidMoveException.Reason.CELL_TAKEN, "an occupied square is refused: CELL_TAKEN");
+        check(reasonOf(() -> g.play(bob, new Cell(3, 0))) == InvalidMoveException.Reason.OUT_OF_BOUNDS, "a square off the board is refused: OUT_OF_BOUNDS");
+        check(g.render().equals(board) && g.history().size() == moves && g.currentPlayer() == turn,
+              "after three rejections the board, the history and the turn are exactly as they were");
+        Game over = playOut(service.newGame("over", 3, List.of(seat("Cat", 'X', 0, new Cell(0, 0), new Cell(1, 0), new Cell(2, 0)),
+                                                              seat("Dan", 'O', 1, new Cell(0, 1), new Cell(1, 1))), null));
+        check(over.state() == GameState.WON, "the scripted column win ended the game");
+        check(reasonOf(() -> over.play(over.players().get(1), new Cell(2, 2))) == InvalidMoveException.Reason.GAME_OVER, "a move after the end is refused: GAME_OVER");
+
+        // 3. the win rule throws halfway through a move. The mark must come back off: a failed move
+        //    leaves the board, the turn and the history exactly as they were, and the caller can retry.
+        boolean[] explode = { false };
+        WinStrategy flaky = (b, m) -> { if (explode[0]) throw new IllegalStateException("the rule exploded"); return false; };
+        Player gil = seat("Gil", 'X', 0), hal = seat("Hal", 'O', 1);
+        Game boom = new Game("boom", 3, List.of(gil, hal));
+        boom.configure(flaky, System::currentTimeMillis);
+        boom.play(gil, new Cell(0, 0));
+        boom.play(hal, new Cell(1, 1));
+        String beforeBoard = boom.render(); int beforeMoves = boom.history().size(); Player beforeTurn = boom.currentPlayer();
+        explode[0] = true;
+        boolean threw = false;
+        try { boom.play(gil, new Cell(0, 2)); } catch (IllegalStateException e) { threw = true; }
+        check(threw, "a win rule that throws propagates to the caller");
+        check(boom.at(new Cell(0, 2)) == null, "the square the failed move touched is empty again");
+        check(boom.render().equals(beforeBoard) && boom.history().size() == beforeMoves && boom.currentPlayer() == beforeTurn,
+              "board, history and turn are untouched, so the caller simply plays again");
+        explode[0] = false;
+        boom.play(gil, new Cell(0, 2));
+        check(boom.history().size() == beforeMoves + 1, "and the retry lands normally");
+
+        // 4. undo rewinds five things together: the board, the rule's counters, the sequence, the turn
+        //    and the outcome. Replaying the same square must win again, which only works if the counters
+        //    were decremented -- the classic bug is a cleared square and a rule that still counts three.
+        Player ida = seat("Ida", 'X', 0, new Cell(0, 0), new Cell(1, 0), new Cell(2, 0), new Cell(3, 0));
+        Player jon = seat("Jon", 'O', 1, new Cell(0, 1), new Cell(1, 1), new Cell(2, 1));
+        Game col = playOut(service.newGame("undo", 4, List.of(ida, jon), null));
+        check(col.state() == GameState.WON && col.winner() == ida, "Ida won the column on a 4x4");
+        col.undo();
+        check(col.state() == GameState.IN_PROGRESS && col.winner() == null, "undo left the terminal state and cleared the winner");
+        check(col.currentPlayer() == ida && col.history().size() == 6, "the turn went back to Ida and the history is six moves");
+        check(col.at(new Cell(3, 0)) == null, "the square is empty again");
+        col.play(ida, new Cell(3, 0));
+        check(col.state() == GameState.WON && col.winner() == ida, "replaying the same square wins again: the counters were rewound");
+
+        // 5. the win check runs BEFORE the full-board check, so a line completed on the last free square
+        //    is a win and not a draw. A full board with no line is a real draw.
+        Game last = playOut(service.newGame("last", 3, List.of(
+                seat("Kim", 'X', 0, new Cell(0, 0), new Cell(0, 2), new Cell(2, 0), new Cell(2, 2), new Cell(1, 1)),
+                seat("Lee", 'O', 1, new Cell(0, 1), new Cell(1, 0), new Cell(1, 2), new Cell(2, 1))), null));
+        check(last.filled() == 9 && last.state() == GameState.WON, "a line completed on the ninth square is a WIN, not a DRAW");
+        Game tie = playOut(service.newGame("draw", 3, List.of(
+                seat("Mia", 'X', 0, new Cell(0, 0), new Cell(0, 2), new Cell(1, 0), new Cell(2, 1), new Cell(2, 2)),
+                seat("Nik", 'O', 1, new Cell(0, 1), new Cell(1, 1), new Cell(1, 2), new Cell(2, 0))), null));
+        check(tie.filled() == 9 && tie.state() == GameState.DRAW && tie.winner() == null, "a full board with no line is a DRAW with no winner");
+
+        // 6. the four counters see all four kinds of line, without ever scanning the board -- and the plain
+        //    O(n) scan rule, handed to the same Game, reaches exactly the same result: the rule is swappable.
+        check(winnerName(lineGame(service, "row",  new Cell(0, 0), new Cell(0, 1), new Cell(0, 2), new Cell(1, 0), new Cell(1, 1))).equals("Row"), "a row win is found by the counters");
+        check(winnerName(lineGame(service, "col",  new Cell(0, 0), new Cell(1, 0), new Cell(2, 0), new Cell(0, 1), new Cell(1, 1))).equals("Row"), "a column win is found by the counters");
+        check(winnerName(lineGame(service, "diag", new Cell(0, 0), new Cell(1, 1), new Cell(2, 2), new Cell(0, 1), new Cell(0, 2))).equals("Row"), "a diagonal win is found by the counters");
+        check(winnerName(lineGame(service, "anti", new Cell(0, 2), new Cell(1, 1), new Cell(2, 0), new Cell(0, 0), new Cell(0, 1))).equals("Row"), "an anti-diagonal win is found by the counters");
+        Cell[] sameXs = { new Cell(0, 0), new Cell(0, 2), new Cell(2, 0), new Cell(2, 2), new Cell(1, 1) };
+        Cell[] sameOs = { new Cell(0, 1), new Cell(1, 0), new Cell(1, 2), new Cell(2, 1) };
+        Game counted = playOut(service.newGame("counted", 3, List.of(seat("Uma", 'X', 0, sameXs), seat("Vik", 'O', 1, sameOs)), null));
+        Game scanned = playOut(service.newGame("scanned", 3, List.of(seat("Uma", 'X', 0, sameXs), seat("Vik", 'O', 1, sameOs)), new ScanWinStrategy()));
+        check(counted.state() == scanned.state() && winnerName(counted).equals(winnerName(scanned))
+              && counted.history().size() == scanned.history().size() && counted.render().equals(scanned.render()),
+              "the O(n) scan rule and the O(1) counters agree: same winner, same move, same board");
+        check(reasonOf(() -> scanned.play(scanned.players().get(1), new Cell(0, 0))) == InvalidMoveException.Reason.GAME_OVER,
+              "and swapping the rule changed nothing else in the game");
+
+        // 7. observers run after the unlock: a broken one cannot break a move, and a slow one cannot
+        //    delay it once it is wrapped in the async decorator.
+        Game watched = service.newGame("watched", 3, List.of(seat("Ola", 'X', 0), seat("Pat", 'O', 1)), null);
+        watched.addObserver(new GameObserver() {
+            @Override public void onMove(Game g2, Move m) { throw new RuntimeException("this spectator is broken"); }
+            @Override public void onStateChange(Game g2, GameState f, GameState t) { throw new RuntimeException("so is this callback"); }
+        });
+        watched.play(watched.players().get(0), new Cell(0, 0));
+        check(watched.history().size() == 1 && watched.state() == GameState.IN_PROGRESS, "a spectator that throws cannot break the move");
+        CountDownLatch hold = new CountDownLatch(1), delivered = new CountDownLatch(1);
+        AsyncObserver async = new AsyncObserver(new GameObserver() {
+            @Override public void onMove(Game g2, Move m) { try { hold.await(); } catch (InterruptedException ignored) { } delivered.countDown(); }
+        }, 16);
+        watched.addObserver(async);
+        long t0 = System.nanoTime();
+        watched.play(watched.players().get(1), new Cell(1, 1));
+        long tookMs = (System.nanoTime() - t0) / 1_000_000;
+        check(tookMs < 500 && delivered.getCount() == 1, "the move returned in " + tookMs + " ms, without waiting for a blocked spectator");
+        hold.countDown();
+        check(delivered.await(3, TimeUnit.SECONDS), "and the spectator is told anyway, on its own thread");
+        async.close();
+
+        // 8. the twists really are new classes: four-in-a-row on a 5x5 is one, and the unbeatable bot is
+        //    another. Neither touches Board, Game, Player or any observer.
+        Game five = playOut(service.newGame("k4", 5, List.of(
+                seat("Rae", 'X', 0, new Cell(2, 1), new Cell(2, 2), new Cell(2, 3), new Cell(2, 4)),
+                seat("Sam", 'O', 1, new Cell(0, 0), new Cell(0, 1), new Cell(0, 2))), new KInARowWinStrategy(4)));
+        check(five.state() == GameState.WON && five.history().size() == 7, "four in a row on a 5x5 wins, with the same Game and Board");
+        int losses = 0;
+        for (int s = 0; s < 5; s++) {
+            Symbol x = new Symbol('X', 0), o = new Symbol('O', 1);
+            Player brain = new Player("Mini", x, new MinimaxStrategy(o));
+            Player dice = new Player("Dice", o, new RandomBotStrategy(s));
+            Game mm = playOut(service.newGame("mm" + s, 3, List.of(brain, dice), null));
+            if (mm.winner() == dice) losses++;
+        }
+        check(losses == 0, "the minimax bot did not lose a single one of five 3x3 games");
+
+        // 9. the edges: an abandoned game stays abandoned, every undo is announced, a move that lands just
+        //    before the clock's tick beats it, and a saved game comes back even when two seats share a name.
+        Player kai = seat("Kai", 'X', 0), lia = seat("Lia", 'O', 1);
+        Game quit = service.newGame("quit", 3, List.of(kai, lia), null);
+        quit.play(kai, new Cell(0, 0));
+        quit.play(lia, new Cell(1, 1));
+        quit.abandon("Lia disconnected");
+        boolean refused = false;
+        try { quit.undo(); } catch (IllegalStateException e) { refused = true; }
+        check(refused && quit.state() == GameState.ABANDONED && quit.history().size() == 2,
+              "undo cannot revive an abandoned game, and no move is lost");
+
+        List<String> heard = new CopyOnWriteArrayList<>();
+        Game told = service.newGame("told", 3, List.of(seat("Max", 'X', 0), seat("Noa", 'O', 1)), null);
+        told.addObserver(new GameObserver() {
+            @Override public void onUndo(Game g2, Move m) { heard.add("undo " + m.cell()); }
+        });
+        told.play(told.players().get(0), new Cell(0, 0));
+        told.play(told.players().get(1), new Cell(2, 2));
+        told.undo();                                                   // mid-game: the state stays IN_PROGRESS
+        check(heard.equals(List.of("undo (2,2)")), "a mid-game undo is announced, so a spectator's board loses the mark too");
+
+        long[] now = { 1_000_000L };
+        GameService clocked = new GameService();
+        clocked.setClock(() -> now[0]);
+        Player ora = seat("Ora", 'X', 0), pim = seat("Pim", 'O', 1);
+        Game timed = clocked.newGame("timed", 3, List.of(ora, pim), null);
+        TurnTimer timer = new TurnTimer(clocked, 30_000);
+        CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
+        timed.addObserver(new GameObserver() {                         // holds up the watchers of Pim's move
+            @Override public void onMove(Game g2, Move m) {
+                if (m.player() == pim) { held.countDown(); try { release.await(); } catch (InterruptedException ignored) { } }
+            }
+        });
+        timed.play(ora, new Cell(0, 0));                               // Pim's turn starts at 0 s
+        now[0] += 29_000;
+        Thread late = new Thread(() -> timed.play(pim, new Cell(1, 1)));
+        late.start();
+        held.await();                                                  // Pim's move is in at 29 s; its watchers are not told yet
+        now[0] += 2_000;                                               // the tick lands at 31 s
+        int endedEarly = timer.tick();
+        release.countDown();
+        late.join();
+        check(endedEarly == 0 && timed.state() == GameState.IN_PROGRESS, "a seat that moved at 29 s is not timed out by a tick at 31 s");
+        now[0] += 30_000;                                              // Ora has now thought for 32 s
+        check(timer.tick() == 1 && timed.state() == GameState.ABANDONED, "a seat that really ran out is");
+
+        Game twins = service.newGame("twins", 3, List.of(seat("Sam", 'X', 0), seat("Sam", 'O', 1)), null);
+        twins.play(twins.players().get(0), new Cell(0, 0));
+        twins.play(twins.players().get(1), new Cell(1, 1));
+        twins.play(twins.players().get(0), new Cell(0, 1));
+        boolean restored;
+        try {
+            Game back = MoveLog.load(service, "twins-back", 3, List.of(seat("Sam", 'X', 0), seat("Sam", 'O', 1)), null, MoveLog.save(twins));
+            restored = back.render().equals(twins.render()) && back.history().size() == 3;
+        } catch (RuntimeException e) { restored = false; }
+        check(restored, "a game whose two seats are both called Sam is restored square for square");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+
+    /** Runs something that should be refused, and returns the reason it was refused with. */
+    static InvalidMoveException.Reason reasonOf(Runnable r) {
+        try { r.run(); return null; } catch (InvalidMoveException e) { return e.reason; }
+    }
+    /** A 3x3 where "Row" plays three scripted squares and "Col" plays two: the fifth move is the win. */
+    static Game lineGame(GameService s, String id, Cell a, Cell b, Cell c, Cell d, Cell e) {
+        return playOut(s.newGame(id, 3, List.of(seat("Row", 'X', 0, a, b, c), seat("Col", 'O', 1, d, e)), null));
+    }
+    /** The winner's name, or "none". */
+    static String winnerName(Game g) { return g.winner() == null ? "none" : g.winner().name(); }
+}

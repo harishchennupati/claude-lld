@@ -1,0 +1,282 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Targeted failure tests: each block proves one claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    /** Retries and defers run on the calling thread, so the whole suite is deterministic and never sleeps. */
+    static final Scheduler INLINE = (task, delayMs) -> task.run();
+
+    /** Every state every record ever reached, in order. */
+    static final class Trace implements DeliveryListener {
+        final Map<String, List<DeliveryState>> byId = new ConcurrentHashMap<>();
+        public void onTransition(DeliveryRecord r, DeliveryState from, DeliveryState to, String detail) {
+            byId.computeIfAbsent(r.notification().id(), k -> Collections.synchronizedList(new ArrayList<>())).add(to);
+        }
+        List<DeliveryState> of(DeliveryRecord r) { return byId.getOrDefault(r.notification().id(), List.of()); }
+    }
+
+    /** An adapter that blows up on its first call for a key, the way a null pointer in a client library does. */
+    static final class BoomSender implements Sender {
+        private final ConcurrentHashMap<String, AtomicInteger> calls = new ConcurrentHashMap<>();
+        public Channel channel() { return Channel.PUSH; }
+        public SendResult send(Recipient to, RenderedMessage m, String key) {
+            if (calls.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet() == 1)
+                throw new IllegalStateException("null pointer deep inside the provider SDK");
+            return SendResult.sent("push/ok");
+        }
+    }
+
+    /** An instant whose local hour, for somebody at `utcOffsetHours`, is exactly `hour`. */
+    static long atLocalHour(int hour, int utcOffsetHours) {
+        long base = 400_000L;                                    // any whole number of hours since the epoch
+        return (base + Math.floorMod(hour - utcOffsetHours - base, 24L)) * 3_600_000L;
+    }
+
+    static InMemoryTemplates templates() {
+        return new InMemoryTemplates()
+                .register("otp", Channel.SMS, new MessageTemplate("OTP", "{{code}} is your code"))
+                .register("promo", Channel.PUSH, new MessageTemplate("{{pct}}% off", "ends midnight"))
+                .register("receipt", Channel.EMAIL, new MessageTemplate("Receipt", "you paid {{amt}}"));
+    }
+    static InMemoryDirectory people() {
+        return new InMemoryDirectory()
+                .add(new Recipient("u1", "ravi@example.com", "+91900000001", "tok-1", 5))
+                .add(new Recipient("u3", "no-at-sign", "+91900000003", "tok-3", 5));
+    }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. fifty threads submit the SAME idempotency key at the same instant. The claim is one atomic
+        //    operation, so exactly one wins and the human's phone buzzes exactly once.
+        PushSender push = new PushSender();
+        InMemoryDedupeStore dedupe = new InMemoryDedupeStore();
+        NotificationService race = new NotificationService(4, 10_000);
+        race.configure(templates(), people(), new ExponentialBackoff(3, 1, 100),
+                List.of(new DedupeGuard(dedupe, 60_000)), Map.of(Channel.PUSH, push), () -> 1_000L, INLINE);
+        race.start();
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<DeliveryRecord>> futures = new ArrayList<>();
+        for (int i = 0; i < 50; i++)
+            futures.add(pool.submit(() -> { go.await(); return race.submit(Notification.to("u1", Channel.PUSH, "promo")
+                    .dedupeKey("order-9001").params(Map.of("pct", "10")).build()); }));
+        go.countDown();
+        int admitted = 0, duplicates = 0;
+        for (Future<DeliveryRecord> f : futures) {
+            DeliveryRecord r = f.get();
+            if (r.state() == DeliveryState.SUPPRESSED && r.detail().contains("duplicate")) duplicates++; else admitted++;
+        }
+        pool.shutdown();
+        race.awaitIdle(5_000);
+        check(admitted == 1, "exactly one of fifty identical submits was admitted (got " + admitted + ")");
+        check(duplicates == 49, "the other forty-nine were suppressed as duplicates (got " + duplicates + ")");
+        check(push.calls() == 1, "the gateway was called exactly once, so the human got one message");
+        check(dedupe.size() == 1, "one key is held, not fifty");
+        race.shutdown();
+
+        // 2. the gateway times out twice and then accepts. The message must go out on attempt 3 with the SAME
+        //    idempotency key, and the backoff must double: 100, 200, 400, capped.
+        FlakySmsSender flaky = new FlakySmsSender(2, true);
+        Trace trace = new Trace();
+        NotificationService retry = new NotificationService(1, 10_000);
+        retry.configure(templates(), people(), new ExponentialBackoff(4, 100, 10_000),
+                List.of(), Map.of(Channel.SMS, flaky), () -> 1_000L, INLINE);
+        retry.addListener(trace);
+        retry.start();
+        DeliveryRecord otp = retry.submit(Notification.to("u1", Channel.SMS, "otp")
+                .priority(Priority.CRITICAL).params(Map.of("code", "4821")).build());
+        retry.awaitIdle(5_000);
+        check(otp.state() == DeliveryState.SENT, "two timeouts then a success ends SENT, not FAILED (got " + otp.state() + ")");
+        check(otp.attempt() == 3, "it took exactly three attempts (got " + otp.attempt() + ")");
+        check(flaky.calls() == 3, "the gateway was called three times with one key");
+        check(trace.of(otp).contains(DeliveryState.UNKNOWN), "a timeout is recorded as UNKNOWN, never as FAILED");
+        RetryPolicy backoff = new ExponentialBackoff(4, 100, 10_000);
+        check(backoff.backoffMs(1) == 100 && backoff.backoffMs(2) == 200 && backoff.backoffMs(3) == 400,
+              "the backoff doubles: 100, 200, 400 ms");
+        check(backoff.backoffMs(20) == 10_000, "and it stops at the cap instead of overflowing to a year");
+        check(!backoff.shouldRetry(4) && backoff.shouldRetry(3), "the budget is four attempts, then dead letter");
+        retry.shutdown();
+
+        // 3. a malformed address is permanent: one call, no retry, straight to dead letter.
+        EmailSender email = new EmailSender();
+        NotificationService perm = new NotificationService(1, 10_000);
+        perm.configure(templates(), people(), new ExponentialBackoff(4, 1, 100),
+                List.of(), Map.of(Channel.EMAIL, email), () -> 1_000L, INLINE);
+        perm.start();
+        DeliveryRecord bad = perm.submit(Notification.to("u3", Channel.EMAIL, "receipt").params(Map.of("amt", "10")).build());
+        perm.awaitIdle(5_000);
+        check(bad.state() == DeliveryState.FAILED_FINAL, "a bad address fails permanently (got " + bad.state() + ")");
+        check(bad.attempt() == 1, "and it is not retried even once (attempt " + bad.attempt() + ")");
+        check(email.calls() == 1, "the provider was called exactly once");
+        check(perm.deadLetters().size() == 1, "it is in the dead-letter list a human drains");
+        perm.shutdown();
+
+        // 4. the deadline passed while it waited in the queue: the gateway must never be called at all.
+        PushSender counted = new PushSender();
+        long[] clock = { 10_000_000L };
+        NotificationService expiry = new NotificationService(1, 10_000);
+        expiry.configure(templates(), people(), new ExponentialBackoff(4, 1, 100),
+                List.of(), Map.of(Channel.PUSH, counted), () -> clock[0], INLINE);
+        expiry.start();
+        DeliveryRecord late = expiry.submit(Notification.to("u1", Channel.PUSH, "promo")
+                .deadlineMs(clock[0] - 1).params(Map.of("pct", "5")).build());
+        expiry.awaitIdle(5_000);
+        check(late.state() == DeliveryState.EXPIRED, "a message past its deadline is EXPIRED (got " + late.state() + ")");
+        check(counted.calls() == 0, "and the gateway was never called for it");
+        expiry.shutdown();
+
+        // 5. the rank rule: a stale receipt, a late DELIVERED, and a cancel that arrives before a worker starts.
+        Notification n5 = Notification.to("u1", Channel.SMS, "otp").params(Map.of("code", "1")).build();
+        DeliveryRecord rec = new DeliveryRecord(n5, new RenderedMessage("t", "b"), List.of());
+        rec.moveTo(1, DeliveryState.QUEUED, "q1");
+        rec.moveTo(1, DeliveryState.SENDING, "s1");
+        rec.moveTo(1, DeliveryState.RETRY_SCHEDULED, "timed out");
+        rec.moveTo(2, DeliveryState.QUEUED, "q2");
+        rec.moveTo(2, DeliveryState.SENDING, "s2");
+        check(!rec.moveTo(1, DeliveryState.SENT, "receipt for attempt 1"), "a receipt for attempt 1 is ignored while attempt 2 is in flight");
+        check(rec.state() == DeliveryState.SENDING && rec.attempt() == 2, "and it changed nothing: still SENDING on attempt 2");
+        check(rec.moveTo(2, DeliveryState.SENT, "gateway ok"), "the receipt for the attempt in flight is accepted");
+        check(rec.moveTo(2, DeliveryState.DELIVERED, "handset ack"), "DELIVERED outranks SENT");
+        check(!rec.moveTo(2, DeliveryState.SENT, "a second, later copy of the SENT webhook"), "a repeated older receipt is ignored");
+        DeliveryRecord dead = new DeliveryRecord(n5, new RenderedMessage("t", "b"), List.of());
+        dead.moveTo(1, DeliveryState.QUEUED, "q"); dead.moveTo(1, DeliveryState.SENDING, "s");
+        dead.moveTo(1, DeliveryState.FAILED_FINAL, "gave up");
+        check(dead.moveTo(1, DeliveryState.DELIVERED, "it arrived after all"), "a DELIVERED receipt still wins after we gave up");
+        check(!dead.moveTo(1, DeliveryState.FAILED_FINAL, "stale"), "and nothing can push it back to FAILED");
+        DeliveryRecord cancelled = new DeliveryRecord(n5, new RenderedMessage("t", "b"), List.of());
+        cancelled.moveTo(1, DeliveryState.QUEUED, "q");
+        check(cancelled.cancelIfNotStarted(), "a queued message can be cancelled");
+        check(!cancelled.moveTo(1, DeliveryState.SENDING, "worker picked it up"), "a worker cannot start a cancelled message");
+        cancelled.moveTo(1, DeliveryState.QUEUED, "q");
+        DeliveryRecord sending = new DeliveryRecord(n5, new RenderedMessage("t", "b"), List.of());
+        sending.moveTo(1, DeliveryState.QUEUED, "q"); sending.moveTo(1, DeliveryState.SENDING, "s");
+        check(!sending.cancelIfNotStarted(), "a message already at the gateway cannot be cancelled, and we do not pretend");
+
+        // 6. quiet hours defers instead of dropping, and an OTP walks through it.
+        QuietHoursGuard quiet = new QuietHoursGuard(21, 8, Set.of(Channel.SMS, Channel.PUSH));
+        Recipient india = new Recipient("u1", "r@example.com", "+91", "tok", 5);
+        long threeAm = atLocalHour(3, 5);                       // 03:00 where a UTC+5 recipient lives
+        Notification promo = Notification.to("u1", Channel.PUSH, "promo").category("marketing").params(Map.of("pct", "9")).build();
+        Notification code = Notification.to("u1", Channel.SMS, "otp").priority(Priority.CRITICAL).params(Map.of("code", "1")).build();
+        Verdict v = quiet.check(promo, india, threeAm);
+        check(v.kind() == Verdict.Kind.DEFER, "a promo at 03:00 local is deferred, not dropped");
+        check(v.untilMs() - threeAm == 5 * 3_600_000L, "it is held for exactly five hours, until 08:00 local");
+        check(quiet.check(code, india, threeAm).kind() == Verdict.Kind.ALLOW, "an OTP at 03:00 goes out anyway");
+        check(quiet.check(promo, india, threeAm + 6 * 3_600_000L).kind() == Verdict.Kind.ALLOW, "at 09:00 the same promo is allowed");
+        Trace nightTrace = new Trace();
+        PushSender nightPush = new PushSender();
+        NotificationService night = new NotificationService(1, 10_000);
+        night.configure(templates(), people(), new ExponentialBackoff(3, 1, 100),
+                List.of(quiet), Map.of(Channel.PUSH, nightPush), () -> threeAm, INLINE);
+        night.addListener(nightTrace);
+        night.start();
+        DeliveryRecord held = night.submit(Notification.to("u1", Channel.PUSH, "promo").category("marketing").params(Map.of("pct", "9")).build());
+        night.awaitIdle(5_000);
+        check(nightTrace.of(held).contains(DeliveryState.DEFERRED), "the record passed through DEFERRED on its way out");
+        check(held.state() == DeliveryState.SENT, "and it was sent when the window opened, not thrown away");
+        night.shutdown();
+
+        // 7. the daily cap RESERVES a slot, and a later guard's refusal gives it back: a duplicate submit must
+        //    not quietly eat the user's quota.
+        DailyCapGuard cap = new DailyCapGuard(2);
+        InMemoryDedupeStore keys = new InMemoryDedupeStore();
+        NotificationService capped = new NotificationService(1, 10_000);
+        capped.configure(templates(), people(), new ExponentialBackoff(3, 1, 100),
+                List.of(cap, new DedupeGuard(keys, 60_000)), Map.of(Channel.EMAIL, new EmailSender()), () -> 1_000L, INLINE);
+        capped.start();
+        capped.submit(Notification.to("u1", Channel.EMAIL, "receipt").dedupeKey("k1").params(Map.of("amt", "1")).build());
+        check(cap.usedToday("u1") == 1, "the first message spent one of the two daily slots");
+        DeliveryRecord dup = capped.submit(Notification.to("u1", Channel.EMAIL, "receipt").dedupeKey("k1").params(Map.of("amt", "1")).build());
+        check(dup.state() == DeliveryState.SUPPRESSED && dup.detail().contains("duplicate"), "the second submit of the same key is a duplicate");
+        check(cap.usedToday("u1") == 1, "and the duplicate gave the reserved slot back: still one used, not two");
+        capped.submit(Notification.to("u1", Channel.EMAIL, "receipt").dedupeKey("k2").params(Map.of("amt", "2")).build());
+        check(cap.usedToday("u1") == 2, "a different message spends the second slot");
+        DeliveryRecord over = capped.submit(Notification.to("u1", Channel.EMAIL, "receipt").dedupeKey("k3").params(Map.of("amt", "3")).build());
+        check(over.state() == DeliveryState.SUPPRESSED && over.detail().contains("already had 2 today"), "the third is capped, with the reason on the record");
+        check(keys.size() == 2, "and the capped message never claimed an idempotency key");
+        capped.awaitIdle(5_000);
+        capped.shutdown();
+
+        // 8. a listener that throws and an adapter that throws are both contained.
+        Trace boomTrace = new Trace();
+        NotificationService noisy = new NotificationService(1, 10_000);
+        noisy.configure(templates(), people(), new ExponentialBackoff(3, 1, 100),
+                List.of(), Map.of(Channel.PUSH, new BoomSender()), () -> 1_000L, INLINE);
+        noisy.addListener((r, from, to, detail) -> { throw new RuntimeException("the metrics sink is down"); });
+        noisy.addListener(boomTrace);
+        noisy.start();
+        DeliveryRecord survived = noisy.submit(Notification.to("u1", Channel.PUSH, "promo").params(Map.of("pct", "3")).build());
+        noisy.awaitIdle(5_000);
+        check(survived.state() == DeliveryState.SENT, "a listener that throws on every transition stops nothing");
+        check(boomTrace.of(survived).contains(DeliveryState.UNKNOWN), "an adapter that throws is recorded as UNKNOWN, not as a lost worker");
+        check(survived.attempt() == 2, "and the retry got it out on the second attempt");
+        noisy.shutdown();
+
+        // 9. back-pressure: the queue is full, so the message is refused at the door -- and everything the
+        //    guards had already reserved for it is handed back. Nothing half-done, not even on the unhappy path.
+        DailyCapGuard capB = new DailyCapGuard(10);
+        InMemoryDedupeStore keysB = new InMemoryDedupeStore();
+        PushSender neverCalled = new PushSender();
+        NotificationService full = new NotificationService(0, 1);        // no workers, and room for exactly one
+        full.configure(templates(), people(), new ExponentialBackoff(3, 1, 100),
+                List.of(capB, new DedupeGuard(keysB, 60_000)), Map.of(Channel.PUSH, neverCalled), () -> 1_000L, INLINE);
+        DeliveryRecord fits = full.submit(Notification.to("u1", Channel.PUSH, "promo").dedupeKey("b1").params(Map.of("pct", "1")).build());
+        DeliveryRecord refused = full.submit(Notification.to("u1", Channel.PUSH, "promo").dedupeKey("b2").params(Map.of("pct", "2")).build());
+        check(fits.state() == DeliveryState.QUEUED, "the first message fits in a queue of one");
+        check(refused.state() == DeliveryState.SUPPRESSED && refused.detail().contains("back-pressure"),
+                "the second is refused at the door, with the reason on the record (got " + refused.detail() + ")");
+        check(neverCalled.calls() == 0, "a refused message never reaches a gateway");
+        check(capB.usedToday("u1") == 1, "and it gave back the daily slot it had reserved: one used, not two");
+        check(keysB.size() == 1, "and released the key it had claimed, so the caller's retry is not a duplicate");
+        full.shutdown();
+
+        // 10. the fallback ladder: a FAILURE climbs to the next channel, a deliberate refusal does not.
+        InMemoryTemplates alerts = new InMemoryTemplates()
+                .register("alert", Channel.PUSH, new MessageTemplate("ALERT", "{{what}}"))
+                .register("alert", Channel.SMS, new MessageTemplate("ALERT", "{{what}}"));
+        InMemoryDirectory reachable = new InMemoryDirectory()
+                .add(new Recipient("u9", "u9@example.com", "+91900000009", null, 5))      // no device token at all
+                .add(new Recipient("u8", "u8@example.com", "+91900000008", "tok-8", 5));  // reachable on push
+        PushSender pushA = new PushSender();
+        FlakySmsSender smsA = new FlakySmsSender(0, true);
+        NotificationService climbs = new NotificationService(1, 100);
+        climbs.configure(alerts, reachable, new ExponentialBackoff(2, 1, 10), List.of(),
+                Map.of(Channel.PUSH, pushA, Channel.SMS, smsA), () -> 1_000L, INLINE);
+        ChannelLadder ladder = new ChannelLadder(climbs, List.of(Channel.PUSH, Channel.SMS),
+                channel -> Notification.to("u9", channel, "alert").priority(Priority.CRITICAL)
+                                       .params(Map.of("what", "a card was used in Dubai")).build());
+        climbs.addListener(ladder);
+        climbs.start();
+        DeliveryRecord rung1 = ladder.start();
+        climbs.awaitIdle(5_000);
+        check(rung1.state() == DeliveryState.FAILED_FINAL, "push fails permanently: that user has no device token");
+        check(ladder.escalations() == 1, "so the ladder climbed exactly one rung (got " + ladder.escalations() + ")");
+        check(smsA.calls() == 1, "and the same message went out by SMS, once");
+        climbs.shutdown();
+
+        PushSender pushB = new PushSender();
+        FlakySmsSender smsB = new FlakySmsSender(0, true);
+        NotificationService polite = new NotificationService(1, 100);
+        polite.configure(alerts, reachable, new ExponentialBackoff(2, 1, 10),
+                List.of(new PreferenceGuard(new InMemoryPreferences().mute("u8", Channel.PUSH, "marketing"))),
+                Map.of(Channel.PUSH, pushB, Channel.SMS, smsB), () -> 1_000L, INLINE);
+        ChannelLadder respectful = new ChannelLadder(polite, List.of(Channel.PUSH, Channel.SMS),
+                channel -> Notification.to("u8", channel, "alert").priority(Priority.LOW).category("marketing")
+                                       .params(Map.of("what", "40% off")).build());
+        polite.addListener(respectful);
+        polite.start();
+        DeliveryRecord mutedRung = respectful.start();
+        polite.awaitIdle(5_000);
+        check(mutedRung.state() == DeliveryState.SUPPRESSED, "a muted channel is SUPPRESSED, which is a decision, not a failure");
+        check(respectful.escalations() == 0, "so the ladder does NOT climb past an opt-out");
+        check(smsB.calls() == 0, "and the user who turned push off was not chased onto SMS");
+        polite.shutdown();
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

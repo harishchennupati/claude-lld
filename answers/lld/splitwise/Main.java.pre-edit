@@ -1,0 +1,570 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+/** How a bill is divided. The value is only a key into the registry of rules; the rule itself is a class. */
+enum SplitType { EQUAL, EXACT, PERCENT }
+
+/** An expense is either a real bill somebody paid, or a settle-up: money handed back. Same maths, different label. */
+enum ExpenseKind { BILL, SETTLEMENT }
+
+/**
+ * An expense's life. RECORDED is live; EDITED means a newer version replaced it (this row is kept for the
+ * audit trail); DELETED means its effect was reversed (the row is kept too). Nothing is ever erased.
+ */
+enum ExpenseStatus { RECORDED, EDITED, DELETED }
+
+/** Exact money, in paise. There is no double anywhere in this file; these two helpers are the only boundary. */
+final class Money {
+    /** Parse "1234.50" into 123450 paise, exactly. Used at the edge (a form, a file), never in the maths. */
+    static long rupees(String amount) { return new java.math.BigDecimal(amount).movePointRight(2).longValueExact(); }
+    /** Print 123450 paise as "1234.50". Presentation only. */
+    static String fmt(long paise) {
+        String sign = paise < 0 ? "-" : ""; long a = Math.abs(paise);
+        return sign + (a / 100) + "." + String.format("%02d", a % 100);
+    }
+}
+
+/** A person. Only the id ever reaches the ledger, so a rename can never move money. */
+record User(String id, String name) {}
+
+/**
+ * One participant as the client declared them. What rawValue means depends on the split rule: EQUAL ignores
+ * it, EXACT reads it as paise, PERCENT reads it as basis points (hundredths of a percent, so 33.33% = 3333).
+ */
+record Participant(String userId, long rawValue) {
+    /** For an EQUAL split, where the declared number is not used. */
+    static Participant of(String userId) { return new Participant(userId, 0); }
+}
+
+/** One participant's resolved share of one expense, in paise. The shares of an expense always sum to its total. */
+record Share(String userId, long paise) {}
+
+/** One suggested payment in a simplified settlement: "from pays to this many paise". A suggestion, not a balance. */
+record Transfer(String from, String to, long paise) {}
+
+/** Where time comes from. Injected, so a test can stamp an expense with any instant it likes. */
+interface Clock { long nowMs(); }
+
+// "they will ask for a fourth way to split before the hour is out" -> hide the rule behind an interface -> Strategy
+/**
+ * The rule that turns one amount into per-person shares. One method, because the split type is the one thing
+ * that changes. Implementations MUST return shares that sum to the total exactly, in the participants' order.
+ */
+interface SplitStrategy {
+    /** Shares for this bill, summing to totalPaise. Throws IllegalArgumentException if the declared numbers do not reconcile. */
+    List<Share> split(long totalPaise, String payerId, List<Participant> parts);
+}
+
+/**
+ * The order the odd paise are handed out in: the payer first if he is a participant, then everyone else in the
+ * order the client sent. Deterministic, so the same expense always splits the same way.
+ */
+final class Remainder {
+    /** The participants, payer first. Used by EQUAL and PERCENT to decide who absorbs the leftover paise. */
+    static List<Participant> payerFirst(String payerId, List<Participant> parts) {
+        List<Participant> out = new ArrayList<>(parts.size());
+        for (Participant p : parts) if (p.userId().equals(payerId)) out.add(p);
+        for (Participant p : parts) if (!p.userId().equals(payerId)) out.add(p);
+        return out;
+    }
+    /** Give one extra paise to each of the first `extra` participants of `order`, and return shares in the ORIGINAL order. */
+    static List<Share> spread(List<Participant> parts, List<Participant> order, Map<String, Long> base, long extra) {
+        Map<String, Long> byUser = new HashMap<>(base);
+        for (int i = 0; i < extra; i++) byUser.merge(order.get(i).userId(), 1L, Long::sum);
+        List<Share> out = new ArrayList<>(parts.size());
+        for (Participant p : parts) out.add(new Share(p.userId(), byUser.get(p.userId())));
+        return out;
+    }
+}
+
+/** Equal shares. 100 paise across 3 is 34/33/33, and the extra paise goes to the payer: nothing is lost. */
+class EqualSplit implements SplitStrategy {
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        int n = parts.size();
+        long base = total / n, extra = total - base * n;          // extra is 0..n-1, never a fraction
+        Map<String, Long> flat = new HashMap<>();
+        for (Participant p : parts) flat.put(p.userId(), base);
+        return Remainder.spread(parts, Remainder.payerFirst(payerId, parts), flat, extra);
+    }
+}
+
+/** Each participant declares their own paise. They must add up to the bill, or the expense is refused. */
+class ExactSplit implements SplitStrategy {
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        long sum = 0;
+        for (Participant p : parts) {
+            if (p.rawValue() < 0) throw new IllegalArgumentException("a share cannot be negative: " + p.userId());
+            sum += p.rawValue();
+        }
+        if (sum != total)                                          // the whole point of EXACT: it must reconcile
+            throw new IllegalArgumentException("exact shares add up to " + Money.fmt(sum) + ", the bill is " + Money.fmt(total));
+        List<Share> out = new ArrayList<>(parts.size());
+        for (Participant p : parts) out.add(new Share(p.userId(), p.rawValue()));
+        return out;
+    }
+}
+
+/**
+ * Percentages as basis points (33.33% = 3333), so the sum-to-100 check is exact integer arithmetic. Each share
+ * is rounded DOWN and the paise that rounding left over go to the payer first.
+ */
+class PercentSplit implements SplitStrategy {
+    private static final long FULL = 10_000;                       // 100.00% in basis points
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        long bpSum = 0;
+        for (Participant p : parts) {
+            if (p.rawValue() < 0) throw new IllegalArgumentException("a percentage cannot be negative: " + p.userId());
+            bpSum += p.rawValue();
+        }
+        if (bpSum != FULL)
+            throw new IllegalArgumentException("percentages add up to " + (bpSum / 100.0) + "%, they must add up to 100%");
+        Map<String, Long> flat = new HashMap<>();
+        long allocated = 0;
+        for (Participant p : parts) {
+            long share = total * p.rawValue() / FULL;              // integer maths: rounds down
+            flat.put(p.userId(), share); allocated += share;
+        }
+        return Remainder.spread(parts, Remainder.payerFirst(payerId, parts), flat, total - allocated);
+    }
+}
+
+// the invariant "shares sum to the total" must hold for rules that do not exist yet -> wrap every rule -> Decorator
+/**
+ * Wraps any split rule and enforces the contract: a positive amount, at least one participant, nobody twice,
+ * no negative share, and the shares summing to the total to the paise. The group wraps every rule it is handed,
+ * so a rule written next year cannot break the ledger. If this throws, nothing has been written anywhere.
+ */
+class CheckedSplit implements SplitStrategy {
+    private final SplitStrategy base;
+    CheckedSplit(SplitStrategy base) { this.base = base; }
+    public List<Share> split(long total, String payerId, List<Participant> parts) {
+        if (total <= 0) throw new IllegalArgumentException("an amount must be positive: " + total + " paise");
+        if (parts.isEmpty()) throw new IllegalArgumentException("an expense needs at least one participant");
+        Set<String> seen = new HashSet<>();
+        for (Participant p : parts)
+            if (!seen.add(p.userId())) throw new IllegalArgumentException("participant listed twice: " + p.userId());
+        List<Share> shares = base.split(total, payerId, parts);
+        long sum = 0;
+        for (Share s : shares) {
+            if (s.paise() < 0) throw new IllegalStateException("negative share for " + s.userId());
+            sum += s.paise();
+        }
+        if (sum != total)                                          // the one place the paise are checked, for every rule
+            throw new IllegalStateException(base.getClass().getSimpleName() + " returned " + Money.fmt(sum)
+                + " for a bill of " + Money.fmt(total));
+        return shares;
+    }
+}
+
+// "settle with the fewest payments" is a suggestion, not the truth -> a rule that reads a snapshot -> Strategy
+/** Turns a net position per person into a list of suggested payments. Reads a snapshot; changes nothing. */
+interface SimplifyStrategy { List<Transfer> simplify(Map<String, Long> net); }
+
+/**
+ * Min cash flow, greedily: repeatedly make the biggest debtor pay the biggest creditor as much as clears one of
+ * them. At most n-1 transfers for n people, because each round removes at least one person from the board.
+ */
+class MinCashFlow implements SimplifyStrategy {
+    public List<Transfer> simplify(Map<String, Long> net) {
+        // biggest creditor first, biggest debtor first; the id breaks ties so the output is always the same
+        PriorityQueue<Share> credits = new PriorityQueue<>((a, b) ->
+            a.paise() != b.paise() ? Long.compare(b.paise(), a.paise()) : a.userId().compareTo(b.userId()));
+        PriorityQueue<Share> debts = new PriorityQueue<>((a, b) ->
+            a.paise() != b.paise() ? Long.compare(b.paise(), a.paise()) : a.userId().compareTo(b.userId()));
+        for (Map.Entry<String, Long> e : net.entrySet()) {
+            if (e.getValue() > 0) credits.add(new Share(e.getKey(), e.getValue()));
+            else if (e.getValue() < 0) debts.add(new Share(e.getKey(), -e.getValue()));
+        }
+        List<Transfer> out = new ArrayList<>();
+        while (!credits.isEmpty() && !debts.isEmpty()) {
+            Share c = credits.poll(), d = debts.poll();
+            long amount = Math.min(c.paise(), d.paise());          // clears at least one of the two
+            out.add(new Transfer(d.userId(), c.userId(), amount));
+            if (c.paise() > amount) credits.add(new Share(c.userId(), c.paise() - amount));
+            if (d.paise() > amount) debts.add(new Share(d.userId(), d.paise() - amount));
+        }
+        return out;
+    }
+}
+
+// "the others must be told" must not sit in the money maths -> publish after the write -> Observer
+/** Anyone who wants to hear that an expense landed: a push service, an email digest, analytics. */
+interface ExpenseObserver { void onExpense(String groupId, Expense e); }
+
+/** A phone notification. Prints here; a real one would call a push gateway, which is why it runs after the lock. */
+class PushNotifier implements ExpenseObserver {
+    public void onExpense(String groupId, Expense e) {
+        String what = e.status() == ExpenseStatus.DELETED ? "deleted" : e.version() > 1 ? "edited" : "added";
+        System.out.println("[push] " + groupId + ": " + e.payerId() + " " + what + " " + e.note()
+            + " " + Money.fmt(e.totalPaise()) + " across " + e.shares().size());
+    }
+}
+
+/**
+ * One version of one expense: who paid, how much, and the resolved shares. The shares are stored, not recomputed,
+ * which is what makes a delete or an edit an exact reversal. Immutable apart from its status.
+ */
+class Expense {
+    private final String id, groupId, payerId, note;
+    private final ExpenseKind kind;
+    private final long totalPaise, atMs;
+    private final int version;
+    private final List<Share> shares;
+    private volatile ExpenseStatus status = ExpenseStatus.RECORDED;   // only ever written under the group's lock
+
+    Expense(String id, String groupId, ExpenseKind kind, String payerId, long totalPaise,
+            List<Share> shares, int version, long atMs, String note) {
+        this.id = id; this.groupId = groupId; this.kind = kind; this.payerId = payerId;
+        this.totalPaise = totalPaise; this.shares = List.copyOf(shares);   // copied: the caller cannot change it later
+        this.version = version; this.atMs = atMs; this.note = note;
+    }
+    String id()             { return id; }
+    String groupId()        { return groupId; }
+    ExpenseKind kind()      { return kind; }
+    String payerId()        { return payerId; }
+    long totalPaise()       { return totalPaise; }
+    /** The resolved shares. Unmodifiable, and the undo log for a delete or an edit. */
+    List<Share> shares()    { return shares; }
+    int version()           { return version; }
+    long atMs()             { return atMs; }
+    String note()           { return note; }
+    ExpenseStatus status()  { return status; }
+    /** Called by the group, inside its lock, when a newer version replaces this one or it is reversed. */
+    void markStatus(ExpenseStatus s) { this.status = s; }
+    @Override public String toString() {
+        return id + " v" + version + " " + status + " " + kind + " " + payerId + " " + Money.fmt(totalPaise) + " " + note;
+    }
+}
+
+/**
+ * The two maps that ARE the balances: a net per person, and who owes whom. Deliberately dumb: it does arithmetic
+ * on maps and nothing else. Every method here is called by the group, inside the group's lock, so it has no lock
+ * of its own. The invariant it maintains: the net values always sum to zero, and for any pair at most one
+ * direction of `owes` is non-empty.
+ */
+class Ledger {
+    private final Map<String, Long> net = new HashMap<>();               // user -> paise; + is owed money, - owes money
+    private final Map<String, Map<String, Long>> owes = new HashMap<>(); // debtor -> creditor -> paise, always > 0
+
+    /**
+     * Apply one expense's shares. sign is +1 to record it and -1 to reverse it, which is the whole of delete and
+     * half of edit. Pure map arithmetic: it cannot fail, which is why the group validates everything before calling it.
+     */
+    void apply(String payerId, List<Share> shares, int sign) {
+        for (Share s : shares) {
+            if (s.userId().equals(payerId)) continue;                    // the payer's own share is his own money
+            long amount = sign * s.paise();
+            bumpNet(payerId, amount);
+            bumpNet(s.userId(), -amount);
+            move(s.userId(), payerId, amount);                           // the participant owes the payer that much more
+        }
+    }
+    /** X's net position: positive means the group owes X. O(1). */
+    long netOf(String userId) { return net.getOrDefault(userId, 0L); }
+    /** How much `debtor` owes `creditor` right now, never negative. O(1). */
+    long owed(String debtor, String creditor) { return owes.getOrDefault(debtor, Map.of()).getOrDefault(creditor, 0L); }
+    /** A copy of every non-zero net, ordered by id so the simplifier's output is repeatable. */
+    Map<String, Long> netSnapshot() { return new TreeMap<>(net); }
+    /** A copy of the who-owes-whom map, for a statement screen. */
+    Map<String, Map<String, Long>> owesSnapshot() {
+        Map<String, Map<String, Long>> copy = new TreeMap<>();
+        owes.forEach((d, row) -> copy.put(d, new TreeMap<>(row)));
+        return copy;
+    }
+    private void bumpNet(String userId, long delta) {
+        long now = net.getOrDefault(userId, 0L) + delta;
+        if (now == 0) net.remove(userId); else net.put(userId, now);     // a settled person costs no memory
+    }
+    /**
+     * Move `delta` paise of debt from debtor to creditor, keeping ONE direction per pair: the two entries are
+     * written from one signed number, so A-owes-B and B-owes-A can never drift apart.
+     */
+    private void move(String debtor, String creditor, long delta) {
+        long signed = owed(debtor, creditor) - owed(creditor, debtor) + delta;
+        put(debtor, creditor, Math.max(signed, 0));
+        put(creditor, debtor, Math.max(-signed, 0));
+    }
+    private void put(String debtor, String creditor, long amount) {
+        if (amount == 0) {
+            Map<String, Long> row = owes.get(debtor);
+            if (row != null) { row.remove(creditor); if (row.isEmpty()) owes.remove(debtor); }
+        } else owes.computeIfAbsent(debtor, k -> new HashMap<>()).put(creditor, amount);
+    }
+}
+
+/**
+ * The aggregate root: one group owns its members, its ledger, every version of every expense, and ONE lock.
+ * Every write is: validate and compute OUTSIDE the lock, then apply all of it inside the lock or none of it,
+ * then tell the observers after the lock. Nothing else in the system takes this lock, and two different groups
+ * never wait for each other.
+ */
+class Group {
+    private final String id;
+    private final Set<String> members = new LinkedHashSet<>();
+    private final Ledger ledger = new Ledger();
+    private final Map<String, Expense> live = new HashMap<>();        // expense id -> its current version; guarded by lock
+    private final List<Expense> log = new ArrayList<>();              // every version ever written, append only
+    private final ReentrantLock lock = new ReentrantLock();
+    private final List<ExpenseObserver> observers = new CopyOnWriteArrayList<>();
+    private Map<SplitType, SplitStrategy> splits = new EnumMap<>(SplitType.class);
+    private SimplifyStrategy simplifier = new MinCashFlow();
+    private Clock clock = System::currentTimeMillis;
+
+    Group(String id, Collection<String> memberIds) { this.id = id; members.addAll(memberIds); }
+    String id() { return id; }
+    Set<String> members() { return Collections.unmodifiableSet(members); }
+
+    /**
+     * Hand in the rules. Every split rule is wrapped in CheckedSplit here, so no rule — not even one added later —
+     * can put shares into the ledger that do not sum to the bill. The group never builds a rule itself.
+     */
+    void configure(Map<SplitType, SplitStrategy> rules, SimplifyStrategy simplifier) {
+        Map<SplitType, SplitStrategy> checked = new EnumMap<>(SplitType.class);
+        rules.forEach((type, rule) -> checked.put(type, new CheckedSplit(rule)));
+        this.splits = checked; this.simplifier = simplifier;
+    }
+    /** Tests hand in a fixed clock so an expense's timestamp is whatever the test says. */
+    void setClock(Clock c) { clock = c; }
+    /** Subscribe a listener. Setup only; listeners are called after the lock, never inside it. */
+    void addObserver(ExpenseObserver o) { observers.add(o); }
+
+    /**
+     * Record a bill. The order is the design: compute and validate the shares with nothing locked and nothing
+     * written; then under the lock check the id and the membership and only then apply every delta, which is map
+     * arithmetic that cannot fail. A rejected expense leaves the ledger exactly as it was. The same expense id
+     * twice applies once and returns the first one, so a client retry is safe.
+     */
+    Expense addExpense(String expenseId, String payerId, long totalPaise, SplitType type,
+                       List<Participant> parts, String note) {
+        return record(expenseId, ExpenseKind.BILL, payerId, totalPaise, type, parts, note);
+    }
+
+    /**
+     * A settle-up is an expense of a special kind: `from` hands `to` some money, so it is a bill paid by `from`
+     * with exactly one participant, `to`, owing the whole amount. The same code path, the same lock, the same
+     * reversal — which is why a wrong settle-up can be deleted like any other expense.
+     */
+    Expense settleUp(String expenseId, String from, String to, long paise) {
+        return record(expenseId, ExpenseKind.SETTLEMENT, from, paise, SplitType.EXACT,
+                      List.of(new Participant(to, paise)), "settle up");
+    }
+
+    private Expense record(String expenseId, ExpenseKind kind, String payerId, long totalPaise,
+                           SplitType type, List<Participant> parts, String note) {
+        SplitStrategy rule = splits.get(type);
+        if (rule == null) throw new IllegalStateException("no rule configured for " + type);
+        List<Share> shares = rule.split(totalPaise, payerId, parts);   // outside the lock: pure, and it may throw
+        Expense e;
+        lock.lock();
+        try {
+            Expense existing = live.get(expenseId);
+            if (existing != null) return existing;                      // idempotent: the same id is applied once
+            checkMembers(payerId, shares);                              // every check before any write
+            e = new Expense(expenseId, id, kind, payerId, totalPaise, shares, 1, clock.nowMs(), note);
+            ledger.apply(payerId, shares, +1);                          // from here nothing can throw
+            live.put(expenseId, e);
+            log.add(e);
+        } finally { lock.unlock(); }
+        publish(e);                                                     // after the lock: a slow phone stalls nobody
+        return e;
+    }
+
+    /**
+     * Replace an expense with a new version: the old one's stored shares are reversed, it is marked EDITED and
+     * kept, and version n+1 is applied. Both halves happen under ONE lock, so nobody can read a group in which
+     * the old expense is gone and the new one has not landed. The new shares are computed before the lock, so a
+     * bad edit changes nothing at all. The payer may change too; the reversal uses the OLD version's payer.
+     */
+    Expense edit(String expenseId, String payerId, long totalPaise, SplitType type, List<Participant> parts, String note) {
+        SplitStrategy rule = splits.get(type);
+        if (rule == null) throw new IllegalStateException("no rule configured for " + type);
+        List<Share> shares = rule.split(totalPaise, payerId, parts);    // outside the lock: pure, and it may throw
+        Expense next;
+        lock.lock();
+        try {
+            Expense old = current(expenseId);
+            checkMembers(payerId, shares);                              // every check before any write
+            next = new Expense(expenseId, id, old.kind(), payerId, totalPaise, shares,
+                               old.version() + 1, clock.nowMs(), note);
+            ledger.apply(old.payerId(), old.shares(), -1);              // undo the old version, exactly
+            ledger.apply(payerId, shares, +1);                          // apply the new one
+            old.markStatus(ExpenseStatus.EDITED);
+            live.put(expenseId, next);
+            log.add(next);
+        } finally { lock.unlock(); }
+        publish(next);
+        return next;
+    }
+
+    /**
+     * Reverse an expense. Its stored shares are applied with the opposite sign, so the balances go back exactly
+     * to what they were, and the row stays in the log marked DELETED: an audit trail, not an erasure. Deleting
+     * twice is refused rather than double-reversed.
+     */
+    Expense delete(String expenseId) {
+        Expense gone;
+        lock.lock();
+        try {
+            gone = current(expenseId);
+            ledger.apply(gone.payerId(), gone.shares(), -1);
+            gone.markStatus(ExpenseStatus.DELETED);
+        } finally { lock.unlock(); }
+        publish(gone);
+        return gone;
+    }
+
+    /** X's net position: positive means the group owes X. O(1). */
+    long netOf(String userId) { lock.lock(); try { return ledger.netOf(userId); } finally { lock.unlock(); } }
+    /** How much `debtor` owes `creditor`, zero if nothing. O(1). */
+    long owes(String debtor, String creditor) { lock.lock(); try { return ledger.owed(debtor, creditor); } finally { lock.unlock(); } }
+    /** Every non-zero net, taken under the lock so the numbers are from one instant. */
+    Map<String, Long> balances() { lock.lock(); try { return ledger.netSnapshot(); } finally { lock.unlock(); } }
+    /** The who-owes-whom table, taken under the lock. */
+    Map<String, Map<String, Long>> owesTable() { lock.lock(); try { return ledger.owesSnapshot(); } finally { lock.unlock(); } }
+
+    /**
+     * The fewest payments that would clear the group. A SUGGESTION computed from a snapshot outside the lock:
+     * it does not touch the ledger, so the pairwise history stays intact and nobody's net moves by a paise.
+     */
+    List<Transfer> simplify() {
+        Map<String, Long> snapshot = balances();
+        return simplifier.simplify(snapshot);                           // outside the lock: it only reads a copy
+    }
+    /** Every version of every expense, oldest first. The audit trail. */
+    List<Expense> history() { lock.lock(); try { return List.copyOf(log); } finally { lock.unlock(); } }
+
+    private Expense current(String expenseId) {
+        Expense e = live.get(expenseId);
+        if (e == null) throw new NoSuchElementException("no such expense: " + expenseId);
+        if (e.status() != ExpenseStatus.RECORDED) throw new IllegalStateException(expenseId + " is " + e.status());
+        return e;
+    }
+    private void checkMembers(String payerId, List<Share> shares) {
+        if (!members.contains(payerId)) throw new IllegalArgumentException(payerId + " is not in " + id);
+        for (Share s : shares)
+            if (!members.contains(s.userId())) throw new IllegalArgumentException(s.userId() + " is not in " + id);
+    }
+    /** Tell every observer, outside the lock, and survive a listener that throws. */
+    private void publish(Expense e) {
+        for (ExpenseObserver o : observers) {
+            try { o.onExpense(id, e); } catch (RuntimeException ex) { System.err.println("[observer failed] " + ex.getMessage()); }
+        }
+    }
+}
+
+/**
+ * The thin caller: it finds the group and calls it. It holds no balances and takes no lock, which is exactly why
+ * many people posting expenses at the same time are safe.
+ */
+class Splitwise {
+    private final Map<String, Group> groups = new ConcurrentHashMap<>();
+    private final Map<String, User> users = new ConcurrentHashMap<>();
+    /** Register a person. Ids are what the ledger stores. */
+    void addUser(User u) { users.put(u.id(), u); }
+    /** Create a group with its members, wired with the standard rules. */
+    Group newGroup(String groupId, String... memberIds) {
+        Group g = new Group(groupId, Arrays.asList(memberIds));
+        g.configure(Map.of(SplitType.EQUAL, new EqualSplit(),
+                           SplitType.EXACT, new ExactSplit(),
+                           SplitType.PERCENT, new PercentSplit()), new MinCashFlow());
+        groups.put(groupId, g);
+        return g;
+    }
+    /** The group, or an error. O(1). */
+    Group group(String groupId) {
+        Group g = groups.get(groupId);
+        if (g == null) throw new NoSuchElementException("no such group: " + groupId);
+        return g;
+    }
+    /** A person's name for a screen; the ledger never needs it. */
+    String nameOf(String userId) { User u = users.get(userId); return u == null ? userId : u.name(); }
+}
+
+/**
+ * Proof it works: a trip, three ways of splitting, a settle-up, an edit, a delete, a simplify, and fifty people
+ * posting expenses to one group at the same instant with the balances still summing to exactly zero.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Splitwise app = new Splitwise();
+        app.addUser(new User("alice", "Alice")); app.addUser(new User("bob", "Bob"));
+        app.addUser(new User("carol", "Carol"));
+        Group trip = app.newGroup("goa", "alice", "bob", "carol");
+        trip.addObserver(new PushNotifier());
+
+        // equal: 1000.01 across three, the odd paise goes to the payer
+        trip.addExpense("e1", "alice", Money.rupees("1000.01"), SplitType.EQUAL,
+            List.of(Participant.of("alice"), Participant.of("bob"), Participant.of("carol")), "hotel");
+        // exact: Bob's cocktail cost more
+        trip.addExpense("e2", "bob", Money.rupees("900.00"), SplitType.EXACT,
+            List.of(new Participant("alice", Money.rupees("200.00")),
+                    new Participant("bob",   Money.rupees("500.00")),
+                    new Participant("carol", Money.rupees("200.00"))), "dinner");
+        // percent: the car was mostly Carol's idea (basis points: 25% = 2500)
+        trip.addExpense("e3", "carol", Money.rupees("600.00"), SplitType.PERCENT,
+            List.of(new Participant("alice", 2500), new Participant("bob", 2500),
+                    new Participant("carol", 5000)), "cab");
+        System.out.println("balances " + fmt(trip.balances()));
+        System.out.println("bob owes alice " + Money.fmt(trip.owes("bob", "alice")));
+
+        // the same expense id posted twice (a client retry) applies once
+        trip.addExpense("e3", "carol", Money.rupees("600.00"), SplitType.PERCENT,
+            List.of(new Participant("alice", 2500), new Participant("bob", 2500),
+                    new Participant("carol", 5000)), "cab");
+        System.out.println("after a retry of e3, balances are unchanged: " + fmt(trip.balances()));
+
+        // a rejected expense changes nothing: the exact shares do not add up to the bill
+        Map<String, Long> before = trip.balances();
+        try {
+            trip.addExpense("bad", "alice", Money.rupees("500.00"), SplitType.EXACT,
+                List.of(new Participant("bob", Money.rupees("100.00")), new Participant("carol", Money.rupees("100.00"))), "oops");
+        } catch (IllegalArgumentException e) { System.out.println("expected: " + e.getMessage()); }
+        System.out.println("balances after the rejected expense: " + before.equals(trip.balances()));
+
+        // the fewest payments that clear the group -- a suggestion; the ledger is untouched
+        System.out.println("simplify -> " + trip.simplify());
+        System.out.println("simplify changed nothing: " + before.equals(trip.balances()));
+
+        // settle up: Bob pays Alice what he owes her, and that pair goes to zero
+        long owed = trip.owes("bob", "alice");
+        trip.settleUp("s1", "bob", "alice", owed);
+        System.out.println("after settling, bob owes alice " + Money.fmt(trip.owes("bob", "alice")));
+
+        // the hotel was 900, not 1000.01: edit keeps the old version and reverses it exactly
+        trip.edit("e1", "alice", Money.rupees("900.00"), SplitType.EQUAL,
+            List.of(Participant.of("alice"), Participant.of("bob"), Participant.of("carol")), "hotel (corrected)");
+        System.out.println("after the edit " + fmt(trip.balances()));
+        trip.delete("e2");
+        System.out.println("after deleting dinner " + fmt(trip.balances()));
+        System.out.println("audit trail: " + trip.history().size() + " versions, e1 v1 is " + trip.history().get(0).status());
+
+        // fifty people post an expense to ONE group at the same instant; the balances must still sum to zero
+        Group big = app.newGroup("flat", "u0", "u1", "u2", "u3", "u4");
+        List<Participant> all = List.of(Participant.of("u0"), Participant.of("u1"), Participant.of("u2"),
+                                        Participant.of("u3"), Participant.of("u4"));
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> posted = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final int n = i;
+            posted.add(pool.submit(() -> {
+                go.await();
+                return big.addExpense("x" + n, "u" + (n % 5), 100 + n, SplitType.EQUAL, all, "round " + n);
+            }));
+        }
+        go.countDown();
+        int ok = 0;
+        for (Future<?> f : posted) { f.get(); ok++; }
+        pool.shutdown();
+        long sum = 0;
+        for (long v : big.balances().values()) sum += v;
+        System.out.println("50 concurrent expenses: applied=" + ok + " sum of all balances=" + sum + " (must be 0)");
+        if (sum != 0 || ok != 50) throw new AssertionError("the ledger lost an update");
+    }
+    private static String fmt(Map<String, Long> balances) {
+        StringBuilder sb = new StringBuilder("{");
+        balances.forEach((u, p) -> sb.append(u).append("=").append(Money.fmt(p)).append(" "));
+        return sb.append("}").toString();
+    }
+}

@@ -1,0 +1,548 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.time.*;
+
+/** The price tiers a seat can belong to. Only the pricing rule ever looks at this. */
+enum SeatClass { SILVER, GOLD, PLATINUM }
+
+/**
+ * A physical chair in a screen: a row, a number, a class. Immutable, and shared by every show on that
+ * screen. There is deliberately NO status field here: a chair is not free or sold, a chair-at-a-show is.
+ */
+final class Seat {
+    final String id;                               // row + number, e.g. "B4"
+    final String row;
+    final int number;
+    final SeatClass seatClass;
+    Seat(String row, int number, SeatClass seatClass) {
+        this.row = row; this.number = number; this.id = row + number; this.seatClass = seatClass;
+    }
+}
+
+/** One screen (auditorium): its fixed seat layout, listed in screen order, row by row. */
+final class Screen {
+    final String id;
+    final List<Seat> seats;
+    Screen(String id, List<Seat> seats) { this.id = id; this.seats = List.copyOf(seats); }
+}
+
+/** A building with screens. Catalog only: nothing in here changes while somebody is booking. */
+final class Theatre {
+    final String id;
+    final String city;
+    final List<Screen> screens;
+    Theatre(String id, String city, List<Screen> screens) { this.id = id; this.city = city; this.screens = List.copyOf(screens); }
+}
+
+/** A seat's life inside ONE show: free, held for a few minutes by one booking, or sold for good. */
+enum SeatStatus { AVAILABLE, HELD, SOLD }
+
+/**
+ * One seat, for one show: the mutable half. Every field is written under its show's lock; they are volatile
+ * so a lock-free reader (the seat map on a phone) sees the latest values instead of a stale copy.
+ */
+final class ShowSeat {
+    final Seat seat;
+    volatile SeatStatus status = SeatStatus.AVAILABLE;
+    volatile String holdBookingId;                 // who holds it right now; null unless HELD
+    volatile long holdExpiresMs;                   // when that hold dies; 0 unless HELD
+    ShowSeat(Seat seat) { this.seat = seat; }
+    /** True when nobody can stop this seat being taken at time now: free, or held by a hold that has lapsed. */
+    boolean freeAt(long now) {
+        return status == SeatStatus.AVAILABLE || (status == SeatStatus.HELD && holdExpiresMs <= now);
+    }
+}
+
+/**
+ * A booking's life: PENDING while the seats are only held; CONFIRMED once the money moved and the seats
+ * were committed; EXPIRED if the hold died first; CANCELLED if a confirmed booking was given back.
+ */
+enum BookingStatus { PENDING, CONFIRMED, CANCELLED, EXPIRED }
+
+/**
+ * One user's attempt at one show: the seats it holds, and the amount, frozen at hold time so that confirm
+ * can never quietly reprice or drop a seat.
+ */
+final class Booking {
+    final String id;
+    final Show show;
+    final String userId;
+    final List<ShowSeat> seats;
+    final long amountPaise;                        // integer paise: money is never a double
+    final long holdExpiresMs;
+    volatile BookingStatus status = BookingStatus.PENDING;
+    volatile String paymentRef;                    // what the gateway gave back; needed to refund
+    Booking(String id, Show show, String userId, List<ShowSeat> seats, long amountPaise, long holdExpiresMs) {
+        this.id = id; this.show = show; this.userId = userId; this.seats = List.copyOf(seats);
+        this.amountPaise = amountPaise; this.holdExpiresMs = holdExpiresMs;
+    }
+    /** The seat ids on this booking, for printing and for tests. */
+    List<String> seatIds() { List<String> out = new ArrayList<>(); for (ShowSeat s : seats) out.add(s.seat.id); return out; }
+}
+
+/** At least one requested seat was not free. Nothing was held: the request is all-or-nothing. */
+class SeatUnavailable extends RuntimeException { SeatUnavailable(String m) { super(m); } }
+/** The hold died before confirm could commit it. Any money already taken is refunded by the caller. */
+class HoldLapsed extends RuntimeException { HoldLapsed(String m) { super(m); } }
+/** The gateway said no. Nothing is released: the hold simply runs out on its own. */
+class PaymentDeclined extends RuntimeException { PaymentDeclined(String m) { super(m); } }
+
+/** Where time comes from. Injected so a test can jump past a hold's expiry without sleeping. */
+interface Clock { long nowMs(); }
+
+// "they'll want weekend and prime-time pricing" -> hide the rule behind an interface -> Strategy
+/** What one seat costs for one show, in paise. Behind an interface because pricing always changes. */
+interface PricingRule { long pricePaise(Show show, Seat seat); }
+
+/** The base rule: a flat price per seat class. A table, not an if-chain, so a new class is one row. */
+class ClassPricing implements PricingRule {
+    private static final Map<SeatClass, Long> RATE = new EnumMap<>(Map.of(
+        SeatClass.SILVER, 15_000L, SeatClass.GOLD, 25_000L, SeatClass.PLATINUM, 40_000L));
+    /** The class rate, in paise: SILVER 150.00, GOLD 250.00, PLATINUM 400.00. */
+    public long pricePaise(Show show, Seat seat) { return RATE.get(seat.seatClass); }
+}
+
+/**
+ * 1.5x when the SHOW starts on a Saturday or Sunday: a NEW rule that wraps the one it is given
+ * (Decorator). Nothing else in the system changed; only the line that hands the rule in.
+ */
+class WeekendSurgePricing implements PricingRule {
+    private final PricingRule base;
+    private final ZoneId zone;
+    private final double factor;
+    WeekendSurgePricing(PricingRule base, ZoneId zone, double factor) { this.base = base; this.zone = zone; this.factor = factor; }
+    public long pricePaise(Show show, Seat seat) {
+        DayOfWeek d = Instant.ofEpochMilli(show.startMs).atZone(zone).getDayOfWeek();
+        boolean weekend = (d == DayOfWeek.SATURDAY || d == DayOfWeek.SUNDAY);
+        return weekend ? Math.round(base.pricePaise(show, seat) * factor) : base.pricePaise(show, seat);
+    }
+}
+
+// "give me the best three together" -> a second rule that changes -> Strategy again
+/**
+ * Which seats to hand out when the user asks for a count instead of naming them. Pure: it is given the
+ * seats that are free right now, in screen order, and returns the ones to take, or an empty list.
+ */
+interface SeatPolicy { List<ShowSeat> choose(List<ShowSeat> candidates, int count); }
+
+/** Take the first free seats in screen order. The default when nobody cares where they sit. */
+class AnyFreeSeats implements SeatPolicy {
+    public List<ShowSeat> choose(List<ShowSeat> candidates, int count) {
+        return candidates.size() >= count ? List.copyOf(candidates.subList(0, count)) : List.of();
+    }
+}
+
+/** Take count seats side by side in one row, or nothing at all. Three free seats scattered are not a run. */
+class AdjacentSeats implements SeatPolicy {
+    public List<ShowSeat> choose(List<ShowSeat> candidates, int count) {
+        for (int i = 0; i + count <= candidates.size(); i++) {
+            boolean run = true;
+            for (int k = 1; k < count && run; k++) {
+                Seat prev = candidates.get(i + k - 1).seat, next = candidates.get(i + k).seat;
+                run = prev.row.equals(next.row) && next.number == prev.number + 1;
+            }
+            if (run) return List.copyOf(candidates.subList(i, i + count));
+        }
+        return List.of();
+    }
+}
+
+/**
+ * How money moves. charge returns a reference from the gateway, or null when it declined; refund gives it
+ * back. Refund is on this interface because confirm can charge and only then find the hold gone.
+ */
+interface PaymentProcessor {
+    String charge(long paise);
+    void refund(String paymentRef, long paise);
+}
+/** A UPI gateway. Real one: a network call of a second or two, which is why it runs outside the lock. */
+class UpiPayment implements PaymentProcessor {
+    private final AtomicInteger seq = new AtomicInteger();
+    public String charge(long paise) { return "UPI-" + seq.incrementAndGet(); }
+    public void refund(String ref, long paise) { System.out.println("[refund] " + paise + " paise against " + ref); }
+}
+/** A card gateway. Same contract, different rails. */
+class CardPayment implements PaymentProcessor {
+    private final AtomicInteger seq = new AtomicInteger();
+    public String charge(long paise) { return "CARD-" + seq.incrementAndGet(); }
+    public void refund(String ref, long paise) { System.out.println("[refund] " + paise + " paise against " + ref); }
+}
+
+// "the user should get an SMS, and analytics should count it" -> publish/subscribe -> Observer
+/**
+ * Anyone who wants to hear that a booking changed: an SMS sender, analytics, a data pipe. The service does
+ * not know what they are, and calls them after its lock is released.
+ */
+interface BookingObserver { void onBooking(String event, Booking b); }
+
+/** Tells the user. A real one talks to an SMS gateway; a slow one must never be inside the lock. */
+class SmsNotifier implements BookingObserver {
+    public void onBooking(String event, Booking b) {
+        System.out.println("[sms] " + b.userId + ": booking " + b.id + " " + event + " seats=" + b.seatIds());
+    }
+}
+/** Counts events. Proves a second listener costs the booking path nothing. */
+class Analytics implements BookingObserver {
+    final Map<String, Integer> counts = new ConcurrentHashMap<>();
+    public void onBooking(String event, Booking b) { counts.merge(event, 1, Integer::sum); }
+}
+
+/**
+ * The aggregate root: one movie on one screen at one time. It owns its per-show seats, its bookings and ONE
+ * lock. Every change to a seat happens inside that lock; payment never does.
+ */
+final class Show {
+    private static final AtomicInteger SEQ = new AtomicInteger();
+    final String id;
+    final String movie;
+    final Screen screen;
+    final long startMs;
+    private final Map<String, ShowSeat> seats = new LinkedHashMap<>();       // seatId -> ShowSeat, O(1), screen order
+    private final Map<String, Booking> bookings = new HashMap<>();           // bookingId -> booking, O(1)
+    private final Map<SeatClass, Integer> free = new EnumMap<>(SeatClass.class);   // AVAILABLE seats per class, O(1)
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Clock clock;
+    private final long holdMs;
+
+    Show(String id, String movie, Screen screen, long startMs, Clock clock, long holdMs) {
+        this.id = id; this.movie = movie; this.screen = screen; this.startMs = startMs;
+        this.clock = clock; this.holdMs = holdMs;
+        for (SeatClass c : SeatClass.values()) free.put(c, 0);
+        for (Seat s : screen.seats) {                       // one ShowSeat per chair: the 6pm and the 9pm show never share a field
+            seats.put(s.id, new ShowSeat(s));
+            free.merge(s.seatClass, 1, Integer::sum);
+        }
+    }
+
+    /**
+     * Hold named seats for a few minutes. Under the lock, in two passes: check every seat is free (a lapsed
+     * hold counts as free), then take them all. One bad seat means nothing was touched.
+     */
+    Booking hold(String userId, List<String> seatIds, PricingRule pricing) {
+        lock.lock();                                        // the whole check-then-take is ONE step: the race lives in the gap
+        try {
+            long now = clock.nowMs();                       // read inside the lock, so two callers cannot disagree about expiry
+            List<ShowSeat> want = new ArrayList<>(seatIds.size());
+            for (String sid : seatIds) {                    // pass one: look, do not touch
+                ShowSeat ss = seats.get(sid);
+                if (ss == null) throw new NoSuchElementException("no seat " + sid + " in show " + id);
+                if (want.contains(ss)) throw new IllegalArgumentException("seat " + sid + " asked for twice");
+                reclaimIfLapsed(ss, now);
+                if (ss.status != SeatStatus.AVAILABLE) throw new SeatUnavailable("seat " + sid + " is " + ss.status);
+                want.add(ss);
+            }
+            return takeAll(userId, want, pricing, now);     // pass two: nothing was written until every seat passed
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * Hold a count of seats chosen by the handed-in policy. The choosing and the taking happen in the SAME
+     * locked section, so a run of three cannot be broken between picking it and getting it.
+     */
+    Booking holdBest(String userId, SeatClass cls, int count, SeatPolicy policy, PricingRule pricing) {
+        lock.lock();
+        try {
+            long now = clock.nowMs();
+            List<ShowSeat> candidates = new ArrayList<>();
+            for (ShowSeat ss : seats.values())              // screen order, so "adjacent" means what it says
+                if (ss.seat.seatClass == cls && ss.freeAt(now)) candidates.add(ss);
+            List<ShowSeat> pick = policy.choose(candidates, count);
+            if (pick.size() != count) throw new SeatUnavailable("no " + count + " " + cls + " seats match the policy in " + id);
+            for (ShowSeat ss : pick) reclaimIfLapsed(ss, now);
+            return takeAll(userId, pick, pricing, now);
+        } finally { lock.unlock(); }
+    }
+
+    /**
+     * The commit half of the critical step. Re-checks under the lock that every seat is STILL held by this
+     * booking and still in time, then marks them SOLD. true = this call confirmed it, false = it was already
+     * CONFIRMED by a racing retry (the caller refunds). Throws when the hold lapsed during payment.
+     */
+    boolean commit(Booking b, String paymentRef) {
+        lock.lock();
+        try {
+            if (b.status == BookingStatus.CONFIRMED) return false;      // a second confirm sells nothing twice
+            if (b.status != BookingStatus.PENDING) throw new HoldLapsed("booking " + b.id + " is " + b.status);
+            long now = clock.nowMs();
+            for (ShowSeat ss : b.seats)                                 // THE check that makes double-selling impossible
+                if (ss.status != SeatStatus.HELD || !b.id.equals(ss.holdBookingId) || ss.holdExpiresMs <= now) {
+                    expireLocked(b);
+                    throw new HoldLapsed("the hold on " + ss.seat.id + " lapsed while the card was being charged");
+                }
+            for (ShowSeat ss : b.seats) {                               // only now, and all of them
+                ss.status = SeatStatus.SOLD; ss.holdBookingId = null; ss.holdExpiresMs = 0;
+            }
+            b.paymentRef = paymentRef;
+            b.status = BookingStatus.CONFIRMED;
+            return true;
+        } finally { lock.unlock(); }
+    }
+
+    /** Give the seats back now instead of waiting for the clock: the user closed the tab, or the caller gave up. */
+    void release(Booking b) {
+        lock.lock();
+        try { if (b.status == BookingStatus.PENDING) expireLocked(b); } finally { lock.unlock(); }
+    }
+
+    /** Undo a sale: every seat goes back to AVAILABLE, the booking to CANCELLED. Returns what must be refunded. */
+    long cancel(Booking b) {
+        lock.lock();
+        try {
+            if (b.status != BookingStatus.CONFIRMED) throw new IllegalStateException("booking " + b.id + " is " + b.status);
+            for (ShowSeat ss : b.seats) { ss.status = SeatStatus.AVAILABLE; free.merge(ss.seat.seatClass, 1, Integer::sum); }
+            b.status = BookingStatus.CANCELLED;
+            return b.amountPaise;
+        } finally { lock.unlock(); }
+    }
+
+    /** A booking of this show by id, or null. O(1). */
+    Booking booking(String bookingId) { lock.lock(); try { return bookings.get(bookingId); } finally { lock.unlock(); } }
+
+    /** How many seats of a class a new user could take right now. O(1): a counter, never a scan. */
+    int freeCount(SeatClass cls) { lock.lock(); try { return free.get(cls); } finally { lock.unlock(); } }
+
+    /** What one seat looks like to a user: a lapsed hold is drawn as free. O(1). */
+    SeatStatus statusOf(String seatId) {
+        lock.lock();
+        try {
+            ShowSeat ss = seats.get(seatId);
+            if (ss == null) throw new NoSuchElementException("no seat " + seatId + " in show " + id);
+            return ss.freeAt(clock.nowMs()) ? SeatStatus.AVAILABLE : ss.status;
+        } finally { lock.unlock(); }
+    }
+
+    /** The whole seat map for the screen. A snapshot for drawing, not a promise: only a hold promises. */
+    Map<String, SeatStatus> seatMap() {
+        lock.lock();
+        try {
+            long now = clock.nowMs();
+            Map<String, SeatStatus> out = new LinkedHashMap<>();
+            for (ShowSeat ss : seats.values()) out.put(ss.seat.id, ss.freeAt(now) ? SeatStatus.AVAILABLE : ss.status);
+            return out;
+        } finally { lock.unlock(); }
+    }
+
+    /** Hand back every hold that has already lapsed. The display gets tidier; correctness never needed it. */
+    int sweepExpired() {
+        lock.lock();
+        try {
+            long now = clock.nowMs(); int freed = 0;
+            for (ShowSeat ss : seats.values()) if (ss.status == SeatStatus.HELD && ss.holdExpiresMs <= now) { reclaimIfLapsed(ss, now); freed++; }
+            return freed;
+        } finally { lock.unlock(); }
+    }
+
+    // ---- everything below runs with the lock already held ----
+
+    /** Price the seats, stamp the hold on each of them, and register the booking. Lock held. */
+    private Booking takeAll(String userId, List<ShowSeat> want, PricingRule pricing, long now) {
+        long total = 0;
+        for (ShowSeat ss : want) total += pricing.pricePaise(this, ss.seat);   // arithmetic on fields we already have: microseconds
+        Booking b = new Booking("BK" + SEQ.incrementAndGet(), this, userId, want, total, now + holdMs);
+        for (ShowSeat ss : want) {
+            ss.status = SeatStatus.HELD; ss.holdBookingId = b.id; ss.holdExpiresMs = b.holdExpiresMs;
+            free.merge(ss.seat.seatClass, -1, Integer::sum);
+        }
+        bookings.put(b.id, b);
+        return b;
+    }
+
+    /** Lazy expiry: a hold whose time has passed is reclaimed the next time anybody looks at the seat. Lock held. */
+    private void reclaimIfLapsed(ShowSeat ss, long now) {
+        if (ss.status != SeatStatus.HELD || ss.holdExpiresMs > now) return;
+        Booking dead = bookings.get(ss.holdBookingId);
+        if (dead != null) expireLocked(dead); else freeSeat(ss);
+    }
+
+    /** Free every seat still stamped with this booking, and mark the booking EXPIRED. Lock held. */
+    private void expireLocked(Booking b) {
+        for (ShowSeat ss : b.seats)
+            if (ss.status == SeatStatus.HELD && b.id.equals(ss.holdBookingId)) freeSeat(ss);
+        if (b.status == BookingStatus.PENDING) b.status = BookingStatus.EXPIRED;
+    }
+
+    /** One seat back to AVAILABLE, and the class counter up by one. Lock held. */
+    private void freeSeat(ShowSeat ss) {
+        ss.status = SeatStatus.AVAILABLE; ss.holdBookingId = null; ss.holdExpiresMs = 0;
+        free.merge(ss.seat.seatClass, 1, Integer::sum);
+    }
+}
+
+/**
+ * The orchestrator. It sequences hold, then payment OUTSIDE any lock, then commit; it owns no seat state of
+ * its own, only the shows, a booking-id index, the handed-in rules and the listeners.
+ */
+final class BookingService {
+    private final Map<String, Show> shows = new ConcurrentHashMap<>();
+    private final Map<String, Show> byBooking = new ConcurrentHashMap<>();    // bookingId -> its show: O(1) routing
+    private final List<BookingObserver> observers = new CopyOnWriteArrayList<>();
+    private PricingRule pricing = new ClassPricing();
+    private SeatPolicy policy = new AnyFreeSeats();
+
+    /** Hand in the rules. The service never builds one, so swapping is a new class and this line. */
+    void configure(PricingRule pricing, SeatPolicy policy) { this.pricing = pricing; this.policy = policy; }
+    void addShow(Show s) { shows.put(s.id, s); }
+    void addObserver(BookingObserver o) { observers.add(o); }
+    /** A show by id, O(1). Throws if the id is unknown. */
+    Show show(String showId) {
+        Show s = shows.get(showId);
+        if (s == null) throw new NoSuchElementException("no show " + showId);
+        return s;
+    }
+
+    /** Step one of the flow: hold the named seats for a few minutes. Returns a PENDING booking. */
+    Booking hold(String showId, String userId, List<String> seatIds) {
+        Show s = show(showId);
+        Booking b = s.hold(userId, seatIds, pricing);
+        byBooking.put(b.id, s);
+        return b;
+    }
+
+    /** Same, but the policy picks the seats: "three together in gold". All-or-nothing, inside one lock. */
+    Booking holdBest(String showId, String userId, SeatClass cls, int count) {
+        Show s = show(showId);
+        Booking b = s.holdBest(userId, cls, count, policy, pricing);
+        byBooking.put(b.id, s);
+        return b;
+    }
+
+    /**
+     * Steps two and three: charge the card with NO lock held, then commit under the show's lock, which
+     * re-checks the hold. A decline releases nothing; a lapsed hold refunds. Listeners hear after the lock.
+     */
+    Booking confirm(String bookingId, PaymentProcessor pay) {
+        Booking b = find(bookingId);
+        if (b.status != BookingStatus.PENDING)                                  // a second confirm is refused before any money moves
+            throw new IllegalStateException("booking " + bookingId + " is " + b.status);
+        String ref = pay.charge(b.amountPaise);                                 // OUTSIDE the lock: a gateway takes a second or two
+        if (ref == null) throw new PaymentDeclined("gateway declined " + b.amountPaise + " paise; the hold runs to its expiry");
+        boolean mine;
+        try { mine = b.show.commit(b, ref); }
+        catch (RuntimeException e) { pay.refund(ref, b.amountPaise); throw e; } // money moved, the seats did not: give it back
+        if (!mine) { pay.refund(ref, b.amountPaise); return b; }                // a racing retry got there first
+        publish("CONFIRMED", b);                                                // listeners AFTER the lock, never inside it
+        return b;
+    }
+
+    /** Give a hold back early instead of waiting for it to lapse. */
+    void release(String bookingId) {
+        Booking b = find(bookingId);
+        b.show.release(b);
+        publish("EXPIRED", b);
+    }
+
+    /** Undo a confirmed booking: seats back first, money back second, listeners last. */
+    void cancel(String bookingId, PaymentProcessor pay) {
+        Booking b = find(bookingId);
+        long amount = b.show.cancel(b);              // under the lock: the seats are on sale again immediately
+        pay.refund(b.paymentRef, amount);            // after the lock: a slow refund never holds a seat hostage
+        publish("CANCELLED", b);
+    }
+
+    /** A booking by id, across every show. O(1). */
+    Booking find(String bookingId) {
+        Show s = byBooking.get(bookingId);
+        if (s == null) throw new NoSuchElementException("no booking " + bookingId);
+        return s.booking(bookingId);
+    }
+
+    /** Tell every listener, outside the lock, and survive a broken one. */
+    private void publish(String event, Booking b) {
+        for (BookingObserver o : observers) {
+            try { o.onBooking(event, b); } catch (RuntimeException e) { System.err.println("[listener failed] " + e.getMessage()); }
+        }
+    }
+}
+
+/**
+ * Proof it works: two shows on one screen, a hold-pay-confirm, a decline that keeps the seat, three seats
+ * together, a cancel, and fifty phones racing for one seat with exactly one winner.
+ */
+public class Main {
+    /** A small auditorium: row A silver, row B gold, row C platinum. */
+    static Screen auditorium(String id) {
+        List<Seat> seats = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) seats.add(new Seat("A", i, SeatClass.SILVER));
+        for (int i = 1; i <= 6; i++) seats.add(new Seat("B", i, SeatClass.GOLD));
+        for (int i = 1; i <= 4; i++) seats.add(new Seat("C", i, SeatClass.PLATINUM));
+        return new Screen(id, seats);
+    }
+    static String rupees(long paise) { return "Rs " + (paise / 100) + "." + String.format("%02d", paise % 100); }
+
+    public static void main(String[] args) throws Exception {
+        long[] now = { Instant.parse("2026-09-15T12:00:00Z").toEpochMilli() };   // a Tuesday
+        Clock clock = () -> now[0];
+        Screen audi = auditorium("AUDI-1");
+        Theatre pvr = new Theatre("FORUM", "Bengaluru", List.of(audi));
+        long fiveMinutes = 5 * 60_000L;
+        Show six  = new Show("SH-6PM", "Interstellar", audi, Instant.parse("2026-09-15T18:00:00Z").toEpochMilli(), clock, fiveMinutes);
+        Show nine = new Show("SH-9PM", "Interstellar", audi, Instant.parse("2026-09-15T21:00:00Z").toEpochMilli(), clock, fiveMinutes);
+
+        BookingService svc = new BookingService();
+        svc.configure(new ClassPricing(), new AdjacentSeats());
+        svc.addShow(six); svc.addShow(nine);
+        svc.addObserver(new SmsNotifier());
+        Analytics analytics = new Analytics();
+        svc.addObserver(analytics);
+        System.out.println(pvr.city + " / " + pvr.id + " / " + audi.id + ": " + audi.seats.size() + " seats, two shows");
+
+        // hold -> pay -> confirm
+        Booking b1 = svc.hold("SH-6PM", "asha", List.of("B4"));
+        System.out.println("held " + b1.seatIds() + " for " + b1.userId + " at " + rupees(b1.amountPaise) + ", booking " + b1.id);
+        svc.confirm(b1.id, new UpiPayment());
+        System.out.println("6pm B4 = " + six.statusOf("B4") + " | 9pm B4 = " + nine.statusOf("B4") + "  (same chair, different show)");
+
+        // the card is declined: the seat stays held, and comes back by itself when the hold lapses
+        Booking b2 = svc.hold("SH-6PM", "raj", List.of("C1"));
+        try { svc.confirm(b2.id, declining()); } catch (PaymentDeclined e) { System.out.println("expected: " + e.getMessage()); }
+        System.out.println("after the decline C1 = " + six.statusOf("C1") + ", booking " + b2.id + " is " + b2.status);
+        now[0] += fiveMinutes + 1;                       // the user walked away; five minutes pass
+        System.out.println("five minutes later C1 = " + six.statusOf("C1") + " (nobody swept it; the next look reclaimed it)");
+
+        // three seats together, or nothing
+        Booking b3 = svc.holdBest("SH-6PM", "meena", SeatClass.GOLD, 3);
+        svc.confirm(b3.id, new CardPayment());
+        System.out.println("three together: " + b3.seatIds() + " for " + rupees(b3.amountPaise));
+        System.out.println("gold free now: " + six.freeCount(SeatClass.GOLD) + " of 6");
+
+        // a cancel puts the seats back on sale
+        svc.cancel(b3.id, new CardPayment());
+        System.out.println("after cancel, gold free: " + six.freeCount(SeatClass.GOLD) + ", B1 = " + six.statusOf("B1"));
+
+        // weekend surge is a new class and one line
+        Show sat = new Show("SH-SAT", "Interstellar", audi, Instant.parse("2026-09-19T18:00:00Z").toEpochMilli(), clock, fiveMinutes);
+        svc.addShow(sat);
+        svc.configure(new WeekendSurgePricing(new ClassPricing(), ZoneId.of("UTC"), 1.5), new AdjacentSeats());
+        Booking b4 = svc.hold("SH-SAT", "vikram", List.of("C2"));
+        System.out.println("Saturday platinum: " + rupees(b4.amountPaise) + " (weekday was " + rupees(40_000) + ")");
+        svc.release(b4.id);
+
+        // fifty phones, one seat, one latch: exactly one hold
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Booking>> tries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            String user = "fan-" + i;
+            tries.add(pool.submit(() -> { go.await(); return svc.hold("SH-9PM", user, List.of("C4")); }));
+        }
+        go.countDown();
+        int wins = 0; String winner = null;
+        for (Future<Booking> f : tries) {
+            try { winner = f.get().userId; wins++; } catch (ExecutionException e) { /* SeatUnavailable for the 49 losers */ }
+        }
+        pool.shutdown();
+        System.out.println("fifty phones, one seat C4: winners = " + wins + " (must be 1), " + winner + " got it");
+        if (wins != 1) throw new AssertionError("the same seat was held twice");
+        System.out.println("analytics: " + analytics.counts);
+    }
+
+    /** A gateway that always says no, for the decline path. */
+    static PaymentProcessor declining() {
+        return new PaymentProcessor() {
+            public String charge(long paise) { return null; }
+            public void refund(String ref, long paise) { }
+        };
+    }
+}

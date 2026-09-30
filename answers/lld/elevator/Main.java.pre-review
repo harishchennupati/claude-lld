@@ -1,0 +1,687 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+/**
+ * Which way a rider wants to go, and which leg of the sweep a car is on. An enum, not a boolean, so
+ * "up and down at the same time" cannot be written down.
+ */
+enum Direction {
+    UP, DOWN, IDLE;
+    /** The other leg of the sweep. IDLE has no opposite and returns itself. */
+    Direction opposite() { return this == UP ? DOWN : this == DOWN ? UP : IDLE; }
+    /** +1 going up, -1 going down, 0 standing still. Used to move exactly one floor per tick. */
+    int delta()          { return this == UP ? 1 : this == DOWN ? -1 : 0; }
+}
+
+/** The doors. A tick is a door cycle OR one floor of travel, never both; this enum is how that is checked. */
+enum DoorState { OPEN, CLOSED }
+
+/**
+ * A car's life: standing still, sweeping one way, letting people in and out, or out of service.
+ * MAINTENANCE is a dead end until someone returns the car to service.
+ */
+enum CarState { IDLE, MOVING_UP, MOVING_DOWN, DOORS_OPEN, MAINTENANCE }
+
+/**
+ * The button in the hallway: "I am on this floor and I want to go that way." It belongs to the whole bank,
+ * so any car may answer it; the direction is what makes dispatch possible.
+ */
+record HallCall(int floor, Direction direction) {
+    HallCall {
+        if (direction == Direction.IDLE) throw new IllegalArgumentException("a hall call is UP or DOWN, never IDLE");
+    }
+}
+
+/**
+ * An immutable published view of one car: what a panel or the dispatcher reads without touching, or
+ * locking, the car's live state. A reader sees a whole consistent car, never a torn mix of fields.
+ */
+record CarSnapshot(int carId, int floor, Direction heading, CarState state, DoorState doors, int pendingStops) {}
+
+/** Where time comes from. Injected so tests can advance it by hand and waiting times are replayable. */
+interface Clock { long nowMs(); }
+
+/**
+ * The stops a car still owes, split by the leg that will serve them: one sorted set for floors taken on the
+ * way up, one for floors taken on the way down. Every sweep question is a TreeSet lookup, never a scan.
+ */
+class StopSet {
+    private final EnumMap<Direction, NavigableSet<Integer>> legs = new EnumMap<>(Direction.class);
+
+    StopSet() {
+        legs.put(Direction.UP, new TreeSet<>());       // floors served while climbing
+        legs.put(Direction.DOWN, new TreeSet<>());     // floors served while descending
+    }
+
+    /** Remember a floor on one leg. A set, so pressing the same button three times is one stop. */
+    void add(Direction leg, int floor) {
+        if (leg == Direction.IDLE) throw new IllegalArgumentException("a stop belongs to the UP leg or the DOWN leg");
+        legs.get(leg).add(floor);
+    }
+    /** Forget a floor on one leg; called when the doors open there. */
+    void clear(Direction leg, int floor) { legs.get(leg).remove(floor); }
+    /** Drop every stop, both legs. Used only by an emergency stop. */
+    void clearAll()                      { for (NavigableSet<Integer> s : legs.values()) s.clear(); }
+
+    boolean isEmpty() { return legs.get(Direction.UP).isEmpty() && legs.get(Direction.DOWN).isEmpty(); }
+    int size()        { return legs.get(Direction.UP).size() + legs.get(Direction.DOWN).size(); }
+
+    /** Is this floor a stop on the leg the car is sweeping right now? O(log n). */
+    boolean servesOnLeg(int floor, Direction leg) { return leg != Direction.IDLE && legs.get(leg).contains(floor); }
+    /** Is this floor a stop on either leg? Asked only when the car is standing still. */
+    boolean hasAnyAt(int floor) { return legs.get(Direction.UP).contains(floor) || legs.get(Direction.DOWN).contains(floor); }
+
+    /**
+     * Is anything still owed beyond this floor in this direction, on either leg? This single question is
+     * what makes the sweep a sweep: while it is true the car may not turn around. O(log n).
+     */
+    boolean hasStopAhead(int from, Direction leg) {
+        NavigableSet<Integer> up = legs.get(Direction.UP), down = legs.get(Direction.DOWN);
+        return leg == Direction.UP ? (up.higher(from) != null || down.higher(from) != null)
+                                   : (up.lower(from)  != null || down.lower(from)  != null);
+    }
+
+    /** From a standstill, head toward the nearest pending stop on either side; ties go up. */
+    Direction chooseDirection(int from) {
+        Integer above = minOf(legs.get(Direction.UP).higher(from), legs.get(Direction.DOWN).higher(from));
+        Integer below = maxOf(legs.get(Direction.UP).lower(from),  legs.get(Direction.DOWN).lower(from));
+        if (above == null && below == null) return Direction.IDLE;
+        if (above == null) return Direction.DOWN;
+        if (below == null) return Direction.UP;
+        return (above - from) <= (from - below) ? Direction.UP : Direction.DOWN;
+    }
+    /** A copy of one leg, for tests and displays. */
+    Set<Integer> floorsOn(Direction leg) { return new TreeSet<>(legs.get(leg)); }
+
+    // written as ifs on purpose: `a == null ? b : Math.min(a, b)` makes the conditional's type int,
+    // which unboxes the null branch and throws NullPointerException.
+    private static Integer minOf(Integer a, Integer b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a <= b ? a : b;
+    }
+    private static Integer maxOf(Integer a, Integer b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a >= b ? a : b;
+    }
+}
+
+/**
+ * One car: where it is, which way it is sweeping, its doors, and the stops it owes. Every field is written
+ * only under the bank's lock; readers take the immutable snapshot instead.
+ */
+class ElevatorCar {
+    final int id;
+    final int bottomFloor, topFloor;                 // this car's servable range: express cars get a narrow one
+    private int floor;
+    private Direction heading = Direction.IDLE;
+    private CarState state   = CarState.IDLE;
+    private DoorState doors  = DoorState.CLOSED;
+    private final StopSet stops = new StopSet();
+    private final Set<HallCall> held = new HashSet<>();   // hall calls this car owes; handed back if it dies
+    private int dwellLeft = 0;                            // ticks the doors still stay open
+    private volatile CarSnapshot published;               // the lock-free read for panels and estimates
+
+    ElevatorCar(int id, int bottomFloor, int topFloor, int startFloor) {
+        this.id = id; this.bottomFloor = bottomFloor; this.topFloor = topFloor; this.floor = startFloor;
+        republish();
+    }
+
+    /** The last published view. Safe to read from any thread without the bank's lock. */
+    CarSnapshot snapshot()  { return published; }
+    int floor()             { return floor; }
+    Direction heading()     { return heading; }
+    CarState state()        { return state; }
+    DoorState doors()       { return doors; }
+    int pendingStops()      { return stops.size(); }
+    StopSet stops()         { return stops; }
+    /** False only while the car is out of service; the dispatcher filters on this. */
+    boolean inService()     { return state != CarState.MAINTENANCE; }
+    /** Can this car reach that floor at all? An express or zoned car says no to most of the building. */
+    boolean serves(int f)   { return f >= bottomFloor && f <= topFloor; }
+
+    /**
+     * Take a hall call into the sweep. Returns false, having changed nothing, if the car cannot have it:
+     * out of service, or the floor is outside its range. This is the step the bank commits on.
+     */
+    boolean accept(HallCall call) {
+        if (!inService() || !serves(call.floor())) return false;
+        stops.add(call.direction(), call.floor());     // the UP button goes on the up leg, the DOWN button on the down leg
+        held.add(call);
+        republish();
+        return true;
+    }
+
+    /**
+     * A rider inside presses a floor. It joins the leg that reaches it from where the car is now; pressing
+     * it again changes nothing. Returns false if the car cannot serve that floor.
+     */
+    boolean pressFloor(int destination) {
+        if (!inService() || !serves(destination)) return false;
+        Direction leg = destination > floor ? Direction.UP
+                      : destination < floor ? Direction.DOWN
+                      : (heading == Direction.DOWN ? Direction.DOWN : Direction.UP);   // already here: open on this leg
+        stops.add(leg, destination);
+        republish();
+        return true;
+    }
+
+    /**
+     * One tick of physics: a door cycle, or one floor, or a turn plus one of those. Returns the hall calls
+     * this car finished in this tick so the bank can drop them from its index. Called under the bank's lock.
+     */
+    List<HallCall> step(DoorPolicy policy) {
+        if (state == CarState.MAINTENANCE) return List.of();
+
+        if (doors == DoorState.OPEN) {                       // the doors own this tick; the car does not move
+            if (--dwellLeft > 0) { republish(); return List.of(); }
+            doors = DoorState.CLOSED;
+            if (stops.isEmpty()) { heading = Direction.IDLE; state = CarState.IDLE; }
+            else {
+                // choose the leg for the next tick HERE, so the arrow on the panel is never a lie
+                if (heading == Direction.IDLE) heading = stops.chooseDirection(floor);
+                else if (!stops.servesOnLeg(floor, heading) && !stops.hasStopAhead(floor, heading))
+                    heading = heading.opposite();            // nothing left ahead on this leg: the sweep turns here
+                state = heading == Direction.UP   ? CarState.MOVING_UP
+                      : heading == Direction.DOWN ? CarState.MOVING_DOWN : CarState.IDLE;
+            }
+            republish();
+            return List.of();
+        }
+        if (stops.isEmpty()) {                               // nothing owed: stand still
+            heading = Direction.IDLE; state = CarState.IDLE; republish(); return List.of();
+        }
+        if (heading == Direction.IDLE) {
+            if (stops.hasAnyAt(floor)) return open(policy, null);      // standing on a stop: serve both lamps
+            heading = stops.chooseDirection(floor);
+            if (heading == Direction.IDLE) { state = CarState.IDLE; republish(); return List.of(); }
+        }
+        // LOOK: turn around only when nothing is owed ahead on this leg. This one line is the whole algorithm.
+        if (!stops.servesOnLeg(floor, heading) && !stops.hasStopAhead(floor, heading))
+            heading = heading.opposite();
+        if (stops.servesOnLeg(floor, heading)) return open(policy, heading);   // covers the turn floor too
+
+        floor += heading.delta();                            // one floor, and nothing else, this tick
+        state = heading == Direction.UP ? CarState.MOVING_UP : CarState.MOVING_DOWN;
+        republish();
+        return List.of();
+    }
+
+    /** Open the doors and clear the floor from the leg being served (null = both legs, for an idle car). */
+    private List<HallCall> open(DoorPolicy policy, Direction leg) {
+        doors = DoorState.OPEN;
+        state = CarState.DOORS_OPEN;
+        dwellLeft = Math.max(1, policy.dwellTicks(id, floor));
+        List<HallCall> served = new ArrayList<>(2);
+        for (Direction d : leg == null ? List.of(Direction.UP, Direction.DOWN) : List.of(leg)) {
+            stops.clear(d, floor);
+            HallCall done = new HallCall(floor, d);
+            if (held.remove(done)) served.add(done);
+        }
+        republish();
+        return served;
+    }
+
+    /**
+     * The OPEN button inside the car, and the sensor that fires when somebody stands in the doorway: keep the
+     * doors open for a few ticks more. Does nothing if the doors are already shut, so a rider can never stop
+     * a car that is moving. Returns whether the doors were open to hold.
+     */
+    boolean holdDoors(int extraTicks) {
+        if (doors != DoorState.OPEN) return false;
+        dwellLeft = Math.max(dwellLeft, Math.max(1, extraTicks));
+        return true;                                        // nothing published changed: open before, open now
+    }
+
+    /**
+     * The CLOSE button: end the wait now, so the next tick shuts the doors and the sweep goes on. Does
+     * nothing if the doors are already shut.
+     */
+    boolean closeDoorsNow() {
+        if (doors != DoorState.OPEN) return false;
+        dwellLeft = 1;                                      // one tick left, which the close branch above spends
+        return true;
+    }
+
+    /**
+     * Emergency stop or maintenance: halt here with the doors open, drop the stops, and hand back every hall
+     * call still owed so the bank can give them to another car. Nothing is lost.
+     */
+    List<HallCall> goOutOfService() {
+        List<HallCall> owed = dropStops();
+        heading = Direction.IDLE;
+        doors = DoorState.OPEN;                             // riders get out here
+        state = CarState.MAINTENANCE;
+        dwellLeft = 0;
+        republish();
+        return owed;
+    }
+    /**
+     * Forget every stop and hand back the hall calls still owed, staying in service. Used by an emergency
+     * stop and by fire recall; the bank is what decides where those calls go next.
+     */
+    List<HallCall> dropStops() {
+        List<HallCall> owed = new ArrayList<>(held);
+        held.clear();
+        stops.clearAll();
+        republish();
+        return owed;
+    }
+
+    /** Back in service, empty, standing still where it stopped. */
+    void returnToService() {
+        if (state != CarState.MAINTENANCE) return;
+        doors = DoorState.CLOSED; state = CarState.IDLE; heading = Direction.IDLE;
+        republish();
+    }
+
+    /** Take a fresh immutable picture after every mutation. Readers see whole cars, never half-written ones. */
+    private void republish() { published = new CarSnapshot(id, floor, heading, state, doors, stops.size()); }
+}
+
+// "they will change which car answers" -> hide it behind an interface -> Strategy
+/**
+ * Which car answers a hall call. The rule that changes every time an interviewer changes their mind, so it
+ * is handed in, never built by the bank. Gets only the cars that are eligible; may return null for none.
+ */
+interface DispatchStrategy { ElevatorCar pick(List<ElevatorCar> cars, HallCall call); }
+
+/**
+ * Send the car that would reach the caller soonest, counting a sweep the car must finish first. Ties go to
+ * the lowest car id so a bank is deterministic and testable.
+ */
+class NearestCarStrategy implements DispatchStrategy {
+    private final int bottom, top;
+    NearestCarStrategy(int bottom, int top) { this.bottom = bottom; this.top = top; }
+
+    public ElevatorCar pick(List<ElevatorCar> cars, HallCall call) {
+        ElevatorCar best = null; int bestCost = Integer.MAX_VALUE;
+        for (ElevatorCar c : cars) {
+            int cost = cost(c.snapshot(), call, bottom, top);      // scored off the snapshot, never live fields
+            if (cost < bestCost) { best = c; bestCost = cost; }
+        }
+        return best;
+    }
+
+    /**
+     * Floors of travel before this car could open its doors for that call. A car already sweeping toward the
+     * caller and going the caller's way is cheapest; a car going the other way is charged for finishing its
+     * leg to the end of the shaft first, which over-counts a little. It is an estimate, and deliberately the
+     * SAME estimate the lobby board shows, so the number a rider sees and the choice the bank made agree.
+     */
+    static int cost(CarSnapshot s, HallCall call, int bottom, int top) {
+        int f = s.floor(), c = call.floor();
+        switch (s.heading()) {
+            case IDLE: return Math.abs(f - c);
+            case UP:
+                if (c >= f && call.direction() == Direction.UP) return c - f;              // straight on, same way
+                if (c >= f) return (top - f) + (top - c);                                  // above, but wants down
+                return (top - f) + (top - bottom) + (c - bottom);                          // behind: finish up, come down
+            default:
+                if (c <= f && call.direction() == Direction.DOWN) return f - c;
+                if (c <= f) return (f - bottom) + (c - bottom);
+                return (f - bottom) + (top - bottom) + (top - c);
+        }
+    }
+}
+
+// "the lobby wants longer doors, accessibility wants longer still" -> same shape -> Strategy again
+/** How many ticks the doors stay open at a floor. A rule, so it is handed in and never hard-coded in the car. */
+interface DoorPolicy { int dwellTicks(int carId, int floor); }
+
+/** The same dwell everywhere. The starting rule; the lobby and accessibility versions are follow-ups. */
+class FixedDwellPolicy implements DoorPolicy {
+    private final int ticks;
+    FixedDwellPolicy(int ticks) { this.ticks = ticks; }
+    public int dwellTicks(int carId, int floor) { return ticks; }
+}
+
+// "a panel should update but must not be wired into dispatch" -> publish/subscribe -> Observer
+/**
+ * Anyone who wants to hear that a car changed: a display panel, a maintenance monitor, a fire panel. The
+ * bank does not know what they are and is told nothing back.
+ */
+interface ElevatorObserver { void onChange(CarSnapshot s); }
+
+/** The panel above one car's doors. Prints only when what it would show changed, like a real display. */
+class DisplayPanel implements ElevatorObserver {
+    private final int watchedCar;
+    private String shown = "";
+    DisplayPanel(int watchedCar) { this.watchedCar = watchedCar; }
+    public void onChange(CarSnapshot s) {
+        if (s.carId() != watchedCar) return;
+        String now = "floor " + s.floor() + " " + s.state() + (s.doors() == DoorState.OPEN ? " doors open" : "");
+        if (!now.equals(shown)) { shown = now; System.out.println("[panel car " + s.carId() + "] " + now); }
+    }
+}
+
+/**
+ * Counts the floors each car has travelled and asks for service at a threshold. Keeps state, and observers
+ * are called outside the bank's lock from any thread, so its own callback is synchronized: its problem, not
+ * the bank's.
+ */
+class MaintenanceMonitor implements ElevatorObserver {
+    private final int serviceEvery;
+    private final Map<Integer, Integer> lastFloor = new HashMap<>();
+    private final Map<Integer, Integer> travelled = new HashMap<>();
+    private final Set<Integer> flagged = new HashSet<>();
+    MaintenanceMonitor(int serviceEvery) { this.serviceEvery = serviceEvery; }
+
+    public synchronized void onChange(CarSnapshot s) {
+        Integer previous = lastFloor.put(s.carId(), s.floor());
+        if (previous != null) travelled.merge(s.carId(), Math.abs(s.floor() - previous), Integer::sum);
+        if (floorsTravelled(s.carId()) >= serviceEvery && flagged.add(s.carId()))
+            System.out.println("[maintenance] car " + s.carId() + " has travelled "
+                             + floorsTravelled(s.carId()) + " floors: due for service");
+    }
+    /** Floors this car has covered since the monitor was attached. */
+    synchronized int floorsTravelled(int carId) { return travelled.getOrDefault(carId, 0); }
+}
+
+/**
+ * The bank: the aggregate root. It owns the cars, the index of which car owes which hall call, the queue of
+ * calls nobody could take yet, and ONE lock. Every rule it uses is handed in through configure().
+ */
+class ElevatorSystem {
+    private final List<ElevatorCar> cars;
+    private final int bottomFloor, topFloor;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Map<HallCall, Integer> assigned = new HashMap<>();            // guarded by lock: one car per call
+    private final Set<HallCall> pending = new LinkedHashSet<>();                // guarded by lock: waiting for a car
+    private final Map<HallCall, Long> raisedAtMs = new HashMap<>();             // guarded by lock: for the wait times
+    private final List<ElevatorObserver> observers = new CopyOnWriteArrayList<>();
+    private DispatchStrategy dispatch;
+    private DoorPolicy doorPolicy = new FixedDwellPolicy(1);
+    private Clock clock = System::currentTimeMillis;
+    private long totalWaitMs, servedCalls;                                      // guarded by lock
+
+    ElevatorSystem(List<ElevatorCar> cars, int bottomFloor, int topFloor) {
+        this.cars = List.copyOf(cars); this.bottomFloor = bottomFloor; this.topFloor = topFloor;
+        this.dispatch = new NearestCarStrategy(bottomFloor, topFloor);
+    }
+
+    /** Hand in the rules. The bank never builds one itself, so swapping a rule is a new class and this line. */
+    void configure(DispatchStrategy d, DoorPolicy p) { this.dispatch = d; this.doorPolicy = p; }
+    /** Tests hand in a clock they advance themselves. */
+    void setClock(Clock c)              { this.clock = c; }
+    void addObserver(ElevatorObserver o) { observers.add(o); }
+    List<ElevatorCar> cars()            { return cars; }
+    ElevatorCar car(int id)             { return cars.get(id); }
+
+    /**
+     * A hallway button. Under the lock: reject an impossible floor, return the same car if the button is
+     * already lit, score the eligible cars, and only once a car has actually taken the stop record who owes
+     * it. Returns the car id, or -1 when nobody could take it yet (the call waits and is retried every tick).
+     */
+    int requestHall(int floor, Direction direction) {
+        if (direction == Direction.IDLE) throw new IllegalArgumentException("press UP or DOWN, not IDLE");
+        if (floor < bottomFloor || floor > topFloor)                                  // rejected before anything is touched
+            throw new IllegalArgumentException("no floor " + floor + " in this building");
+        if (direction == Direction.UP && floor == topFloor)                           // the ends of the shaft have one button
+            throw new IllegalArgumentException("there is no UP button on the top floor");
+        if (direction == Direction.DOWN && floor == bottomFloor)
+            throw new IllegalArgumentException("there is no DOWN button on the ground floor");
+        HallCall call = new HallCall(floor, direction);
+        int carId; List<CarSnapshot> snaps;
+        lock.lock();                                   // critical section: check + score + accept + record = one step
+        try {
+            raisedAtMs.putIfAbsent(call, clock.nowMs());                    // the rider has waited since the FIRST press
+            Integer already = assigned.get(call);
+            if (already != null) return already;                            // a second press is not a second trip
+            ElevatorCar chosen = choose(call);
+            if (chosen == null) { pending.add(call); return -1; }           // nothing committed: the call waits
+            assigned.put(call, chosen.id);                                  // only now, and only because accept() succeeded
+            pending.remove(call);
+            carId = chosen.id;
+            snaps = snapshots();
+        } finally { lock.unlock(); }
+        publish(snaps);                                // panels hear AFTER the lock; a broken panel stalls no car
+        return carId;
+    }
+
+    /** A button inside a car. The car owns its own stop sets, so this is a straight hand-off. */
+    void requestCar(int carId, int destination) {
+        if (destination < bottomFloor || destination > topFloor)
+            throw new IllegalArgumentException("no floor " + destination + " in this building");
+        List<CarSnapshot> snaps;
+        lock.lock();
+        try {
+            if (!car(carId).pressFloor(destination))
+                throw new IllegalStateException("car " + carId + " cannot serve floor " + destination);
+            snaps = snapshots();
+        } finally { lock.unlock(); }
+        publish(snaps);
+    }
+
+    /**
+     * One step of the world: every car moves one floor or cycles its doors, calls that were served leave the
+     * index, and calls still waiting are offered to the cars again. Observers hear after the lock.
+     */
+    void tick() {
+        List<CarSnapshot> snaps;
+        lock.lock();
+        try {
+            long now = clock.nowMs();
+            for (ElevatorCar c : cars)
+                for (HallCall served : c.step(doorPolicy)) {
+                    assigned.remove(served);
+                    Long raised = raisedAtMs.remove(served);
+                    if (raised != null) { totalWaitMs += now - raised; servedCalls++; }
+                }
+            retryPending();
+            snaps = snapshots();
+        } finally { lock.unlock(); }
+        publish(snaps);
+    }
+
+    /**
+     * Emergency stop: the car halts where it is with its doors open and every hall call it owed goes back on
+     * the waiting queue. The queue is intact, so the next tick hands those calls to another car.
+     */
+    void takeOutOfService(int carId) {
+        List<CarSnapshot> snaps;
+        lock.lock();
+        try {
+            for (HallCall owed : car(carId).goOutOfService()) { assigned.remove(owed); pending.add(owed); }
+            snaps = snapshots();
+        } finally { lock.unlock(); }
+        publish(snaps);
+    }
+    /**
+     * Fire service and the like: under the lock, every car forgets its stops and is sent to one floor. The
+     * hall calls they owed go back on the waiting queue, so nothing is lost while the building is emptied.
+     */
+    void recallAll(int floor) {
+        List<CarSnapshot> snaps;
+        lock.lock();
+        try {
+            for (ElevatorCar c : cars) {
+                for (HallCall owed : c.dropStops()) { assigned.remove(owed); pending.add(owed); }
+                c.pressFloor(floor);
+            }
+            snaps = snapshots();
+        } finally { lock.unlock(); }
+        publish(snaps);
+    }
+
+    /**
+     * The OPEN button inside a car, and the door sensor: hold the doors for a few more ticks. Nothing that a
+     * panel displays changes, so there is nothing to publish. False means the doors were already shut, which
+     * is what pressing it in a moving car does: nothing.
+     */
+    boolean holdDoors(int carId, int extraTicks) {
+        lock.lock(); try { return car(carId).holdDoors(extraTicks); } finally { lock.unlock(); }
+    }
+    /** The CLOSE button inside a car: stop waiting, so the next tick shuts the doors. False if already shut. */
+    boolean closeDoors(int carId) {
+        lock.lock(); try { return car(carId).closeDoorsNow(); } finally { lock.unlock(); }
+    }
+
+    /** Put a car back on the bank; waiting calls may go to it from the next tick. */
+    void returnToService(int carId) {
+        List<CarSnapshot> snaps;
+        lock.lock();
+        try { car(carId).returnToService(); snaps = snapshots(); } finally { lock.unlock(); }
+        publish(snaps);
+    }
+
+    /** Which car owes this call, or -1. */
+    int assignedCar(HallCall call) { lock.lock(); try { return assigned.getOrDefault(call, -1); } finally { lock.unlock(); } }
+    /** Calls nobody could take yet; they are retried on every tick. */
+    Set<HallCall> pendingCalls()   { lock.lock(); try { return new LinkedHashSet<>(pending); } finally { lock.unlock(); } }
+    /** How many hall calls are outstanding: assigned plus waiting. */
+    int outstandingCalls()         { lock.lock(); try { return assigned.size() + pending.size(); } finally { lock.unlock(); } }
+    /** Mean time from the first press of a button to its doors opening, by the injected clock. */
+    double averageWaitMs()         { lock.lock(); try { return servedCalls == 0 ? 0 : (double) totalWaitMs / servedCalls; } finally { lock.unlock(); } }
+
+    /**
+     * Where every car is, read without the lock: each snapshot is an immutable record the car republished
+     * after its last change. This is what a lobby display and an estimate poll a thousand times a second.
+     */
+    List<CarSnapshot> snapshots() {
+        List<CarSnapshot> out = new ArrayList<>(cars.size());
+        for (ElevatorCar c : cars) out.add(c.snapshot());
+        return out;
+    }
+
+    /**
+     * Floors of travel before some car could answer that call: the same cost the dispatcher used. -1 when
+     * every car is out of service, because a board must show "no service", not a nonsense number.
+     */
+    int estimateFloorsToServe(HallCall call) {
+        int best = Integer.MAX_VALUE;
+        for (CarSnapshot s : snapshots()) {                                  // lock-free: snapshots only
+            if (s.state() == CarState.MAINTENANCE) continue;
+            best = Math.min(best, NearestCarStrategy.cost(s, call, bottomFloor, topFloor));
+        }
+        return best == Integer.MAX_VALUE ? -1 : best;
+    }
+
+    // ---- private: all of these run with the lock already held
+    /** Score the eligible cars and make the winner take the stop. Returns null having changed nothing on failure. */
+    private ElevatorCar choose(HallCall call) {
+        List<ElevatorCar> eligible = new ArrayList<>(cars.size());
+        for (ElevatorCar c : cars) if (c.inService() && c.serves(call.floor())) eligible.add(c);
+        if (eligible.isEmpty()) return null;
+        ElevatorCar chosen = dispatch.pick(eligible, call);
+        if (chosen == null || !chosen.accept(call)) return null;             // the car refused: nothing was written
+        return chosen;
+    }
+    /** Offer every waiting call to the cars again. Runs on each tick, so a returning car drains the queue. */
+    private void retryPending() {
+        for (Iterator<HallCall> it = pending.iterator(); it.hasNext(); ) {
+            HallCall call = it.next();
+            if (assigned.containsKey(call)) { it.remove(); continue; }
+            ElevatorCar chosen = choose(call);
+            if (chosen != null) { assigned.put(call, chosen.id); it.remove(); }
+        }
+    }
+    /** Tell every observer, outside the lock, from immutable snapshots. A broken panel corrupts nothing. */
+    private void publish(List<CarSnapshot> snaps) {
+        for (CarSnapshot s : snaps)
+            for (ElevatorObserver o : observers) {
+                try { o.onChange(s); } catch (RuntimeException e) { System.err.println("[observer failed] " + e.getMessage()); }
+            }
+    }
+}
+
+/**
+ * The buttons in a hallway: a thin actor with nothing of its own to remember. All the logic and the lock
+ * live in the bank, which is exactly why many floors pressing at once is safe.
+ */
+class HallPanelButtons {
+    private final ElevatorSystem bank;
+    private final int floor;
+    HallPanelButtons(ElevatorSystem bank, int floor) { this.bank = bank; this.floor = floor; }
+    int up()   { return bank.requestHall(floor, Direction.UP); }
+    int down() { return bank.requestHall(floor, Direction.DOWN); }
+}
+
+/** The buttons inside one car: equally thin, bound to that car. Floor buttons, and the two door buttons. */
+class CarPanelButtons {
+    private final ElevatorSystem bank;
+    private final int carId;
+    CarPanelButtons(ElevatorSystem bank, int carId) { this.bank = bank; this.carId = carId; }
+    void press(int destination) { bank.requestCar(carId, destination); }
+    /** The OPEN button: hold the doors for this many ticks more. False while the doors are shut. */
+    boolean holdDoor(int extraTicks) { return bank.holdDoors(carId, extraTicks); }
+    /** The CLOSE button: stop waiting and let the car move off. False while the doors are shut. */
+    boolean closeDoor()              { return bank.closeDoors(carId); }
+}
+
+/**
+ * Proof it works: a sweep that picks up an on-the-way call, the two door buttons, a car that does not turn
+ * early, a rejected floor, an emergency stop whose calls survive, and forty riders on one button at once.
+ */
+public class Main {
+    /** The simulated clock: one tick is half a second of building time, so waiting times are real numbers. */
+    static final long[] NOW = { 0L };
+    static void tick(ElevatorSystem bank) { NOW[0] += 500; bank.tick(); }
+
+    public static void main(String[] args) throws Exception {
+        int bottom = 0, top = 19;                                   // a twenty-floor tower, lobby = 0
+        List<ElevatorCar> cars = new ArrayList<>();                 // six cars: one in the lobby, five parked high overnight
+        cars.add(new ElevatorCar(0, bottom, top, 0));
+        for (int i = 1; i <= 5; i++) cars.add(new ElevatorCar(i, bottom, top, 14 + i));
+        ElevatorSystem bank = new ElevatorSystem(cars, bottom, top);
+        bank.configure(new NearestCarStrategy(bottom, top), new FixedDwellPolicy(1));
+        bank.setClock(() -> NOW[0]);
+        bank.addObserver(new DisplayPanel(0));                      // the panel above car 0's doors
+        MaintenanceMonitor monitor = new MaintenanceMonitor(12);
+        bank.addObserver(monitor);
+
+        // a rider on floor 2 wants to go up: the bank sends the nearest car and it comes down to fetch them
+        int sent = bank.requestHall(2, Direction.UP);
+        System.out.println("hall call 2 UP -> car " + sent
+                         + " (estimate " + bank.estimateFloorsToServe(new HallCall(2, Direction.UP)) + " floors of travel)");
+        for (int t = 0; t < 3; t++) tick(bank);                     // climb, climb, open the doors at floor 2
+
+        // the two door buttons: OPEN holds the doors (so does the sensor when somebody stands in them), CLOSE ends the wait
+        CarPanelButtons inside = new CarPanelButtons(bank, sent);
+        System.out.println("doors " + bank.car(sent).doors() + " at floor " + bank.car(sent).floor()
+                         + "; OPEN pressed: " + inside.holdDoor(2));
+        tick(bank);
+        System.out.println("a tick later still at floor " + bank.car(sent).floor()
+                         + " with doors " + bank.car(sent).doors() + "; CLOSE pressed: " + inside.closeDoor());
+        tick(bank);                                                 // the doors shut and the car is free again
+
+        bank.requestCar(sent, 12);                                  // the rider presses 12 inside
+        bank.requestHall(6, Direction.UP);                          // someone on 6 also wants up: the same car takes it en route
+        List<Integer> trace = new ArrayList<>();
+        for (int t = 0; t < 2; t++) { tick(bank); trace.add(bank.car(sent).floor()); }
+        bank.requestCar(sent, 1);                                   // now a rider wants the lobby: the sweep must not turn yet
+        for (int t = 0; t < 26; t++) { tick(bank); trace.add(bank.car(sent).floor()); }
+        System.out.println("car " + sent + " floor trace: " + trace);
+        System.out.println("outstanding hall calls: " + bank.outstandingCalls()
+                         + ", average wait " + bank.averageWaitMs() + " ms");
+        System.out.println("car " + sent + " travelled " + monitor.floorsTravelled(sent) + " floors");
+
+        try { bank.requestHall(99, Direction.UP); }                 // there is no floor 99
+        catch (IllegalArgumentException e) { System.out.println("expected: " + e.getMessage()); }
+
+        // an emergency stop must not swallow the calls the car owed
+        int victim = bank.requestHall(17, Direction.DOWN);
+        System.out.println("hall call 17 DOWN -> car " + victim);
+        bank.takeOutOfService(victim);
+        System.out.println("after the emergency stop the call is waiting again: " + bank.pendingCalls());
+        tick(bank);
+        System.out.println("after one tick it belongs to car " + bank.assignedCar(new HallCall(17, Direction.DOWN)));
+
+        // the race: forty riders press UP on floor 12 at the same instant; exactly one car may be sent
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Integer>> presses = new ArrayList<>();
+        for (int i = 0; i < 40; i++) presses.add(pool.submit(() -> { go.await(); return bank.requestHall(12, Direction.UP); }));
+        go.countDown();
+        Set<Integer> answered = new HashSet<>();
+        for (Future<Integer> f : presses) answered.add(f.get());
+        pool.shutdown();
+        System.out.println("forty presses answered by cars " + answered + " (must be exactly one car)");
+        if (answered.size() != 1) throw new AssertionError("the same hall call was dispatched twice!");
+        int winner = answered.iterator().next();
+        long twelves = bank.car(winner).stops().floorsOn(Direction.UP).stream().filter(f -> f == 12).count();
+        System.out.println("floor 12 appears " + twelves + " time(s) in car " + winner + "'s up leg (must be 1)");
+    }
+}

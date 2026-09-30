@@ -1,0 +1,754 @@
+# Notification Service LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"notification-lld/Main.java").read_text()
+ext   = (H/"notification-lld/Extensions.java").read_text()
+tests = (H/"notification-lld/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("submit", 30, [("a caller hands one over", "who, channel, urgency, template"),
+                        ("render it, take their gate", "no quota spent, no key claimed"),
+                        ("walk the reasons not to send", "muted, capped, 3am, already sent"),
+                        ("record it and enqueue", "urgent first, then arrival")]),
+        ("deliver", 165, [("a worker takes the top", "CRITICAL before LOW"),
+                          ("past its deadline? drop it", "the gateway is never called"),
+                          ("call the gateway, no lock", "yes / no / no answer"),
+                          ("record the outcome by rank", "sent, retry, or dead letter")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 2))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+27, x+260), True)
+pf += _ar("M815 84 V95", dash=True) + _bx(660, 95, 310, 40, "suppressed: a reason, never a send", "", dash=True)
+pf += _tx(88, 266, "read", "var(--acc)", 13) + _tx(175, 266, "at any moment, without scanning anything: where is n-8?  why did my user get nothing?  what is in the dead-letter queue?", "var(--text)", 12, "start")
+pf += _tx(615, 305, "fifty callers can submit the same key in the same millisecond: exactly one message may reach the human", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 320, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("09:14:02  an OTP, CRITICAL", ["queued behind 40,000 promos", "taken first: ordinal 0 beats 3",
+                                     "the gateway times out: UNKNOWN", "retried in 100 ms, same key"], True),
+      ("09:14:02  the client retries", ["its HTTP call had timed out", "8 threads, one key login-77",
+                                        "one claim wins, seven are duplicates"], False),
+      ("09:14:03  attempt 2 accepted", ["sms/991a3cc7, state SENT", "the provider collapsed attempt 1",
+                                        "one text message, not two"], True),
+      ("03:00  a promo, same night", ["quiet hours 21:00-08:00 local", "DEFERRED, not dropped",
+                                      "it goes out at 08:00, five hours on"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>Submit: who it is for, which channel, how urgent, which template and its parameters.</li>
+<li>Run every reason it might not go out, and record which one stopped it.</li>
+<li>Deliver urgent first: an OTP submitted last still beats a marketing blast queued first.</li>
+<li>Retry a &ldquo;try again later&rdquo;, with a growing wait and a budget; never retry a malformed address.</li>
+<li>Drop a message whose deadline passed before it reached a gateway.</li>
+<li>Answer &ldquo;where is this notification, and why&rdquo; at any moment.</li>
+<li>Accept a delivery receipt that arrives later, possibly out of order.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Two callers submitting the same key in the same millisecond produce exactly one message.</li>
+<li>Status lookups and preference lookups are O(1); admission into the queue is O(log n).</li>
+<li>Every rule &mdash; channel, reason, retry, template &mdash; swappable without touching the engine.</li>
+<li>One source of truth per notification: the record, and only higher-ranked moves change it.</li>
+<li>Nothing half-done: a refused message never reaches a gateway and never eats a quota.</li>
+<li>A slow or broken provider must not park the worker pool or stop the other channels.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design the notification service. Other teams hand it a message &mdash; who it is for, email or SMS or '
+          'push, how urgent &mdash; and it gets it out: templates, opt-outs, rate caps, retries when the gateway '
+          'is down. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>Every other service in the company wants to tell a '
+ 'human something: your payment failed, here is your code, forty per cent off today. They hand that sentence to '
+ 'you and walk away. You have to turn it into words from a template, find the person\'s address, and decide '
+ 'whether it should go out at all &mdash; they may have unsubscribed, they may have had twenty already today, it '
+ 'may be three in the morning where they live, and the same message may already have been sent thirty seconds '
+ 'ago because the caller\'s HTTP call timed out and their client retried. If it does go out, you hand it to a '
+ 'gateway you do not control, which will sometimes say yes, sometimes say no, and sometimes say nothing at all. '
+ 'The one thing that must always be true is that a human never gets the same message twice because of something '
+ '<i>we</i> did, and no message we accepted is ever silently lost.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that submits a few messages and prints what happened to each. The interviewer is '
+ 'watching for, in this order: the questions you ask before typing (idempotency and the delivery guarantee are '
+ 'the first two); which classes exist and which one owns the state; a submit and a delivery end to end; what '
+ 'happens when two threads submit the same key at the same instant; where the rules that will change live, so a '
+ 'new reason not to send is a new class and not an edit; what the record says when the gateway times out. Then '
+ 'the twists: quiet hours, receipts, priority starvation, batching, persistence, ten instances.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>If a caller\'s request times out and they retry, may the human get two?</td><td>No: an idempotency key with a de-dup window</td><td>A claim that is ONE atomic operation, not check-then-put (moves 4, 5)</td></tr>'
+ '<tr><td>At-least-once or at-most-once? What is the retry budget?</td><td>At-least-once, four attempts, doubling waits</td><td>Three outcomes from a send, and a retry policy handed in (moves 3, 6)</td></tr>'
+ '<tr><td>Does a provider tell us it was delivered, or is &ldquo;accepted&rdquo; the end?</td><td>Receipts arrive later, and out of order</td><td>SENT is not terminal; every update is ranked (move 6)</td></tr>'
+ '<tr><td>Are there priority classes? Does an OTP jump a marketing blast?</td><td>Four classes, urgent first, ties by arrival</td><td>A heap keyed on class then sequence, not a list (move 5)</td></tr>'
+ '<tr><td>Which reasons can stop a message, and who adds new ones?</td><td>Muted, capped, quiet hours, duplicate &mdash; from four teams</td><td>One class per reason, walked in order (move 3)</td></tr>'
+ '<tr><td>One request one channel, or does one request fan out?</td><td>One channel; fan-out is a policy on top</td><td>One record per send, so status still means something (move 12, follow-up 10)</td></tr>'
+ '<tr><td>An in-process library, or a service behind a queue?</td><td>In-process; the queue boundary gets named</td><td>Whether submit is a method or an HTTP handler (moves 2, 12)</td></tr>'
+ '<tr><td>One process and in memory, or ten instances?</td><td>One process, in memory</td><td>No repository yet; a follow-up adds one (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> the caller supplies an idempotency key and the claim on it is one '
+ 'atomic operation; delivery is at-least-once and the same key goes to the provider on every attempt, so a '
+ 'duplicate is removed where duplicates can be removed; a send has three outcomes, not two, because a timeout is '
+ 'neither yes nor no; one record per notification, and every update to it must outrank what is already there. '
+ 'Named as out of scope: fan-out across channels, persistence, ten instances, batching &mdash; each is a '
+ 'follow-up on page 05.</div>')
+print("page 1 built")
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a CALLER submits a NOTIFICATION for a RECIPIENT; TEMPLATES render it, GUARDS judge it, a SENDER hands it over, a RECORD remembers", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 185, "Notification", "every field final: a value", 0), (245, 185, "Recipient", "addresses + timezone", 0),
+                          (460, 205, "DeliveryRecord", "attempt, state, why: it moves", 1), (695, 215, "NotificationService", "queue, ledger, gates, workers", 1),
+                          (940, 130, "Guard", "a rule: no state", 0), (1090, 120, "Sender", "one call: no state", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = state of its own that changes, so it becomes a class.   dashed = a value or a rule: a record, or an interface", "var(--muted)", 11)
+m1 += _tx(615, 210, "the one that surprises people: a notification never changes. Only the RECORD of what happened to it does, and that is where the hard questions live", "var(--muted)", 11)
+MV[1] = _mv(1230, 225, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("turn a template into words", "TemplateEngine  (owns the registry)", "templates.render(id, channel, params)"),
+                                       ("decide whether it goes out at all", "DeliveryGuard  (owns one reason)", "guard.check(n, recipient, now)"),
+                                       ("hand it to a provider", "Sender  (owns one provider)", "sender.send(to, words, key)"),
+                                       ("remember where it got to", "DeliveryRecord  (owns the progress)", "record.moveTo(attempt, state, why)"),
+                                       ("sequence all of that, and only that", "NotificationService  (queue, ledger, gates)", "service.submit(n)")]):
+    y = 20 + k*52
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 295, "a verb whose state is spread over several classes goes to the one that owns them all: that class is the engine, and it does nothing else", "var(--muted)", 11)
+m2 += _tx(615, 315, "and notice what is NOT a verb here: \"retry\". A retry is the same send, one attempt later -- which is why it is a state, not a method", "var(--muted)", 11)
+MV[2] = _mv(1230, 330, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 110, 220, 100, "NotificationService", "configure(...) hands these in", acc=True)
+for k, (t, sub, impl, note) in enumerate([("Sender", "one call per provider", "EmailSender / FlakySmsSender / PushSender", "one class per provider; WhatsApp is a fourth"),
+                                    ("DeliveryGuard", "one reason not to send", "Preference / QuietHours / DailyCap / Dedupe", "one class per reason, walked in order"),
+                                    ("RetryPolicy", "how long, and how many times", "ExponentialBackoff, JitteredBackoff(policy)", "the arithmetic, and nothing else"),
+                                    ("DeliveryListener", "who else wants to know", "ConsoleAudit, Metrics, ReceiptWebhook", "told after the change, never inside the gate"),
+                                    ("Clock and Scheduler", "where now and later come from", "a timer thread, or one that runs inline", "the seam that lets a test stand at 03:00")]):
+    y = 20 + k*54
+    m3 += _ar("M250 160 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 440, 44, impl, note) + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 300, "dashed green = handed in. The engine builds none of them, so \"nothing between 9pm and 8am, except OTPs\" is one new class and one line in a list", "var(--muted)", 11)
+m3 += _tx(615, 320, "and two of them wrap another of their own kind: CircuitBreakerSender(sms) is still a Sender, JitteredBackoff(policy) is still a RetryPolicy. That is Decorator, born here", "var(--acc)", 11)
+MV[3] = _mv(1230, 335, m3)
+
+# move 4: the gap, and one owner with one gate
+m4 = _D + _bx(30, 30, 210, 44, "the first HTTP call", "key login-77: unclaimed") + _bx(30, 110, 210, 44, "the retry, 80 ms later", "key login-77: unclaimed")
+m4 += _bx(370, 70, 200, 44, "the de-dup map", "\"login-77 is not there\"", acc=True)
+m4 += _ar("M240 52 H370 V70") + _ar("M240 132 H370 V114") + _tx(305, 40, "read", "var(--muted)", 10.5) + _tx(305, 160, "read", "var(--muted)", 10.5)
+m4 += '<rect x="610" y="20" width="300" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(760, 45, "the gap", RED, 12) + _tx(760, 70, "both see \"nobody claimed it\"", RED, 11) + _tx(760, 90, "both enqueue; the human gets", RED, 11) + _tx(760, 108, "two OTPs and logs into neither", RED, 11)
+m4 += _tx(760, 138, "fix: decide and claim as ONE step", "var(--text)", 11)
+m4 += _bx(940, 40, 270, 100, "one claim, one step", "putIfAbsent, inside the user's gate", acc=True)
+m4 += _tx(615, 190, "the gate is per RECIPIENT, so two different users never wait for each other, and the reserve-and-check arithmetic of the daily cap is safe inside it", "var(--muted)", 11)
+m4 += _tx(615, 210, "the claim itself is one atomic map operation and needs no gate at all, which is exactly why it survives being moved to Redis SET NX unchanged", "var(--muted)", 11)
+MV[4] = _mv(1230, 225, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D + _tx(220, 16, "the question asked of it", "var(--muted)", 11) + _tx(730, 16, "the shape that answers it", "var(--muted)", 11) + _tx(1115, 16, "the cost", "var(--muted)", 11)
+for k, (q, shape, cost) in enumerate([("where is notification n-8?", "Map&lt;id, DeliveryRecord&gt;", "O(1)"),
+                                      ("which message goes out next?", "PriorityBlockingQueue by (class, arrival)", "O(log n)"),
+                                      ("has this key already been claimed?", "ConcurrentHashMap&lt;key, expiry&gt; + putIfAbsent", "O(1)"),
+                                      ("which sender for this channel?", "EnumMap&lt;Channel, Sender&gt;", "O(1)"),
+                                      ("how many has this user had today?", "Map&lt;user, long[day, used]&gt;", "O(1)"),
+                                      ("what is in the dead-letter queue?", "a scan of the ledger, on purpose", "O(n)")]):
+    y = 28 + k*42
+    m5 += _bx(30, y, 380, 36, q, "") + _ar("M410 %s H450" % (y+18), True)
+    m5 += _bx(450, y, 560, 36, shape, "", acc=True) + _ar("M1010 %s H1030" % (y+18), True) + _bx(1030, y, 170, 36, cost, "")
+m5 += _tx(615, 300, "one shape is deliberately NOT O(1): the dead-letter scan, because a human reads it twice a day and a second index would be one more thing to keep true", "var(--muted)", 11)
+m5 += _tx(615, 318, "and the queue is a heap, not a list: ties are broken by arrival sequence, so the same input always comes out in the same order", "var(--muted)", 11)
+MV[5] = _mv(1230, 330, m5)
+print("moves 1-5 built")
+
+# move 6: the state machine, the rank rule, and the ORDER at the critical step
+m6 = _D
+for x, y, w, t, sub, acc in [(20, 126, 140, "CREATED", "rank 0", 0), (170, 46, 140, "SUPPRESSED", "terminal", 0),
+                             (170, 126, 140, "QUEUED", "rank 10", 0), (170, 206, 140, "DEFERRED", "rank 5", 0),
+                             (320, 46, 140, "EXPIRED", "terminal", 0), (320, 126, 140, "SENDING", "rank 20", 1),
+                             (470, 126, 140, "SENT", "rank 50", 0), (470, 206, 140, "UNKNOWN", "rank 30", 0),
+                             (620, 126, 140, "DELIVERED", "terminal, highest", 0), (620, 206, 140, "RETRY_SCHEDULED", "rank 40", 0),
+                             (770, 206, 140, "FAILED_FINAL", "terminal", 0)]:
+    m6 += _bx(x, y, w, 44, t, sub, acc=bool(acc))
+for d, acc in [("M160 148 H170", True), ("M90 126 V68 H170", False), ("M90 170 V228 H170", False),
+               ("M240 206 V170", False), ("M240 126 V68 H320", False), ("M310 148 H320", True),
+               ("M460 148 H470", True), ("M610 148 H620", True), ("M390 170 V228 H470", False),
+               ("M610 228 H620", False), ("M760 228 H770", False), ("M390 126 V28 H845 V206", False),
+               ("M690 250 V270 H240 V170", False)]:
+    m6 += _ar(d, acc)
+m6 += _tx(96, 105, "guard said no", "var(--muted)", 10, "start") + _tx(96, 205, "quiet hours", "var(--muted)", 10, "start")
+m6 += _tx(246, 105, "deadline passed", "var(--muted)", 10, "start") + _tx(396, 202, "timed out", "var(--muted)", 10, "start")
+m6 += _tx(617, 22, "a permanent failure -- a malformed address -- goes straight here, with no retry at all", "var(--muted)", 10)
+m6 += _tx(465, 266, "queued again, attempt + 1", "var(--muted)", 10)
+m6 += _card(920, 46, 290, 220, "the order at the critical step",
+            ["1  render and resolve: nothing written", "2  take the gate, walk the guards in order",
+             "3  leave the gate, THEN enqueue", "4  a worker checks the deadline first",
+             "5  move to SENDING: it takes ownership", "6  call the gateway with NO lock held",
+             "7  only then write SENT", "", "a crash at 6 leaves the record saying", "SENDING -- which is the truth --",
+             "and the retry carries the same key"], acc=True)
+m6 += _tx(615, 295, "every move is one compare-and-set on one AtomicReference, and it lands only if its rank is HIGHER: rank = attempt x 100 + the number above, and terminal states sit above every attempt", "var(--muted)", 11)
+m6 += _tx(615, 313, "so a receipt for attempt 1 arriving while attempt 2 is in flight changes nothing, a stale timer cannot resurrect a finished record, and only a DELIVERED may overrule \"we gave up\"", "var(--muted)", 11)
+MV[6] = _mv(1230, 325, m6)
+
+# move 7: what is inside the gate, and ten callers at the same instant
+m7 = _D + _card(30, 20, 540, 130, "inside one user's gate: about 1.2 microseconds",
+                ["is this category muted for them? one set lookup", "is it quiet hours where they are? one subtraction",
+                 "have they had twenty today? one array read and write", "claim the idempotency key: one putIfAbsent",
+                 "about six hash operations, and nothing that can block"], acc=True)
+m7 += _ar("M570 85 H640", True) + _tx(605, 75, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 130, "outside it: milliseconds, sometimes seconds",
+            ["rendering the template: before the gate is taken", "the gateway call: 40 to 200 ms, no lock held at all",
+             "the wait before a retry: on a timer, not on a worker", "the audit and the metrics: after, in a try/catch",
+             "the person typing their phone number: seconds"])
+m7 += _tx(615, 178, "ten threads submit for the SAME user at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 193, 106, 40, "caller %d" % (k+1), "waits %s us" % ("0" if k == 0 else "%.1f" % (k*1.2)), acc=(k == 9))
+m7 += _tx(615, 261, "the tenth waits about eleven microseconds for the gate, and then up to two hundred milliseconds for its own gateway call:", "var(--muted)", 11)
+m7 += _tx(615, 279, "one at a time is true, and nobody can tell, because nothing slow is allowed inside the gate -- and two different users never meet at all", "var(--muted)", 11)
+MV[7] = _mv(1230, 293, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one gate per user: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["the gated part of a submit: about six map operations, 1.2 us",
+                       "a flash sale: 2,000 submits a second, spread over two million users",
+                       "one user gets a handful a second at most: that gate is 0.0004% busy",
+                       "so the gate is not the bottleneck. The gateway is:",
+                       "8 workers x 50 ms per send = 160 sends a second, not 2,000"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 size each pool by rate x latency", "Little's law: 500 SMS/s x 80 ms = 40 threads, one pool per channel"),
+                              ("2 stop parking threads on sockets", "non-blocking provider clients: 8 threads can hold 10,000 calls open"),
+                              ("3 a broker, and many instances", "a topic per priority class, Redis SET NX for the claim, a row per record")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("the client retried a timed-out call", "claim the key with putIfAbsent; test 1: fifty threads, one claim, one gateway call"),
+                                ("the gateway timed out: did it send?", "record UNKNOWN and retry with the SAME key; test 2: three attempts, ends SENT"),
+                                ("the address is malformed", "permanent means no retry at all; test 3: one call, then the dead-letter list"),
+                                ("it sat in the queue past its deadline", "check the deadline before the send; test 4: EXPIRED, the gateway never called"),
+                                ("a receipt for an old attempt arrives", "a move must raise the rank or do nothing; test 5: the stale receipt changes nothing"),
+                                ("3am where the recipient lives", "defer to 08:00 local, do not drop; test 6: held exactly five hours, OTPs walk through"),
+                                ("a duplicate eats the daily quota", "a guard undoes whatever it reserved; test 7: still one slot used, not two"),
+                                ("the provider SDK or a listener throws", "one try/catch each, UNKNOWN for the adapter; test 8: the message still goes out"),
+                                ("the queue is full in a flash sale", "refuse at the door and undo every reservation; test 9: the slot and the key come back"),
+                                ("push failed: fall back to SMS?", "only a FAILURE climbs, a mute is a decision; test 10: a suppression climbs nothing")]):
+    y = 14 + k*38
+    m9 += _bx(30, y, 320, 34, bad, "") + _ar("M350 %s H380" % (y+17), True) + _bx(380, y, 820, 34, fix, "", acc=True)
+m9 += _tx(615, 409, "every claim this design makes has a failure test: FailureTests.java runs ten blocks of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 424, m9)
+print("moves 6-9 built")
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 200), ("the line in the code", 290), ("what it buys", 860)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("interface Sender { SendResult send(to, words, idempotencyKey); }", None), ("a new channel is a class, not an edit", None)],
+          [("Chain of Responsibility", "var(--text)"), ("move 3", None), ("for (DeliveryGuard g : guards) if (g.check(...) != ALLOW) break;", None), ("a fifth reason is a class and one list entry", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new CircuitBreakerSender(sms, 2, 60_000, clock) -- still a Sender", None), ("a dead provider stops costing you workers", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("fire(from, to, why) after the change, one try/catch each", None), ("audit, metrics and receipts, none in the way", None)],
+          [("State", "var(--text)"), ("move 6", None), ("moveTo(attempt, state, why): a higher rank, or nothing at all", None), ("an out-of-order webhook is harmless", None)],
+          [("Builder", "var(--text)"), ("move 1", None), ("Notification.to(u, SMS, \"otp\").priority(CRITICAL).dedupeKey(k)", None), ("seven fields, four optional: earned here", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the service is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("the tests build ten of them", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("the Channel -&gt; Sender map IS the registry, one line each", "var(--muted)"), ("earns the name when channels are config strings", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 305, "name a pattern only after the move that produced it; then every name has a one-sentence defence, and Builder is the one this problem actually earns", "var(--muted)", 11)
+MV[10] = _mv(1230, 320, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 470), ("the line that shows it", 570)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("a guard knows one rule; a sender one provider; the record the life cycle", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("QuietHoursGuard is a new file plus one entry in the list handed to configure()", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("sender.send(to, words, key);  never \"is this the SMS one?\"", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("Sender, DeliveryGuard, RetryPolicy, Clock, Scheduler: a fake for a test is a lambda", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("configure(templates, directory, policy, guards, senders, clock, scheduler)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "quiet hours, a spend cap, a fraud hold", "a new class behind DeliveryGuard, plus one entry in the list", "", "move 3"),
+        ("someone new wants to know", "receipts, metrics, a data warehouse", "one more listener; the queue and the gate do not move", "", "move 4"),
+        ("a new step in a life", "DELIVERED, BOUNCED, READ, CANCELLED", "one more state with a rank, and the edges it may come from", "", "move 6"),
+        ("a new invariant across messages", "at most one OTP a minute per user", "the check and the reserve inside the SAME gate: all or nothing", "", "move 4"),
+        ("state that must outlive the process", "persist it; ten instances", "the ledger behind a repository, and moveTo becomes", "UPDATE ... SET state = ?, rank = ? WHERE id = ? AND rank &lt; ?", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the engine, the queue and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+print("moves 10-12 built")
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>caller</b> submits a <b>notification</b> for a <b>recipient</b>; a "
+ "<b>template</b> turns it into words; <b>guards</b> decide whether it goes out; a <b>sender</b> hands it to a "
+ "provider; something has to <b>remember</b> what happened. Now sort them by whether they hold state that "
+ "changes. A notification does not: every field is final, because the request a caller made is a fact and facts "
+ "do not move. A recipient is addresses plus a timezone: a value. A template is text. A guard and a sender have "
+ "no fields at all worth the name &mdash; they are rules and calls &mdash; so they are interfaces. What is left "
+ "is the pair that carries everything: the <code>DeliveryRecord</code>, which holds which attempt we are on, "
+ "what state it reached and why, and the <code>NotificationService</code>, which holds the queue, the ledger of "
+ "records, the gates and the workers. That split is the whole design in one line: the message never changes, and "
+ "the record of what happened to it is the only thing that does.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Turn a template into words\" touches the template registry, so <code>templates.render(id, channel, params)</code>. "
+ "\"Decide whether it goes out\" touches one rule's own data &mdash; the mute set, the day's counter, the claimed "
+ "keys &mdash; so each reason gets its own class and one method, <code>guard.check(n, recipient, now)</code>. "
+ "\"Hand it to a provider\" touches a connection, so <code>sender.send(to, words, key)</code>. \"Remember where "
+ "it got to\" touches the progress, so <code>record.moveTo(attempt, state, why)</code>. What is left touches all "
+ "of them at once &mdash; the queue, the ledger, the gates, the workers &mdash; and only the service sees all of "
+ "those, so the service sequences and does nothing else. And notice what is <i>not</i> a verb: \"retry\". A retry "
+ "is the same send one attempt later, which is why it turns up in move 6 as a state rather than here as a method.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Which providers exist will change: email today, WhatsApp next quarter. Which reasons can stop a message will "
+ "change, and they arrive from four different teams on four different days: muted, too many today, three in the "
+ "morning, already sent. How long you wait before trying again will change. Who wants to hear about it will "
+ "change. So each becomes a one-method interface the service is <i>given</i> in <code>configure(...)</code> and "
+ "never builds. This is where the patterns come from, not the other way round: a swappable rule behind an "
+ "interface is <b>Strategy</b>; an ordered list of independent reasons, each able to stop the walk, is <b>Chain "
+ "of Responsibility</b>; a service that announces what happened without knowing what an audit log is, is "
+ "<b>Observer</b>; and a class that implements the same interface it wraps &mdash; "
+ "<code>CircuitBreakerSender(sms)</code> is still a <code>Sender</code>, <code>JitteredBackoff(policy)</code> is "
+ "still a <code>RetryPolicy</code> &mdash; is <b>Decorator</b>. I do them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "A caller's HTTP call times out, their client retries eighty milliseconds later, and both requests land on "
+ "different threads of your service. Both ask \"has key login-77 been claimed?\", both are told no, both enqueue, "
+ "and the human gets two one-time passwords and logs in with neither. The gap is between the read and the write, "
+ "so the read and the write must be one step. There are two of those steps here, and they are answered "
+ "differently on purpose. The claim itself is a single atomic map operation &mdash; <code>putIfAbsent</code> "
+ "returns the previous value, so exactly one of fifty threads sees null &mdash; and because it is one operation "
+ "it needs no lock at all, which is exactly why it survives being moved to Redis <code>SET key NX PX</code> "
+ "unchanged. The daily cap is not one operation: it reads a counter, compares it and writes it back, so it needs "
+ "a lock, and the lock is per <i>recipient</i>, so two different users never wait for each other. Everything the "
+ "guards do happens inside that gate; nothing slow is allowed in, and the listeners are called after it.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"Where is notification n-8?\" is a map from id to record, which is what makes a support screen instant. "
+ "\"Which message goes out next?\" is a heap ordered by priority class and then by arrival sequence, so an OTP "
+ "submitted last still beats a marketing blast queued first, and ties never reorder &mdash; the same input always "
+ "comes out in the same order, which is what makes a bug reproducible. \"Has this key been claimed?\" is a "
+ "concurrent map from key to expiry. \"Which sender for this channel?\" is an <code>EnumMap</code>, an array "
+ "behind a friendly name. \"How many has this user had today?\" is a map from user to a two-slot array, the day "
+ "and the count, so a new day resets itself without a sweeper. One shape is deliberately <i>not</i> O(1): the "
+ "dead-letter list is a scan of the ledger, because a human reads it twice a day and a second index would be one "
+ "more thing that can disagree with the first.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "A boolean <code>sent</code> flag is a lie the moment retries exist: it cannot tell \"failed once, will try "
+ "again\" from \"dead\", and it certainly cannot tell either of those from \"the gateway never answered\". So "
+ "write the life down: created, then queued or deferred or suppressed; sending; then sent, or unknown, or "
+ "scheduled for another attempt, or expired, or finally failed; and later, from a webhook, delivered. Then give "
+ "every state a rank and make every move a compare-and-set that only lands if it <i>raises</i> the rank, with the "
+ "rank scoped to the attempt: <code>attempt &times; 100 + the state's number</code>, and terminal states above "
+ "every attempt. That one rule pays for itself four times over &mdash; a receipt for attempt 1 arriving while "
+ "attempt 2 is in flight changes nothing, a timer that fires after a cancel changes nothing, the same webhook "
+ "delivered twice changes nothing the second time, and only a DELIVERED receipt may overrule \"we gave up\", "
+ "because if the handset got it, it got it. The order is the other half. Render and resolve before the gate, so "
+ "a missing template throws with nothing reserved. Take the gate, run the guards, leave the gate, then enqueue. "
+ "In the worker: check the deadline, take ownership by moving to SENDING, and only then call the gateway &mdash; "
+ "with no lock held at all, because it is the one slow thing here. Write SENT only after the gateway has said "
+ "yes. A crash in between leaves the record saying SENDING, which is the truth, and the retry carries the same "
+ "idempotency key so the provider can collapse the duplicate.", 6),
+("Move 7: yes, one user's submits happen one at a time. Ask for how long, and what is inside the gate.",
+ "The question you will be asked: if every submit takes a lock, have you serialised the notification service? "
+ "For one user, for about 1.2 microseconds, yes. Inside the gate there is a set lookup for the mute, one "
+ "subtraction for the local hour, one array read and write for the daily count, and one <code>putIfAbsent</code> "
+ "for the key: roughly six hash operations, none of which can block. Everything slow is outside it. The template "
+ "is rendered before the gate is taken, deliberately, because that is the part that can throw and it must not be "
+ "able to leave a quota half-spent. The gateway call &mdash; forty to two hundred milliseconds &mdash; happens on "
+ "a worker with no lock held at all. The wait before a retry happens on a shared timer, not by sleeping a worker, "
+ "which is the difference between one degraded provider costing you nothing and one degraded provider taking down "
+ "every channel. So when ten threads submit for the same user at the same instant, the tenth waits about eleven "
+ "microseconds for the gate, and then waits on its own gateway call like everybody else.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "A flash sale is two thousand submits a second spread across two million users, so any one user's gate sees a "
+ "handful a second against a gate held for 1.2 microseconds: four ten-thousandths of one per cent busy. The gate "
+ "is not the bottleneck and saying so out loud is half the answer. The gateway is: eight workers each blocked for "
+ "fifty milliseconds per send is a hundred and sixty sends a second, not two thousand, and that is the number to "
+ "fix. The ladder, in the order you would climb it. First, size each pool by rate times latency &mdash; Little's "
+ "law &mdash; and give each channel its own pool, so five hundred SMS a second at eighty milliseconds is forty "
+ "threads and a slow SMS provider cannot take email with it. Second, stop parking threads on sockets at all: "
+ "non-blocking provider clients let eight threads hold ten thousand calls open. Third, and only then, leave the "
+ "process: a broker with a topic per priority class, the claim in Redis, a row per record in a database. Say the "
+ "arithmetic first; climbing the ladder without it is complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "A client retrying a timed-out call (claim the key atomically; fifty threads, one gateway call). A gateway that "
+ "times out so you do not know whether it sent (record UNKNOWN and retry with the <i>same</i> key). A malformed "
+ "address (permanent: no retry at all, straight to the dead-letter list). A message that sat in the queue past "
+ "its deadline (checked before the send, so the gateway is never called). A receipt for an attempt you have "
+ "already moved past (a move must raise the rank or do nothing). Three in the morning where the recipient lives "
+ "(defer to eight, do not drop &mdash; and an OTP walks through). A duplicate quietly eating the user's daily "
+ "quota (a guard undoes whatever it reserved when a later guard refuses). A provider SDK or a metrics sink that "
+ "throws (one try/catch each; a broken listener is not allowed to stop a notification, and a broken adapter "
+ "becomes an UNKNOWN rather than a lost worker). A flash sale that fills the bounded queue (refuse at the door, "
+ "and undo every reservation the guards made, so the slot and the key both come back). And a fallback to another "
+ "channel that climbs past an opt-out (only a FAILURE climbs; a suppression is a decision somebody made). Each of "
+ "these is a few lines in FailureTests.java; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "The table is the answer; the second column is why it is one. Every name in it arrived because a move produced "
+ "it, so each can be defended in a sentence, and none of them is there because a book said so. One row needs more "
+ "than a line, because it is the pattern people mis-name: a <b>Decorator</b> implements the same interface it "
+ "wraps. <code>CircuitBreakerSender</code> holds a <code>Sender</code> and <i>is</i> a <code>Sender</code>; "
+ "<code>JitteredBackoff</code> holds a <code>RetryPolicy</code> and <i>is</i> a <code>RetryPolicy</code>. The "
+ "engine cannot tell the difference, which is why every channel gets the behaviour without an edit anywhere. And "
+ "the two grey rows matter as much as the six above them: an interviewer learns more from a pattern you refused "
+ "than from one you used, and page 05 has the argument for each.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "Read the table as a check, not a recital: every letter should point at a line of your own code, and if one "
+ "points at nothing you named the principle rather than followed it. The letter carrying the most weight on this "
+ "problem is I. Five interfaces with one or two methods each means a fake is a lambda, not a class &mdash; which "
+ "is how the failure suite hands in a clock standing at three in the morning, a scheduler that runs every retry "
+ "immediately, and a gateway that times out twice on purpose, and still finishes in under a second with no sleeps "
+ "anywhere in it.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (quiet hours, a spend cap, a fraud hold) is a new class behind <code>DeliveryGuard</code> plus one "
+ "entry in the list handed to configure. Someone new who wants to know (delivery receipts, metrics, a data "
+ "warehouse) is one more listener; the queue and the gate do not move. A new step in a life (DELIVERED, BOUNCED, "
+ "READ, CANCELLED) is one more state with a rank and the edges it may come from. A new invariant across messages "
+ "(at most one OTP a minute per user) is the check and the reserve inside the <i>same</i> gate, all or nothing. "
+ "State that must outlive the process (persist it; ten instances) is the ledger behind a repository interface, "
+ "and <code>moveTo</code> becomes <code>UPDATE ... SET state = ?, rank = ? WHERE id = ? AND rank &lt; ?</code> "
+ "&mdash; the database refusing the stale write exactly as the compare-and-set does, with the row count as the "
+ "boolean. For all five the engine, the queue and the tests do not change; that is the test that the derivation "
+ "was right. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, Splitwise) and the class diagram, the lock, the tests, "
+ "the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is "
+ "named before the move that produced it. On this problem move 6 is the load-bearing one, because the thing that makes "
+ "a notification service hard is not sending &mdash; it is what you write down when the gateway does not answer.")
+print("move text built")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# column 1: the caller, the values it hands in, and the two time seams
+put("caller", 10, 20, 290, "any caller", [], ["service.submit(n)", "service.statusOf(id)"])
+put("notif", 10, 110, 290, "Notification",
+    ["id / seq: String, long", "userId / templateId / category", "channel: Channel", "priority: Priority",
+     "params: Map&lt;String, String&gt;", "dedupeKey: String  (optional)", "deadlineMs: long"],
+    ["to(user, channel, tpl): Builder", "idempotencyKey(): String"])
+put("recip", 10, 316, 290, "Recipient", ["userId / email / phone", "deviceToken: String", "utcOffsetHours: int"],
+    ["addressFor(channel): String"])
+put("rendered", 10, 442, 290, "RenderedMessage", ["title: String", "body: String"], [])
+put("clock", 10, 528, 290, "Clock", [], ["nowMs(): long"], "interface")
+put("sched", 10, 602, 290, "Scheduler", [], ["schedule(task, delayMs)"], "interface")
+# column 2: the aggregate root and what it owns
+put("svc", 320, 20, 330, "NotificationService",
+    ["queue: PriorityBlockingQueue", "depth / outstanding: AtomicInteger", "ledger: Map&lt;id, DeliveryRecord&gt;",
+     "gates: Map&lt;userId, UserGate&gt;", "guards: List&lt;DeliveryGuard&gt;", "senders: EnumMap&lt;Channel, Sender&gt;",
+     "listeners: List&lt;DeliveryListener&gt;"],
+    ["configure(templates, directory,", "  policy, guards, senders, clock, sched)", "addListener(l)",
+     "submit(n): DeliveryRecord", "start() / shutdown()", "statusOf(id) / recordOf(id)",
+     "onReceipt(id, attempt, state, why)", "cancel(id) / deadLetters()"])
+put("rec", 320, 322, 330, "DeliveryRecord",
+    ["notification: Notification", "message: RenderedMessage", "progress: AtomicReference&lt;Progress&gt;",
+     "listeners: List&lt;DeliveryListener&gt;"],
+    ["moveTo(attempt, state, why): boolean", "cancelIfNotStarted(): boolean", "state() / attempt() / detail()"])
+put("prog", 320, 496, 330, "Progress", ["attempt: int", "state: DeliveryState", "detail: String"],
+    ["rank(): long", "rankOf(attempt, state): long"])
+put("gate", 320, 638, 330, "UserGate", ["lock: ReentrantLock", "lastUsedMs: long"], [])
+# column 3: the enums and the value types
+put("chan", 670, 20, 240, "Channel", ["EMAIL, SMS, PUSH,", "IN_APP"], [], "enum")
+put("prio", 670, 106, 240, "Priority", ["CRITICAL, HIGH,", "NORMAL, LOW"], [], "enum")
+put("outcome", 670, 192, 240, "SendOutcome", ["SENT, TRANSIENT,", "PERMANENT, UNKNOWN"], [], "enum")
+put("state", 670, 278, 240, "DeliveryState",
+    ["CREATED, DEFERRED, QUEUED,", "SENDING, UNKNOWN,", "RETRY_SCHEDULED, SENT,", "SUPPRESSED, EXPIRED,",
+     "FAILED_FINAL, DELIVERED"], ["rank(): int", "terminal(): boolean"], "enum")
+put("sendres", 670, 452, 240, "SendResult", ["outcome: SendOutcome", "detail: String"],
+    ["sent / transientFailure", "permanentFailure / unknown"])
+put("verdict", 670, 578, 240, "Verdict", ["kind: ALLOW | SUPPRESS", "      | DEFER", "reason / untilMs"], [])
+# column 4: the interfaces handed in
+put("sender", 930, 20, 270, "Sender", [], ["channel(): Channel", "send(to, words, key): SendResult"], "interface")
+put("guard", 930, 110, 270, "DeliveryGuard", [], ["name(): String", "check(n, r, now): Verdict", "undo(n, r)   (default: nothing)"], "interface")
+put("policy", 930, 216, 270, "RetryPolicy", [], ["shouldRetry(attempts): boolean", "backoffMs(attempts): long"], "interface")
+put("listener", 930, 306, 270, "DeliveryListener", [], ["onTransition(rec, from, to, why)"], "interface")
+put("tpl", 930, 380, 270, "TemplateEngine", [], ["render(id, channel, params)"], "interface")
+put("dir", 930, 454, 270, "RecipientDirectory", [], ["lookup(userId): Recipient"], "interface")
+put("prefstore", 930, 528, 270, "PreferenceStore", [], ["enabled(user, channel, cat)"], "interface")
+put("dedupestore", 930, 602, 270, "DedupeStore", [], ["claim(key, now, ttl): boolean", "release(key)"], "interface")
+# the bottom row: the concrete classes, on three buses
+for k, (name, note) in enumerate([("EmailSender", "SMTP"), ("FlakySmsSender", "times out twice"),
+                                  ("PushSender", "APNs / FCM"), ("PreferenceGuard", "muted?"),
+                                  ("QuietHoursGuard", "3am -&gt; defer"), ("DailyCapGuard", "reserves + undoes"),
+                                  ("DedupeGuard", "claims the key"), ("ExponentialBackoff", "100, 200, 400")]):
+    put("i%d" % k, 6 + k*149, 716, 146, name, [], [note])
+
+def stub(x, y1, y2):
+    return '<path d="M%s %s L%s %s" fill="none" stroke="var(--muted)" stroke-width="1.3"/>' % (x, y1, x, y2)
+def bar(x1, x2, y):
+    return '<path d="M%s %s H%s" fill="none" stroke="var(--muted)" stroke-width="1.3"/>' % (x1, y, x2)
+
+EDGES = [
+ # who calls what, and who owns what
+ ln((300, 55), (320, 161), "assoc", "", [(310, 55), (310, 161)]),
+ ln(B["svc"]["b"], B["rec"]["t"], "compose", ""),
+ ln(B["rec"]["b"], B["prog"]["t"], "compose", ""),
+ ln((320, 270), (320, 671), "compose", "", [(304, 270), (304, 671)]),
+ _tx(296, 690, "one gate per recipient", "var(--muted)", 10.5, "end"),
+ ln((320, 400), (300, 203), "assoc", "", [(310, 400), (310, 203)]),
+ ln((320, 440), (300, 475), "assoc", "", [(312, 440), (312, 475)]),
+ ln((650, 557), (670, 355), "assoc", "", [(660, 557), (660, 355)]),
+ # the rules, handed in through configure()
+ ln((650, 96), (930, 55), "inject", "", [(916, 96), (916, 55)]),
+ ln((650, 180), (930, 153), "inject", "", [(908, 180), (908, 153)]),
+ ln((650, 268), (930, 251), "inject", "", [(900, 268), (900, 251)]),
+ ln((650, 440), (930, 333), "notify", "", [(892, 440), (892, 333)]),
+ _tx(1200, 700, "the template engine, the directory and the two stores come in the same way", "var(--acc)", 10.5, "end"),
+ # the three implementation buses
+ stub(1122, 770, 791), ln((1122, 791), (1200, 251), "inherit", "", [(1222, 791), (1222, 251)]),
+ stub(526, 770, 799), stub(675, 770, 799), stub(824, 770, 799), bar(526, 973, 799),
+ ln((973, 799), (1200, 153), "inherit", "", [(1214, 799), (1214, 153)]),
+ stub(79, 770, 807), stub(228, 770, 807), bar(79, 377, 807),
+ ln((377, 807), (1200, 55), "inherit", "", [(1206, 807), (1206, 55)]),
+]
+UMLSVG = uml_svg(1230, 860, EDGES, legend_y=840)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements, and the three buses along the bottom say it once for each family: three senders, four guards, one retry '
+ 'policy. Filled diamond = owns: the service owns one record per notification and one gate per recipient, and a record '
+ 'owns its progress. Plain arrow = references. Dashed green = handed in through <code>configure(...)</code>; the '
+ 'template engine, the directory and the two stores come in the same way, and are left unlabelled only to keep the '
+ 'picture readable. Dotted blue = notifies. <b>Where state lives:</b> a notification holds nothing that moves &mdash; '
+ 'every field is final &mdash; and neither does a recipient, a rendered message, a guard or a sender. Everything that '
+ 'changes is in two places: the <code>Progress</code> inside a record, swapped as one object by compare-and-set, and '
+ 'the service\'s own queue, ledger and gates. Notice what is <i>not</i> here: no Message class separate from '
+ 'Notification, because the words are rendered once at submit and stored on the record; no Retry class, because a retry '
+ 'is a state plus a scheduled re-queue; and no Boolean anywhere near the word "sent". Eight classes in '
+ 'Main.java are off the picture on purpose, because they add nothing to the shape: the in-memory TemplateEngine, '
+ 'RecipientDirectory, PreferenceStore and DedupeStore the tests hand in, the MessageTemplate one of them holds, '
+ 'the ConsoleAudit and Metrics listeners, and TimerScheduler &mdash; plus Main itself, which only runs the demo.')
+print("uml built")
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does; read only those first for the shape, then the bodies for the mechanics. Each copy '
+ 'button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s reference code, with '
+ 'an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (ten blocks of claims proven; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (idempotency and the delivery guarantee first); then type '
+ 'in the order of Main.java: the four enums with DeliveryState carrying a rank, SendResult and Verdict, the Notification '
+ 'with its builder, Clock and Scheduler, the template engine and the directory, the Sender interface with three '
+ 'implementations, the DeliveryGuard interface with four, the retry policy, the listeners, Progress and DeliveryRecord '
+ 'with moveTo, then NotificationService with submit, the worker loop and deliver, and finally a main with a fifty-thread '
+ 'race on one de-dup key.</div></div>')
+
+FU = [
+("Minute 35. Compliance says no notifications between 9pm and 8am local time, except OTPs.", "twist", 10,
+ "This is the question the whole shape exists for, and the answer is a new file. Quiet hours has nothing in common "
+ "with the rules already there &mdash; it needs the recipient's timezone, it only applies to channels that buzz a "
+ "phone, and CRITICAL overrides it &mdash; so in an if-ladder version it would be a fourth clause bolted into "
+ "<code>submit</code> and a fresh chance to break de-dup. Here it is one class implementing DeliveryGuard and one "
+ "entry in the list handed to <code>configure</code>; the engine, the queue, the senders and the state machine are "
+ "untouched. The one design decision worth saying out loud: it DEFERS rather than suppresses, because a receipt the "
+ "user wanted at 3am is still wanted at 8am, and deferring reuses the same scheduler the retries already use. The "
+ "second snippet is the guard next to it, and it shows the other half of the contract: a guard that RESERVES "
+ "something also implements <code>undo</code>, so a message refused by a later guard does not eat the user's quota.",
+ sect(src, "final class QuietHoursGuard", "final class DailyCapGuard") + "\n"
+ + sect(src, "final class DailyCapGuard", "final class DedupeGuard")),
+("Two threads submit the same idempotency key at the same instant. Prove the human gets one message, with a test.", "non-functional", 10,
+ "The race lives between \"has this key been claimed?\" and \"claim it\". <code>putIfAbsent</code> is one "
+ "operation: it returns the previous value, so exactly one of fifty threads sees null and wins, and the other "
+ "forty-nine get a verdict with a reason on it. The claim is taken LAST, after every other guard has said yes, so a "
+ "message we were going to refuse anyway does not burn the key. The proof is not a count of records &mdash; it is a "
+ "count of gateway calls: fifty threads wait on one latch, all fifty submit the same key, and the test then asks the "
+ "fake push provider how many times it was actually called. One. It also checks that exactly one key is held in the "
+ "store, not fifty, which is what catches a leaked reservation.",
+ T("        // 1. fifty threads", "        // 2. the gateway times out")),
+("One gate per user. Does that scale, or have you serialised the notification service?", "non-functional", 5,
+ "It scales, and move 8 has the arithmetic: 1.2 microseconds inside the gate, against a gate that any one user "
+ "touches a handful of times a second. What this card adds is the shape of the code that makes that number true, "
+ "and the one case where it is not. In the code: the message is rendered BEFORE the gate is taken, so the part "
+ "that can throw cannot leave a quota half-spent; the gate is released BEFORE anything is enqueued; and nothing "
+ "inside it can block. The case where it is not true is a single hot userId &mdash; an alerting bot hammering one "
+ "service account &mdash; and the honest answer is that the gate then serialises that account at roughly eight "
+ "hundred thousand admissions a second, which is still far more than the gateway behind it can take. So the thing "
+ "that actually pushes back is the queue, and it does: when it is full, submit undoes every reservation and "
+ "returns a record saying <code>back-pressure: queue full</code>, which is test 9.",
+ sect(src, "DeliveryRecord submit(Notification n)", "DeliveryState statusOf(String")),
+("The SMS gateway times out. Did the message go out or not? What do you write down?", "functional", 10,
+ "You do not know, and the design says so: the outcome of a send is SENT, PERMANENT, TRANSIENT or UNKNOWN, and a "
+ "timeout is UNKNOWN. The record moves to SENDING before the call and to SENT only after the gateway has answered, "
+ "so a crash in between leaves it saying SENDING &mdash; which is the truth &mdash; instead of a boolean that is "
+ "wrong either way. A timeout is then retried, with the SAME idempotency key, because the only place a duplicate "
+ "can actually be removed is the provider. That is the honest position: exactly-once does not exist across a "
+ "network you do not control, so you pick at-least-once plus an idempotent receiver, which is effectively-once. If "
+ "the budget runs out while still UNKNOWN, the answer is not to guess: query the provider by the key and take "
+ "their answer.",
+ sect(src, "private void deliver(DeliveryRecord record)", "private void retryOrGiveUp") + "\n"
+ + X("exactly once is impossible", "jittered backoff")),
+("Support asks \"what happened to notification n-8, and why did my user get nothing\" a thousand times a second.", "non-functional", 5,
+ "One hash lookup. The ledger is a map from id to record, and the record carries the whole answer as one immutable "
+ "triple: which attempt, which state, and the reason in plain words &mdash; \"preference: opted out of marketing on "
+ "PUSH\", \"daily-cap: already had 20 today\", \"dedupe: duplicate of login-77\". That is why a suppressed message "
+ "still gets a record instead of being dropped silently: \"why did my user get nothing\" is the most common support "
+ "question there is, and a system that answers it from logs is a system that answers it in twenty minutes. The read "
+ "takes no lock at all &mdash; the progress lives in an AtomicReference, so a reader either sees the old triple or "
+ "the new one and never a half-written mixture.",
+ sect(src, "DeliveryState statusOf(String", "boolean onReceipt(String")),
+("Providers now post delivery receipts, and they arrive late and out of order. SENT is not the end.", "twist", 5,
+ "Nothing structural changes, because the rank rule was built for exactly this. Every state carries a number, every "
+ "move is a compare-and-set that only lands if it raises the rank, and non-terminal ranks are scoped to the attempt "
+ "&mdash; <code>attempt &times; 100 + the state's number</code> &mdash; so a receipt for attempt 1 arriving while "
+ "attempt 2 is in flight is dropped without touching anything. DELIVERED is terminal and ranks above every other "
+ "terminal state, including FAILED_FINAL, and that is deliberate: if the handset acknowledged it, it arrived, "
+ "whatever we had already written down after giving up. The webhook itself is a listener that remembers which "
+ "provider reference belongs to which record and attempt, so the HTTP handler is three lines.",
+ sect(src, "record Progress(int attempt", "final class DeliveryRecord") + "\n"
+ + X("delivery receipts", "priority lanes")),
+("A flood of CRITICAL alerts means marketing never goes out at all. Fix the starvation.", "twist", 5,
+ "Say the trade first, because a single priority queue really does have this failure: ordering strictly by class "
+ "means a permanent flood of the top class starves the bottom one for ever. Two answers. The cheap one is ageing: "
+ "a message's effective class improves the longer it has waited, so nothing waits indefinitely, at the cost of "
+ "ordering that is no longer purely by class. The real one is a lane per class &mdash; its own workers, its own "
+ "bound &mdash; so each class is guaranteed a share of the pool instead of competing for it. The engine does not "
+ "change at all; only the routing in front of it does, which is the test that it was factored correctly.",
+ X("priority lanes", "batching for email")),
+("The SMS provider is throttling us and every worker is parked on a socket to a gateway that is down.", "twist", 8,
+ "Both answers are the same shape: a class that implements Sender and holds a Sender, so the engine cannot tell "
+ "the difference. The circuit breaker counts consecutive failures and, past a threshold, answers "
+ "TRANSIENT_FAILURE without making a network call for the next minute &mdash; so a dead gateway costs nothing "
+ "instead of parking the pool, and one success closes it again. The rate limiter holds a token bucket per user and "
+ "channel, where the bucket is one immutable record (tokens plus the instant they were measured) inside an "
+ "AtomicReference, so \"refill by elapsed time, then spend one\" is a single compare-and-set and two threads "
+ "cannot both spend the last token. Being refused is a TRANSIENT failure, which means the engine's own backoff "
+ "does the waiting, on the timer, not on a worker. There is a third failure hiding behind those two, and it is "
+ "the one interviewers ask for by name: when the dead gateway comes back, ten thousand parked retries are all due "
+ "in the same millisecond and knock it over again. <code>JitteredBackoff</code> wraps any retry policy and spreads "
+ "each wait across the top half of its range, so three messages that would all have waited 2000 ms wait 1730, 1749 "
+ "and 1348 instead. It is a Decorator as well, which is why it is three lines.",
+ X("a flaky provider", "the provider caps us") + "\n" + X("the provider caps us", "delivery receipts")
+ + "\n" + X("jittered backoff", "one message, several channels")),
+("Twenty alerts in a minute should be one email. And a million-message campaign must not become one spike.", "twist", 5,
+ "Both live above the engine, not inside it. Batching cannot be a Sender: a Sender that buffered would have to "
+ "answer SENT before the provider had seen anything, and that lie is exactly what the three-way SendResult exists "
+ "to prevent. So a collector holds lines for a window or until it is full, then submits ONE notification whose "
+ "parameters are the joined lines &mdash; and every guard, retry and receipt then applies to the digest, unchanged. "
+ "Pacing is the same idea in time: the campaign is chunked and each chunk is handed to the same injected Scheduler "
+ "the retries use, so a million messages spread across an hour. Both are worth naming as policy rather than "
+ "mechanism, because that is why neither one needed a change to the engine.",
+ X("batching for email", "campaign pacing") + "\n" + X("campaign pacing", "persistence and the outbox")),
+("Push failed, so send it by SMS. And if the user turned push off, what then?", "twist", 8,
+ "A ladder of channels, and like batching it lives above the engine rather than inside it. "
+ "<code>ChannelLadder</code> is a listener: it remembers which rung each record it started is on, and when one "
+ "ends in FAILED_FINAL or EXPIRED it submits the same message on the next channel. Every rung is a real "
+ "notification with its own record, its own guards and its own retries, which is what keeps &ldquo;where is "
+ "n-8&rdquo; answerable &mdash; one record per send, never one record carrying three outcomes. The second half of "
+ "the question is what separates a good answer from a careless one: only a FAILURE climbs. A SUPPRESSED does not, "
+ "because a mute, a daily cap or a duplicate is a decision somebody made, and texting a user because they turned "
+ "push off is a compliance incident, not a fallback. The listener runs after the transition has been committed and "
+ "with no lock held, which is why calling submit from inside it is safe; in production the next rung goes to the "
+ "same Scheduler the retries use, so no worker is spent on admission. Test 10 proves both halves: a missing device "
+ "token climbs exactly one rung and the SMS gateway is called once; a muted push climbs none and it is called not "
+ "at all.",
+ X("one message, several channels", "ten instances behind") + "\n"
+ + T("        PushSender pushB = new PushSender();", "        System.out.println(failures == 0")),
+("Persist it. And now there are ten instances behind a load balancer.", "twist", 8,
+ "Two tables and two shared stores, and the engine does not change, only what it was handed. The rank rule maps "
+ "straight onto SQL: <code>moveTo</code> becomes <code>UPDATE ... SET state = ?, rank = ? WHERE id = ? AND rank "
+ "&lt; ?</code>, and the row count is the boolean &mdash; the database refuses the stale write exactly as the "
+ "compare-and-set does. The de-dup claim becomes <code>INSERT ... ON CONFLICT DO NOTHING</code> or Redis "
+ "<code>SET key NX PX ttl</code>, which is the same single atomic claim <code>putIfAbsent</code> was, which is why "
+ "it needed no lock in the first place. The queue becomes a broker with a topic per priority class, and the "
+ "hand-off from submit to queue becomes an outbox row written in the same transaction as the record, so a crash "
+ "between \"accepted\" and \"queued\" is recovered rather than lost.",
+ X("persistence and the outbox", "exactly once is impossible") + "\n" + X("ten instances behind", "Runs every extension")),
+("Add WhatsApp. And Slack for internal alerts.", "functional", 5,
+ "One class per provider implementing Sender, one line in the map handed to <code>configure</code>, and one "
+ "template registered for that channel. No engine edits: the queue, the guards, the retry policy and the state "
+ "machine do not know how many channels exist. The one cost that is not free is worth pointing at rather than "
+ "hiding: Channel is an enum, so a real new channel needs a constant, and the exhaustive switch in "
+ "<code>Recipient.addressFor</code> then refuses to compile until you say which address it uses &mdash; which is "
+ "the compiler doing your code review. Key the registry by String instead and even that disappears, at the cost of "
+ "typos becoming runtime errors.",
+ X("a new channel", "a flaky provider")),
+("Where does time come from, and how do you test quiet hours and backoff without sleeping?", "design", 3,
+ "Two seams, both one-method interfaces, both handed in through configure. <code>Clock</code> answers \"what time "
+ "is it\", so a test stands at 03:00 for a recipient at UTC+5 by handing in a lambda. <code>Scheduler</code> "
+ "answers \"run this later\", so production hands in one shared timer thread &mdash; never a sleeping worker "
+ "&mdash; and a test hands in one that runs the task immediately. That is why the whole failure suite finishes in "
+ "well under a second with no sleeps anywhere: the retry loop runs at full speed while the backoff arithmetic is "
+ "asserted separately, exactly and on its own.",
+ "/** Where time comes from, and where \"later\" comes from. Both injected, both one method. */\n"
+ "interface Clock     { long nowMs(); }\n"
+ "interface Scheduler { void schedule(Runnable task, long delayMs); }\n\n"
+ "// production: one shared timer thread, so ten thousand pending retries cost ten thousand small objects\n"
+ "service.configure(templates, people, policy, guards, senders, System::currentTimeMillis, new TimerScheduler());\n\n"
+ "// a test: stand at 03:00 local for a UTC+5 recipient, and run every retry inline\n"
+ "long threeAm = atLocalHour(3, 5);\n"
+ "Scheduler inline = (task, delayMs) -> task.run();\n"
+ "service.configure(templates, people, policy, List.of(quiet), senders, () -> threeAm, inline);\n\n"
+ "// and assert the arithmetic on its own, with no engine involved at all\n"
+ "RetryPolicy backoff = new ExponentialBackoff(4, 100, 10_000);\n"
+ "assert backoff.backoffMs(1) == 100 && backoff.backoffMs(2) == 200 && backoff.backoffMs(3) == 400;\n"
+ "assert backoff.backoffMs(20) == 10_000;                 // capped, not overflowed to a year\n"),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or a Builder earn its place?", "design", 8,
+ "Moves 10 and 11 already put every pattern and every letter next to the move that produced it, so this card is "
+ "the exhibit instead: one line of real code each, to point at in the room rather than describe. What is worth "
+ "arguing out loud is the three judgements at the bottom of it. Builder is earned here: a notification has seven "
+ "fields of which four are optional, and a seven-argument constructor with three nulls in it is exactly how a "
+ "promotional message goes out on somebody's OTP template. Singleton is not earned: the service is handed to its "
+ "callers, which is why the failure suite builds ten of them and they never see each other. Factory is not earned "
+ "yet: the channel-to-sender map already <i>is</i> the registry, and it gets the name the day channels arrive as "
+ "strings from configuration, because that is the day a switch on a string appears and needs somewhere to live. Of "
+ "the five letters, the one an interviewer actually tests is O, by changing a rule mid-round: quiet hours arrived "
+ "after the design was written and cost one new file and one entry in a list.",
+ "// Strategy: the one line that differs per provider, behind an interface, handed in and never built here\n"
+ "interface Sender { Channel channel(); SendResult send(Recipient to, RenderedMessage m, String idempotencyKey); }\n\n"
+ "// Chain of Responsibility: independent reasons, in order, and the first refusal stops the walk\n"
+ "for (DeliveryGuard g : guards) { Verdict v = g.check(n, to, now); if (v.kind() != ALLOW) { verdict = v; break; } reserved.add(g); }\n"
+ "if (verdict.kind() == SUPPRESS) for (int i = reserved.size() - 1; i >= 0; i--) reserved.get(i).undo(n, to);\n\n"
+ "// Decorator: a Sender that holds a Sender, so the engine cannot tell the difference\n"
+ "Map.of(Channel.SMS, new CircuitBreakerSender(new RateLimitedSender(sms, 50, 10, clock), 2, 60_000, clock));\n\n"
+ "// Observer: announced after the change is committed, one try/catch each\n"
+ "for (DeliveryListener l : listeners) try { l.onTransition(this, from, to, detail); } catch (RuntimeException ignored) {}\n\n"
+ "// State: one compare-and-set, and only if the rank goes UP\n"
+ "if (want <= current.rank()) return false;\n\n"
+ "// Builder: seven fields, four optional -- this is where a builder stops being ceremony\n"
+ "Notification.to(\"u1\", Channel.SMS, \"otp\").priority(Priority.CRITICAL).dedupeKey(\"login-77\")\n"
+ "            .category(\"otp\").params(Map.of(\"code\", \"4821\")).deadlineMs(now + 60_000).build();\n\n"
+ "// Factory: not yet. The registry is already here; it earns the name when channels come from config strings\n"
+ "Map<String, Sender> byName = Map.of(\"EMAIL\", new EmailSender(), \"WHATSAPP\", new WhatsAppSender());\n"),
+]
+
+build(dict(
+    slug="notification-lld", title="Notification Service",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 10 failure blocks and a 50-thread de-dup race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

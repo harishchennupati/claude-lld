@@ -1,0 +1,138 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+// Targeted failure tests: each one proves a claim this design makes on page 02, move 9. Nothing here is a demo;
+// every line either passes or the file exits non-zero.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    public static void main(String[] args) throws Exception {
+
+        // 1. mkdir -p creates every missing level, is safe to repeat, and refuses to hang a directory off a file
+        FileSystem fs = new FileSystem();
+        fs.mkdirs("/a/b/c/d");
+        check(fs.exists("/a") && fs.exists("/a/b/c") && fs.exists("/a/b/c/d"), "mkdir -p created every missing level");
+        fs.mkdirs("/a/b");
+        check(fs.ls("/a").equals(List.of("b")), "mkdir -p on a directory that exists changes nothing");
+        fs.putFile("/a/file.txt", "bytes");
+        try { fs.mkdirs("/a/file.txt/deeper"); check(false, "a directory under a file must be refused"); }
+        catch (NotADirectoryException e) { check(true, "a directory under a file is refused: " + e.getMessage()); }
+
+        // 2. the path is normalised once: "." disappears, ".." pops, and ".." above the root clamps at the root
+        check(FsPath.of("/a/./b/../b/c").toString().equals("/a/b/c"), "\".\" and \"..\" resolve to one canonical path");
+        check(FsPath.of("/a/../../../..").toString().equals("/"), "\"..\" above the root clamps at the root, it does not escape");
+        fs.mkdirs("/home/harish/notes");
+        fs.putFile("/home/harish/notes/todo.txt", "buy milk");
+        check(fs.readString("/home/harish/notes/../notes/./todo.txt").equals("buy milk"), "a path with .. reads the same file");
+
+        // 3. moving a directory into its own subtree would orphan it, so it is refused and nothing moves
+        fs.mkdirs("/src/deep/deeper");
+        List<String> before3 = fs.find("/src", NodeFilter.ANY);
+        try { fs.move("/src", "/src/deep/copy"); check(false, "a move into its own subtree must be refused"); }
+        catch (InvalidMoveException e) { check(true, "a move into its own subtree is refused: " + e.getMessage()); }
+        check(fs.find("/src", NodeFilter.ANY).equals(before3), "and the tree is exactly as it was");
+
+        // 4. rm on a non-empty directory is loud, and recursive takes the whole subtree with it
+        long bytesBefore4 = fs.totalBytes(), filesBefore4 = fs.fileCount();
+        try { fs.delete("/home/harish", false); check(false, "rm on a non-empty directory must be refused"); }
+        catch (DirectoryNotEmptyException e) { check(true, "rm on a non-empty directory is refused: " + e.getMessage()); }
+        check(fs.totalBytes() == bytesBefore4 && fs.fileCount() == filesBefore4, "and nothing was freed by the refused rm");
+        fs.delete("/home/harish", true);
+        check(!fs.exists("/home/harish/notes/todo.txt") && fs.fileCount() == filesBefore4 - 1,
+              "recursive rm took the subtree and the accounting with it");
+
+        // 5. a write over quota is refused before any byte moves: old bytes, counters and the tree are untouched
+        FileSystem q = new FileSystem();
+        AuditGuard audit = new AuditGuard(WriteGuard.allOf(new CapacityGuard(64, 1024)));
+        q.configure(audit);
+        q.putFile("/keep.txt", "small");
+        long bytes5 = q.totalBytes(), files5 = q.fileCount();
+        try { q.putFile("/toobig.bin", "z".repeat(200)); check(false, "a file over the per-file cap must be refused"); }
+        catch (QuotaExceededException e) { check(true, "a file over the per-file cap is refused: " + e.getMessage()); }
+        check(q.totalBytes() == bytes5 && q.fileCount() == files5 && !q.exists("/toobig.bin"),
+              "the refused create left no file, no bytes and no reservation behind");
+        try { q.append("/keep.txt", "z".repeat(100)); check(false, "an append over the cap must be refused"); }
+        catch (QuotaExceededException e) { check(true, "an append over the per-file cap is refused"); }
+        check(q.readString("/keep.txt").equals("small") && q.totalBytes() == bytes5,
+              "the refused append left the old bytes and the counter exactly as they were");
+        check(audit.refused().size() == 2, "the decorating guard recorded both refusals without either rule knowing");
+
+        // 6. eight threads appending to ONE file lose nothing, and the running total still matches a fresh walk
+        FileSystem race = new FileSystem();
+        race.putFile("/log.txt", "");
+        CountDownLatch go6 = new CountDownLatch(1);
+        ExecutorService pool6 = Executors.newFixedThreadPool(8);
+        List<Future<?>> jobs6 = new ArrayList<>();
+        for (int t = 0; t < 8; t++)
+            jobs6.add(pool6.submit(() -> { go6.await(); for (int i = 0; i < 500; i++) race.append("/log.txt", "x"); return null; }));
+        go6.countDown();
+        for (Future<?> f : jobs6) f.get();
+        pool6.shutdown();
+        check(race.read("/log.txt").length == 4000, "8 threads x 500 appends left exactly 4000 bytes: no lost update");
+        check(race.totalBytes() == race.du("/"), "the incremental byte count still equals a fresh du of the tree");
+
+        // 7. fifty threads creating files in ONE directory: all fifty are there, and one name is one entry
+        FileSystem burst = new FileSystem();
+        burst.mkdirs("/inbox");
+        CountDownLatch go7 = new CountDownLatch(1);
+        ExecutorService pool7 = Executors.newFixedThreadPool(16);
+        List<Future<?>> jobs7 = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final int n = i;
+            jobs7.add(pool7.submit(() -> { go7.await(); burst.putFile("/inbox/m" + n + ".txt", "body " + n); return null; }));
+        }
+        go7.countDown();
+        for (Future<?> f : jobs7) f.get();
+        check(burst.ls("/inbox").size() == 50 && burst.fileCount() == 50, "50 concurrent creates produced exactly 50 files");
+        check(new TreeSet<>(burst.ls("/inbox")).size() == 50, "and fifty distinct names, in sorted order");
+        CountDownLatch go7b = new CountDownLatch(1);
+        List<Future<?>> dup = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            final String body = "writer" + i;
+            dup.add(pool7.submit(() -> { go7b.await(); burst.putFile("/inbox/same.txt", body); return null; }));
+        }
+        go7b.countDown();
+        for (Future<?> f : dup) f.get();
+        pool7.shutdown();
+        check(burst.ls("/inbox").size() == 51 && burst.fileCount() == 51,
+              "two threads racing one name left one entry and counted the file once");
+        check(burst.readString("/inbox/same.txt").startsWith("writer"), "and the winner's bytes are whole, not interleaved");
+
+        // 8. watchers run AFTER the unlock: another thread can write while a watcher is still busy
+        FileSystem w = new FileSystem();
+        w.mkdirs("/w");
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean secondFinished = new AtomicBoolean(false);
+        w.watch("/w", e -> {
+            if (!e.path().endsWith("first.txt")) return;
+            try { release.await(3, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+        });
+        Thread a = new Thread(() -> w.putFile("/w/first.txt", "a"));
+        a.start();
+        Thread.sleep(150);                                                  // a is now inside its slow watcher
+        Thread b = new Thread(() -> { w.putFile("/w/second.txt", "b"); secondFinished.set(true); release.countDown(); });
+        b.start();
+        b.join(2000);
+        check(secondFinished.get(), "a second writer got through while a watcher was still running: the lock was already released");
+        a.join(3000);
+        w.watch("/w", e -> { throw new IllegalStateException("this watcher is broken"); });
+        w.putFile("/w/third.txt", "c");
+        check(w.readString("/w/third.txt").equals("c"), "a watcher that throws cannot fail the write that told it");
+
+        // 9. deleting a file somebody is reading unlinks the name; the bytes live until that reader closes
+        FileSystem h = new FileSystem();
+        h.putFile("/open.txt", "still readable");
+        Handle handle = h.open("/open.txt");
+        h.delete("/open.txt", false);
+        check(!h.exists("/open.txt") && handle.readString().equals("still readable"),
+              "the name is gone and the open reader still gets its bytes");
+        check(handle.state() == FileState.UNLINKED, "the file is UNLINKED, not yet freed");
+        handle.close();
+        check(handle.state() == FileState.FREED && h.totalBytes() == 0, "closing the last handle freed the bytes");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

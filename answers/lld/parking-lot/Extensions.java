@@ -1,0 +1,655 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+import java.util.function.*;
+import java.util.stream.*;
+import java.time.*;
+import java.io.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, written against the SAME
+// interfaces Main.java declares, so "it is a new class and one changed line" is literally true here.
+
+// ---- ext: time is injected, so pricing and expiry are testable and replayable
+/** A clock a test owns: it says exactly what you set, and only moves when you move it. */
+class FixedClock implements Clock {
+    private long t;
+    FixedClock(long t) { this.t = t; }
+    FixedClock(String iso) { this.t = Instant.parse(iso).toEpochMilli(); }
+    public long nowMs() { return t; }
+    /** Move time forward by this many milliseconds. */
+    void advance(long ms) { t += ms; }
+}
+
+// ---- ext: pricing rules stack, because each one is the same interface wrapping the last (Decorator)
+/**
+ * The first free minutes: below the grace period the fee is zero, above it the wrapped rule decides.
+ * Wrapped INSIDE everything else, because free is free whatever the surge is.
+ */
+class FreeGracePricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final long graceMs;
+    FreeGracePricing(PricingStrategy base, long graceMinutes) { this.base = base; this.graceMs = graceMinutes * 60_000L; }
+    public long price(Ticket t) { return (t.exitMs - t.entryMs) <= graceMs ? 0 : base.price(t); }
+}
+
+/**
+ * Never more than the cap for one ticket, whatever the wrapped rule says. Wrapped OUTSIDE the surge, or
+ * the surge would multiply the cap: order of wrapping is the answer to "and a cap too?".
+ */
+class DailyCapPricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final long capPaise;
+    DailyCapPricing(PricingStrategy base, long capPaise) { this.base = base; this.capPaise = capPaise; }
+    public long price(Ticket t) { return Math.min(capPaise, base.price(t)); }
+}
+
+/**
+ * Monthly pass holders park free. A set of plates, checked first; everyone else falls through to the
+ * wrapped rule. The lot never learns what a pass is.
+ */
+class MonthlyPassPricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final Set<String> passHolders;
+    MonthlyPassPricing(PricingStrategy base, Set<String> passHolders) { this.base = base; this.passHolders = passHolders; }
+    public long price(Ticket t) { return passHolders.contains(t.vehicle.plate) ? 0 : base.price(t); }
+}
+
+// ---- ext: electric spots -- a spot that gained BEHAVIOUR, so it earned a subclass
+/** A car that wants a charger. A plain Car to the fit table; the assignment rule looks for the subclass. */
+class ElectricCar extends Car {
+    ElectricCar(String plate) { super(plate); }
+}
+
+/**
+ * A compact spot with a charger. The charger starts when the car is assigned and stops when it is
+ * released, which is why this is a subclass and not a flag: it has behaviour of its own.
+ */
+class EvSpot extends ParkingSpot {
+    private final double kW;              // how fast this charger delivers
+    private final Clock clock;
+    private long startedMs = -1;
+    EvSpot(String id, SpotType type, double kW, Clock clock) { super(id, type); this.kW = kW; this.clock = clock; }
+    @Override void assign(Vehicle v) { super.assign(v); startedMs = clock.nowMs(); }     // plug in
+    @Override void release()         { startedMs = -1; super.release(); }                // unplug
+    /** Units delivered so far, read off the meter. Pricing reads this BEFORE the spot is released. */
+    double kWhDelivered() { return startedMs < 0 ? 0 : (clock.nowMs() - startedMs) / 3_600_000.0 * kW; }
+}
+
+/**
+ * Parking plus electricity: the wrapped rule's fee, plus the meter reading times the unit price. The reading
+ * is a measurement, not money, so it becomes paise exactly once, rounded to the nearest paisa.
+ */
+class ChargingPricing implements PricingStrategy {
+    private final PricingStrategy base;
+    private final long paisePerKWh;
+    ChargingPricing(PricingStrategy base, long paisePerKWh) { this.base = base; this.paisePerKWh = paisePerKWh; }
+    public long price(Ticket t) {
+        long p = base.price(t);
+        return t.spot instanceof EvSpot ev ? p + Math.round(ev.kWhDelivered() * paisePerKWh) : p;
+    }
+}
+
+/**
+ * An electric car gets a charger if one is free; a petrol car does not take a charger while an ordinary
+ * spot is free, and takes one only as a last resort. Both answers are a scan of this floor's spots, which
+ * is the price of adding a kind of spot from outside: give EV its own SpotType and both are O(1) again.
+ */
+class EvAwareAssignment implements SpotAssignmentStrategy {
+    private final SpotAssignmentStrategy base;
+    EvAwareAssignment(SpotAssignmentStrategy base) { this.base = base; }
+    public ParkingSpot find(ParkingFloor floor, Vehicle v) {
+        boolean wantsCharger = v instanceof ElectricCar;
+        for (SpotType st : Fit.ORDER.get(v.type)) {                 // smallest fitting size first, as before
+            ParkingSpot match = null;
+            for (ParkingSpot s : floor.spots())
+                if (s.type == st && s.occupant() == null && (s instanceof EvSpot) == wantsCharger) { match = s; break; }
+            if (match != null) return match;
+        }
+        return wantsCharger ? base.find(floor, v) : lastResort(floor, v);   // no charger free / only chargers left
+    }
+    private ParkingSpot lastResort(ParkingFloor floor, Vehicle v) {
+        for (SpotType st : Fit.ORDER.get(v.type)) { ParkingSpot s = floor.peekFree(st); if (s != null) return s; }
+        return null;
+    }
+}
+
+// ---- ext: nearest to the exit -- half of it is the floor's queue order, half is the choice of size
+/**
+ * The queue order that makes a floor hand out its nearest free spot first: a heap keyed by metres from
+ * the exit. Pass it to new ParkingFloor(id, nearestFirst(distance)) and peekFree() is now the nearest.
+ */
+class Nearest {
+    static Supplier<Queue<ParkingSpot>> nearestFirst(Map<String, Integer> distance) {
+        return () -> new PriorityQueue<>(Comparator.comparingInt(s -> distance.getOrDefault(s.id, Integer.MAX_VALUE)));
+    }
+}
+
+/**
+ * On a distance-ordered floor each size's head is already the nearest of that size, so the nearest
+ * overall is the best of the three heads: O(sizes), no scan. On an ordinary floor it is only the nearest
+ * of whatever the plain queues happen to hold, which is why the floor's order is the other half of it.
+ */
+class NearestToExit implements SpotAssignmentStrategy {
+    private final Map<String, Integer> distance;                   // spotId -> metres from the exit, from config
+    NearestToExit(Map<String, Integer> distance) { this.distance = distance; }
+    public ParkingSpot find(ParkingFloor floor, Vehicle v) {
+        ParkingSpot best = null;
+        for (SpotType st : Fit.ORDER.get(v.type)) {
+            ParkingSpot s = floor.peekFree(st);
+            if (s != null && (best == null || d(s) < d(best))) best = s;
+        }
+        return best;
+    }
+    private int d(ParkingSpot s) { return distance.getOrDefault(s.id, Integer.MAX_VALUE); }
+}
+
+// ---- ext: the ticket's life as an explicit transition table (illegal transitions throw, never silently pass)
+/** The same six states as TicketStatus, plus the table of which move is legal from which state. */
+enum TicketState {
+    ISSUED, PAYING, PENDING, PAID, LOST, CLOSED;
+    private static final Map<TicketState, Set<TicketState>> ALLOWED = Map.of(
+        ISSUED,  EnumSet.of(PAYING),                        // checkout starts; a second one is now refused
+        PAYING,  EnumSet.of(PAID, LOST, ISSUED, PENDING),   // paid / paid the lost-ticket cap / declined / timed out
+        PENDING, EnumSet.of(PAYING),                        // the retry: same key, same amount
+        PAID,    EnumSet.of(CLOSED),
+        LOST,    EnumSet.of(CLOSED),
+        CLOSED,  EnumSet.noneOf(TicketState.class));
+    /** The next state, or an exception naming the move that is not in the table. */
+    TicketState to(TicketState next) {
+        if (!ALLOWED.get(this).contains(next)) throw new IllegalStateException(this + " -> " + next + " not allowed");
+        return next;
+    }
+}
+
+// ---- ext: reservations -- a spot booked ahead is held by the booking until it expires
+/**
+ * The placeholder that sits in a reserved spot. A reservation is not an empty spot with a note on it: it
+ * IS an occupant, in the name of the plate that booked it, so "is this spot free?" stays one question.
+ */
+class Reserved extends Vehicle {
+    Reserved(String plate, VehicleType type) { super(plate, type); }
+}
+
+/**
+ * Book a spot ahead of time. reserve() takes the spot out of the floor's free queue now and holds it for
+ * the plate; claim() turns the hold into a real ticket when the car arrives; sweep() gives back every
+ * hold whose deadline has passed. Shown with its own lock; inside ParkingLot it would be three more
+ * methods under the lot's one lock, in the same order: take the spot, then record the hold.
+ */
+class ReservationDesk {
+    /** One hold: the spot, who booked it, and when it stops being theirs. */
+    record Hold(ParkingSpot spot, ParkingFloor floor, String plate, VehicleType type, long expiresMs) {}
+    private final Map<String, Hold> holds = new HashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
+    private final List<ParkingFloor> floors;
+    private final SpotAssignmentStrategy assignment;
+    private final Clock clock;
+    ReservationDesk(List<ParkingFloor> floors, SpotAssignmentStrategy assignment, Clock clock) {
+        this.floors = floors; this.assignment = assignment; this.clock = clock;
+    }
+    /** Hold a fitting spot for this plate until expiresMs, or null if nothing fits. */
+    Hold reserve(String plate, VehicleType type, long expiresMs) {
+        Vehicle placeholder = new Reserved(plate, type);
+        lock.lock();
+        try {
+            if (holds.containsKey(plate)) throw new IllegalStateException("Already reserved: " + plate);
+            for (ParkingFloor f : floors) {
+                ParkingSpot s = assignment.find(f, placeholder);
+                if (s == null) continue;
+                f.take(s);                                   // out of the free queue: no walk-in can be given it
+                s.assign(placeholder);                       // held in the name of the booking
+                Hold h = new Hold(s, f, plate, type, expiresMs);
+                holds.put(plate, h);
+                return h;
+            }
+            return null;
+        } finally { lock.unlock(); }
+    }
+    /** The car turned up: swap the placeholder for the real vehicle and issue the ticket. */
+    Ticket claim(Vehicle v) {
+        lock.lock();
+        try {
+            Hold h = holds.remove(v.plate);
+            if (h == null) throw new NoSuchElementException("No reservation: " + v.plate);
+            if (clock.nowMs() > h.expiresMs()) { giveBack(h); throw new IllegalStateException("Reservation expired: " + v.plate); }
+            h.spot().assign(v);
+            return new Ticket(h.spot(), h.floor(), v, clock.nowMs());
+        } finally { lock.unlock(); }
+    }
+    /** Return every hold whose deadline has passed. How many spots came back. */
+    int sweep() {
+        lock.lock();
+        try {
+            int n = 0;
+            for (Iterator<Map.Entry<String, Hold>> it = holds.entrySet().iterator(); it.hasNext(); ) {
+                Hold h = it.next().getValue();
+                if (clock.nowMs() > h.expiresMs()) { giveBack(h); it.remove(); n++; }
+            }
+            return n;
+        } finally { lock.unlock(); }
+    }
+    private void giveBack(Hold h) { h.spot().release(); h.floor().vacate(h.spot()); }
+}
+
+// ---- ext: the display board at a thousand updates a second -- coalesce, never block a gate
+/**
+ * A board that cannot fall behind. onChange only stores the newest counts per floor, which is one map
+ * write and never blocks the gate that called it; the board's own thread renders whatever is newest when
+ * it gets round to it, so a thousand updates a second become one render per refresh and intermediate
+ * snapshots are dropped, not queued. Losing them is correct: a board only ever shows the latest number.
+ */
+class CoalescingBoard implements ParkingObserver {
+    private final Map<String, Map<SpotType, Integer>> latest = new ConcurrentHashMap<>();
+    private final AtomicInteger renders = new AtomicInteger();
+    private volatile Map<SpotType, Integer> lastRendered;
+    public void onChange(String floorId, Map<SpotType, Integer> free) { latest.put(floorId, free); }   // O(1), never blocks
+    /** What the board's own thread does on each refresh tick: render only what is newest. */
+    void render() {
+        for (Map.Entry<String, Map<SpotType, Integer>> e : latest.entrySet()) {
+            lastRendered = e.getValue();
+            renders.incrementAndGet();
+        }
+        latest.clear();
+    }
+    int renderCount() { return renders.get(); }
+    Map<SpotType, Integer> lastRendered() { return lastRendered; }
+}
+
+// ---- ext: ladder rung 1 -- a lock per floor, so gates on different floors never wait for each other
+/** The same park(), with the one lot lock replaced by one lock per floor. */
+class FloorLocked {
+    private final List<ParkingFloor> floors;
+    private final Map<ParkingFloor, ReentrantLock> locks = new HashMap<>();
+    private final SpotAssignmentStrategy assignment;
+    private final Map<String, Ticket> active = new ConcurrentHashMap<>();
+    FloorLocked(List<ParkingFloor> floors, SpotAssignmentStrategy a) {
+        this.floors = floors; this.assignment = a;
+        for (ParkingFloor f : floors) locks.put(f, new ReentrantLock());
+    }
+    /** Find and take a spot holding only the lock of the floor being looked at. */
+    Ticket park(Vehicle v) {
+        if (active.containsKey(v.plate)) throw new IllegalStateException("Already parked: " + v.plate);
+        for (ParkingFloor floor : floors) {
+            ReentrantLock l = locks.get(floor);
+            l.lock();                                              // only this floor is serialised
+            try {
+                ParkingSpot spot = assignment.find(floor, v);
+                if (spot != null) {
+                    floor.take(spot); spot.assign(v);
+                    Ticket t = new Ticket(spot, floor, v, System.currentTimeMillis());
+                    active.put(v.plate, t);
+                    return t;
+                }
+            } finally { l.unlock(); }
+        }
+        throw new IllegalStateException("Lot full for " + v.type);
+    }
+}
+// Note what the second lock cost: the duplicate-plate check is no longer inside the lock that hands out
+// the spot, so the same plate arriving at two floors at once can now get two spots. The fix is a second
+// atomic step -- putIfAbsent a PENDING marker into `active` before the floor loop, removed if no floor
+// had room. That is what buying floor-level concurrency actually costs, and why you climb the ladder
+// only after the arithmetic in move 8 says you must.
+
+// ---- ext: ladder rung 2 -- no lock at all: claim a spot with one compare-and-set
+/** A spot whose occupant is claimed with a single atomic instruction; exactly one caller can win. */
+class CasSpot {
+    final String id; final SpotType type;
+    private final AtomicReference<Vehicle> occupant = new AtomicReference<>();
+    CasSpot(String id, SpotType type) { this.id = id; this.type = type; }
+    /** null -> v in one hardware step. True means you got it. */
+    boolean tryClaim(Vehicle v) { return occupant.compareAndSet(null, v); }
+    void release() { occupant.set(null); }
+    boolean isFree() { return occupant.get() == null; }
+}
+/** The lock-free floor: walk the fitting sizes and claim the first spot that lets you. */
+class CasFloor {
+    private final Map<SpotType, List<CasSpot>> spots = new EnumMap<>(SpotType.class);
+    CasFloor() { for (SpotType st : SpotType.values()) spots.put(st, new ArrayList<>()); }
+    void add(CasSpot s) { spots.get(s.type).add(s); }
+    /** The spot this vehicle got, or null. A loser simply keeps scanning; nobody ever waits. */
+    CasSpot claim(Vehicle v) {
+        for (SpotType st : Fit.ORDER.get(v.type))
+            for (CasSpot s : spots.get(st))
+                if (s.tryClaim(v)) return s;
+        return null;
+    }
+}
+
+// ---- ext: a truck needs two adjacent spots -- one invariant across two spots, so both under one lock
+/** Which spot is physically beside which. A spot with no neighbour mapped can never be part of a pair. */
+class AdjacentAssignment {
+    private final Map<String, String> next;
+    AdjacentAssignment(Map<String, String> next) { this.next = next; }
+    /** Two free neighbouring LARGE spots, or an empty list. Deterministic: ids in order. */
+    List<ParkingSpot> findRun(ParkingFloor floor) {
+        List<ParkingSpot> all = new ArrayList<>(floor.spots());
+        all.sort(Comparator.comparing(s -> s.id));
+        for (ParkingSpot a : all) {
+            String nid = next.get(a.id);
+            ParkingSpot b = nid == null ? null : floor.spot(nid);
+            if (a.type == SpotType.LARGE && a.occupant() == null
+                && b != null && b.type == SpotType.LARGE && b.occupant() == null) return List.of(a, b);
+        }
+        return List.of();
+    }
+}
+/** A ticket for a vehicle that took more than one spot. Reserved all or none. */
+class MultiSpotTicket {
+    final List<ParkingSpot> spots; final Vehicle vehicle;
+    MultiSpotTicket(List<ParkingSpot> spots, Vehicle vehicle) { this.spots = spots; this.vehicle = vehicle; }
+}
+/**
+ * The whole reservation under ONE lock: find the pair, take both out of the floor's free queues and
+ * assign both, or touch nothing. A second truck arriving in the middle can never be handed half a pair;
+ * that is the word atomic, and it is exactly why the lock is easier here than compare-and-set.
+ */
+class TruckParking {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final AdjacentAssignment adjacent;
+    TruckParking(AdjacentAssignment adjacent) { this.adjacent = adjacent; }
+    /** A pair for this truck, or null when no free pair exists. Nothing is half-taken either way. */
+    MultiSpotTicket park(Truck t, ParkingFloor floor) {
+        lock.lock();
+        try {
+            List<ParkingSpot> run = adjacent.findRun(floor);
+            if (run.isEmpty()) return null;                        // no pair: nothing was touched
+            for (ParkingSpot s : run) { floor.take(s); s.assign(t); }   // both, inside the same lock
+            return new MultiSpotTicket(run, t);
+        } finally { lock.unlock(); }
+    }
+    /** Give a pair back, both together. */
+    void release(MultiSpotTicket mt, ParkingFloor floor) {
+        lock.lock();
+        try { for (ParkingSpot s : mt.spots) { s.release(); floor.vacate(s); } } finally { lock.unlock(); }
+    }
+}
+
+// ---- ext: persistence -- the maps become a repository, and the lock becomes a conditional UPDATE
+/** The two maps in the lot, behind an interface. The services above it do not change. */
+interface TicketRepository {
+    Optional<Ticket> byPlate(String plate);
+    /** Store a ticket, refusing a plate that is already parked. */
+    void save(Ticket t);
+    Ticket remove(String plate);
+}
+/** The in-memory implementation: the same HashMap, now behind the seam. */
+class InMemoryTicketRepository implements TicketRepository {
+    private final Map<String, Ticket> m = new ConcurrentHashMap<>();
+    public Optional<Ticket> byPlate(String p) { return Optional.ofNullable(m.get(p)); }
+    public void save(Ticket t) { if (m.putIfAbsent(t.vehicle.plate, t) != null) throw new IllegalStateException("Already parked: " + t.vehicle.plate); }
+    public Ticket remove(String p) { return m.remove(p); }
+}
+/**
+ * What the spot claim becomes once the lot is two processes and a database:
+ *   UPDATE spot SET plate = ? WHERE id = ? AND plate IS NULL
+ * One row updated means you got it; zero means someone else did. No lock is held across the network,
+ * and the database decides the winner with the same one-atomic-step idea the ReentrantLock used.
+ * computeIfPresent here plays the part of the row lock the database takes for the duration of the UPDATE.
+ */
+class SpotTable {
+    private final Map<String, String> plateOf = new ConcurrentHashMap<>();   // spotId -> plate, "" == NULL
+    void insert(String spotId) { plateOf.put(spotId, ""); }
+    /** Rows updated: 1 if this caller claimed the spot, 0 if it was already taken. */
+    int claim(String spotId, String plate) {
+        int[] rows = { 0 };
+        plateOf.computeIfPresent(spotId, (id, cur) -> { if (cur.isEmpty()) { rows[0] = 1; return plate; } return cur; });
+        return rows[0];
+    }
+    /** Rows updated by: UPDATE spot SET plate = NULL WHERE id = ? AND plate = ? */
+    int release(String spotId, String plate) {
+        int[] rows = { 0 };
+        plateOf.computeIfPresent(spotId, (id, cur) -> { if (cur.equals(plate)) { rows[0] = 1; return ""; } return cur; });
+        return rows[0];
+    }
+    String plateOf(String spotId) { return plateOf.get(spotId); }
+}
+
+// ---- ext: the exit order, written against the transition table so an illegal move cannot pass
+/** The same three steps unpark() uses, with the state table doing the checking out loud. */
+class ExitFlow {
+    /**
+     * PAYING, then the payment, and only then commit: PAID, free the spot, CLOSED. Returns the fee in paise,
+     * or -1 when the payment was declined (back to ISSUED) or not confirmed (PENDING: retry with the same key).
+     */
+    static long checkout(Ticket t, PricingStrategy pricing, PaymentProcessor pay, Clock clock, Runnable freeSpot) {
+        TicketState from = TicketState.valueOf(t.status.name());
+        t.status = TicketStatus.valueOf(from.to(TicketState.PAYING).name());   // a second checkout while PAYING throws here
+        if (from == TicketState.ISSUED) { t.exitMs = clock.nowMs(); t.feePaise = pricing.price(t); }   // PENDING keeps its amount
+        PaymentProcessor via = (from == TicketState.PENDING && t.pendingOn != null) ? t.pendingOn : pay;   // retry where it started
+        TicketState next = switch (via.pay(t.payKey(), t.feePaise)) {  // the gateway's answer picks the next state
+            case OK       -> TicketState.PAID;
+            case DECLINED -> TicketState.ISSUED;                       // the driver tries another card
+            case UNKNOWN  -> TicketState.PENDING;                      // the retry re-sends the same key and amount
+        };
+        t.status = TicketStatus.valueOf(TicketState.PAYING.to(next).name());
+        if (next == TicketState.ISSUED) { t.attempt++; t.pendingOn = null; }   // declined: the next try is a new payment, a new key
+        if (next == TicketState.PENDING) t.pendingOn = via;
+        if (next != TicketState.PAID) return -1;                       // nothing committed; the driver retries
+        freeSpot.run();                                                // only after the money moved
+        t.status = TicketStatus.valueOf(TicketState.PAID.to(TicketState.CLOSED).name());
+        return t.feePaise;
+    }
+}
+
+// ---- ext: a gateway that honours the key -- one key, at most one charge; a retry gets the first answer
+/**
+ * What a card gateway does with the idempotency key, as a fake a test can drive. It remembers every key it
+ * charged; a retry with that key gets OK back and nothing is charged again. timeoutFirst makes the first
+ * charge go through but answer UNKNOWN, the way a network timeout does after the bank already took the money.
+ */
+class IdempotentGateway implements PaymentProcessor {
+    private final Map<String, Long> charged = new ConcurrentHashMap<>();    // key -> paise taken under it
+    private final AtomicBoolean timeoutFirst;
+    IdempotentGateway(boolean timeoutFirst) { this.timeoutFirst = new AtomicBoolean(timeoutFirst); }
+    public PaymentStatus pay(String key, long paise) {
+        if (charged.putIfAbsent(key, paise) != null) return PaymentStatus.OK;   // seen this key: the first answer, no second charge
+        return timeoutFirst.getAndSet(false) ? PaymentStatus.UNKNOWN : PaymentStatus.OK;   // charged; did the answer get back?
+    }
+    /** How many charges were made: one per key, however many times a key was sent. */
+    int charges() { return charged.size(); }
+}
+
+// ---- ext: the Gojek / GoTo version -- numbered slots, driven by text commands from a file or a shell
+/**
+ * The lot of the Gojek statement: one row of slots numbered 1..n, and the nearest slot is the LOWEST free
+ * number. The free numbers live in a TreeSet (a set kept in sorted order), so the nearest is pollFirst()
+ * and leave() puts a number back, O(log n) each. Two maps are kept in step with park and leave, so no
+ * lookup scans the slots.
+ */
+class SlotLot {
+    private final String[] reg, colour;                                   // reg[s] == null means slot s is free
+    private final TreeSet<Integer> free = new TreeSet<>();                // free slot numbers, lowest first
+    private final Map<String, Integer> slotOfReg = new HashMap<>();       // registration number -> its slot
+    private final Map<String, TreeSet<Integer>> slotsOfColour = new HashMap<>();   // colour -> its slots, lowest first
+    SlotLot(int n) { reg = new String[n + 1]; colour = new String[n + 1]; for (int s = 1; s <= n; s++) free.add(s); }
+    /** The slot this car got, the lowest free number, or -1 when the lot is full. */
+    int park(String r, String c) {
+        if (slotOfReg.containsKey(r)) throw new IllegalStateException("Already parked: " + r);
+        Integer s = free.pollFirst();
+        if (s == null) return -1;
+        reg[s] = r; colour[s] = c;
+        slotOfReg.put(r, s);
+        slotsOfColour.computeIfAbsent(c, k -> new TreeSet<>()).add(s);
+        return s;
+    }
+    /** Free a slot; false if it was already free. Both maps change in the same step. */
+    boolean leave(int s) {
+        if (s < 1 || s >= reg.length) throw new IllegalArgumentException("No slot " + s);
+        if (reg[s] == null) return false;
+        slotOfReg.remove(reg[s]);
+        slotsOfColour.get(colour[s]).remove(s);
+        reg[s] = null; colour[s] = null;
+        free.add(s);
+        return true;
+    }
+    int size()               { return reg.length - 1; }
+    String regAt(int s)      { return reg[s]; }
+    String colourAt(int s)   { return colour[s]; }
+    Integer slotOf(String r) { return slotOfReg.get(r); }
+    /** The slots holding cars of this colour, lowest first; empty if there are none. */
+    Set<Integer> slotsOf(String c) { return slotsOfColour.getOrDefault(c, new TreeSet<>()); }
+}
+
+/**
+ * The shell, as the Command pattern kept small: each command word maps to one handler that runs it and
+ * returns the text to print, so a missing command is one more entry, never a longer if-chain. run() reads
+ * lines from any reader: a file, or System.in for the interactive shell.
+ */
+class CommandShell {
+    private SlotLot lot;
+    private final Map<String, Function<String[], String>> handlers = Map.of(
+        "create_parking_lot", a -> { lot = new SlotLot(Integer.parseInt(a[1])); return "Created a parking lot with " + a[1] + " slots"; },
+        "park", a -> { int s = lot.park(a[1], a[2]); return s < 0 ? "Sorry, parking lot is full" : "Allocated slot number: " + s; },
+        "leave", a -> lot.leave(Integer.parseInt(a[1])) ? "Slot number " + a[1] + " is free" : "Slot number " + a[1] + " is already free",
+        "status", a -> status(),
+        "registration_numbers_for_cars_with_colour", a -> list(lot.slotsOf(a[1]).stream().map(lot::regAt)),
+        "slot_numbers_for_cars_with_colour", a -> list(lot.slotsOf(a[1]).stream().map(String::valueOf)),
+        "slot_number_for_registration_number", a -> { Integer s = lot.slotOf(a[1]); return s == null ? "Not found" : s.toString(); });
+
+    /** One line in, the text to print out. An unknown word or bad input is a message, never a crash. */
+    String execute(String line) {
+        String[] a = line.trim().split("\\s+");
+        Function<String[], String> h = handlers.get(a[0]);
+        if (h == null) return "Unknown command: " + a[0];
+        if (lot == null && !a[0].equals("create_parking_lot")) return "Create a parking lot first";
+        try { return h.apply(a); } catch (RuntimeException e) { return "Error: " + e.getMessage(); }
+    }
+    /** Every line from a file or the keyboard, one answer printed per command. */
+    void run(BufferedReader in, PrintStream out) throws IOException {
+        for (String line = in.readLine(); line != null; line = in.readLine())
+            if (!line.isBlank()) out.println(execute(line));
+    }
+    private String status() {
+        StringBuilder b = new StringBuilder(String.format("%-12s%-19s%s", "Slot No.", "Registration No", "Colour"));
+        for (int s = 1; s <= lot.size(); s++)                            // status must print every car: the one scan
+            if (lot.regAt(s) != null) b.append('\n').append(String.format("%-12s%-19s%s", s, lot.regAt(s), lot.colourAt(s)));
+        return b.toString();
+    }
+    private static String list(Stream<String> items) {
+        String s = items.collect(Collectors.joining(", "));
+        return s.isEmpty() ? "Not found" : s;
+    }
+    /** java CommandShell commands.txt runs a file; java CommandShell alone is the interactive shell. */
+    public static void main(String[] args) throws IOException {
+        Reader source = args.length > 0 ? new FileReader(args[0]) : new InputStreamReader(System.in);
+        try (BufferedReader in = new BufferedReader(source)) { new CommandShell().run(in, System.out); }
+    }
+}
+
+/** Runs every block above once, so the reference code on page 05 is code you have seen execute. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        FixedClock clock = new FixedClock("2026-09-05T10:00:00Z");           // a Saturday
+        ParkingLot lot = new ParkingLot();                                    // tests and demos build their own
+        lot.setClock(clock);
+
+        // 1. the pricing stack: grace inside, then flat, then surge, then the cap outside
+        PricingStrategy stack = new MonthlyPassPricing(
+            new DailyCapPricing(new WeekendSurgePricing(new FreeGracePricing(new FlatHourlyPricing(), 15), ZoneId.of("UTC")), 50_000),
+            Set.of("PASS-1"));                                                // cap: Rs 500 = 50,000 paise
+        lot.configure(stack, new SmallestFitStrategy());
+        ParkingFloor f1 = new ParkingFloor("F1");
+        f1.addSpot(new ParkingSpot("F1-C1", SpotType.COMPACT));
+        f1.addSpot(new ParkingSpot("F1-C2", SpotType.COMPACT));
+        lot.addFloor(f1);
+        lot.park(new Car("G-1")); clock.advance(10 * 60_000L);
+        System.out.println("10 minutes on a Saturday = " + lot.unpark("G-1", new CashPayment()) + " paise (inside the 15-minute grace)");
+        lot.park(new Car("G-2")); clock.advance(90 * 60_000L);
+        System.out.println("90 minutes on a Saturday = " + lot.unpark("G-2", new CashPayment()) + " paise (2 h x Rs 20 x 1.5)");
+        lot.park(new Car("PASS-1")); clock.advance(5 * 3_600_000L);
+        System.out.println("a pass holder, five hours = " + lot.unpark("PASS-1", new CashPayment()) + " paise");
+
+        // 2. electric: the charger starts with the car, and the meter is on the bill
+        ParkingLot ev = new ParkingLot(); ev.setClock(clock);
+        ev.configure(new ChargingPricing(new FlatHourlyPricing(), 1_200), new EvAwareAssignment(new SmallestFitStrategy()));   // Rs 12 a kWh
+        ParkingFloor f2 = new ParkingFloor("F2");
+        f2.addSpot(new ParkingSpot("F2-C1", SpotType.COMPACT));
+        f2.addSpot(new EvSpot("F2-EV1", SpotType.COMPACT, 7.0, clock));
+        ev.addFloor(f2);
+        Ticket petrol = ev.park(new Car("PETROL"));
+        Ticket electric = ev.park(new ElectricCar("TESLA"));
+        System.out.println("petrol got " + petrol.spot.id + ", electric got " + electric.spot.id);
+        clock.advance(2 * 3_600_000L);
+        System.out.println("electric bill = " + ev.unpark("TESLA", new CardPayment()) + " paise (2 h x Rs 20 + 14 kWh x Rs 12)");
+        ev.unpark("PETROL", new CardPayment());
+
+        // 3. nearest to the exit: the floor's queue order, then the best of the heads
+        Map<String, Integer> metres = Map.of("F3-C1", 90, "F3-C2", 10, "F3-L1", 30);
+        ParkingFloor f3 = new ParkingFloor("F3", Nearest.nearestFirst(metres));
+        f3.addSpot(new ParkingSpot("F3-C1", SpotType.COMPACT));
+        f3.addSpot(new ParkingSpot("F3-C2", SpotType.COMPACT));
+        f3.addSpot(new ParkingSpot("F3-L1", SpotType.LARGE));
+        ParkingLot near = new ParkingLot(); near.setClock(clock);
+        near.configure(new FlatHourlyPricing(), new NearestToExit(metres)); near.addFloor(f3);
+        System.out.println("nearest first: " + near.park(new Car("N1")).spot.id + ", then " + near.park(new Car("N2")).spot.id
+            + ", then " + near.park(new Car("N3")).spot.id);
+
+        // 4. a reservation is held, expires, and is swept back
+        ParkingFloor f4 = new ParkingFloor("F4");
+        f4.addSpot(new ParkingSpot("F4-C1", SpotType.COMPACT));
+        ReservationDesk desk = new ReservationDesk(List.of(f4), new SmallestFitStrategy(), clock);
+        desk.reserve("BOOK-1", VehicleType.CAR, clock.nowMs() + 30 * 60_000L);
+        System.out.println("after a reservation, compact free on F4 = " + f4.freeCount(SpotType.COMPACT));
+        System.out.println("claimed on time: ticket for " + desk.claim(new Car("BOOK-1")).vehicle.plate);
+
+        // 5. the board at a thousand updates a second
+        CoalescingBoard board = new CoalescingBoard();
+        for (int i = 0; i < 1000; i++) board.onChange("F1", Map.of(SpotType.COMPACT, i));
+        board.render();
+        System.out.println("1000 updates -> " + board.renderCount() + " render(s), showing " + board.lastRendered());
+
+        // 6. no lock at all: fifty cars, one spot, one winner
+        CasFloor cf = new CasFloor(); cf.add(new CasSpot("C1", SpotType.COMPACT));
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        AtomicInteger wins = new AtomicInteger();
+        for (int i = 0; i < 50; i++) { String pl = "P" + i; pool.submit(() -> { go.await(); if (cf.claim(new Car(pl)) != null) wins.incrementAndGet(); return null; }); }
+        go.countDown(); pool.shutdown(); pool.awaitTermination(5, TimeUnit.SECONDS);
+        System.out.println("CAS race: 50 cars, 1 spot, winners = " + wins.get());
+        if (wins.get() != 1) throw new AssertionError();
+
+        // 7. a truck needs two adjacent spots: both or nothing
+        ParkingFloor f5 = new ParkingFloor("F5");
+        f5.addSpot(new ParkingSpot("L1", SpotType.LARGE));
+        f5.addSpot(new ParkingSpot("L2", SpotType.LARGE));
+        f5.addSpot(new ParkingSpot("L3", SpotType.LARGE));
+        TruckParking tp = new TruckParking(new AdjacentAssignment(Map.of("L1", "L2", "L2", "L3")));
+        MultiSpotTicket mt = tp.park(new Truck("TR1"), f5);
+        System.out.println("truck 1 got " + (mt == null ? "nothing" : mt.spots.size() + " spots") + "; truck 2 got "
+            + (tp.park(new Truck("TR2"), f5) == null ? "nothing (no free pair left)" : "a pair?!"));
+
+        // 8. the same claim, in a database
+        SpotTable table = new SpotTable(); table.insert("F1-C1");
+        System.out.println("conditional UPDATE: first claim rows=" + table.claim("F1-C1", "KA01") + ", second rows=" + table.claim("F1-C1", "KA02"));
+
+        // 9. the state table refuses an illegal move
+        System.out.println("ISSUED -> CLOSED: " + tryIt(() -> TicketState.ISSUED.to(TicketState.CLOSED)));
+        InMemoryTicketRepository repo = new InMemoryTicketRepository();
+        ParkingSpot rs = new ParkingSpot("R1", SpotType.LARGE);
+        repo.save(new Ticket(rs, f5, new Truck("T1"), clock.nowMs()));
+        System.out.println("repo refuses a second ticket for the same plate: " + tryIt(() -> repo.save(new Ticket(rs, f5, new Truck("T1"), clock.nowMs()))));
+
+        // 10. a timeout, then a retry with the same key: charged once, by the lot and by the table-checked flow
+        ParkingLot keyed = new ParkingLot(); keyed.setClock(clock);
+        keyed.configure(new FlatHourlyPricing(), new SmallestFitStrategy());
+        ParkingFloor f6 = new ParkingFloor("F6"); f6.addSpot(new ParkingSpot("F6-C1", SpotType.COMPACT)); keyed.addFloor(f6);
+        keyed.park(new Car("KEY-1"));
+        IdempotentGateway gw = new IdempotentGateway(true);
+        System.out.println("timeout: " + tryIt(() -> keyed.unpark("KEY-1", gw)) + "; retry = " + keyed.unpark("KEY-1", gw)
+            + " paise; charges = " + gw.charges());
+        Ticket flow = new Ticket(new ParkingSpot("F7-C1", SpotType.COMPACT), f6, new Car("KEY-2"), clock.nowMs());
+        IdempotentGateway gw2 = new IdempotentGateway(true);
+        long first = ExitFlow.checkout(flow, new FlatHourlyPricing(), gw2, clock, () -> {});
+        System.out.println("ExitFlow: first " + first + " (" + flow.status + "), retry " + ExitFlow.checkout(flow, new FlatHourlyPricing(), gw2, clock, () -> {})
+            + " (" + flow.status + "), charges = " + gw2.charges());
+
+        // 11. the Gojek version: the statement's commands, one handler per command word
+        CommandShell shell = new CommandShell();
+        for (String cmd : List.of("create_parking_lot 2", "park KA-01-HH-1234 White", "park KA-01-HH-9999 Black", "leave 1",
+                                  "park KA-01-P-333 White", "slot_numbers_for_cars_with_colour White"))
+            System.out.println("$ " + cmd + " -> " + shell.execute(cmd));
+    }
+    static String tryIt(Runnable r) { try { r.run(); return "allowed"; } catch (RuntimeException e) { return "rejected: " + e.getMessage(); } }
+}

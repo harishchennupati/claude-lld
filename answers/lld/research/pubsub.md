@@ -1,0 +1,31 @@
+# Pub/Sub: what interviewers actually ask (review pass 2026-09-27)
+
+Sources: the three landscape files (`landscape-india-sea`, `landscape-bigtech`, `landscape-ailabs`), then every cited
+LeetCode Discuss post read in full through LeetCode's public GraphQL API, plus about 180 more posts found with its search
+("pub sub machine coding", "pubsub LLD", "kafka LLD", "message queue machine coding", "message broker LLD"; most were
+questions, not reports). codezym question 72 was read through its JSON API. Web search, Glassdoor, Blind and Reddit
+were not used (the session's search budget was spent). Scope: companies that hire from India; the one AI-lab entry
+(Cerebras, "multi-channel message queue", prachub 2025) is left out on purpose. "FU n" = follow-up card n on page 05.
+
+| question / variant | company | year | URL | where the page answers it |
+|---|---|---|---|---|
+| Machine coding, 2 h: in-memory pub/sub "with guaranteed delivery of every published message for all the subscribed consumers ... in the same order"; expose topics, publish, subscribe/unsubscribe, many subscribers, state of consumption per consumer, order per consumer | Razorpay (Lead SDE) | 2025 | https://leetcode.com/discuss/post/6890687/ | core: one log per topic + a cursor per subscriber (moves 1, 5, 6; Main.java) |
+| same statement: "Filtered message consumption in a topic by the consumer" (interviewer: key-value match on metadata) | Razorpay | 2025, 2026 | https://leetcode.com/discuss/post/6890687/ , https://leetcode.com/discuss/post/7600874/ | core `Filter` (a predicate on key or headers); FU10 filter in a pull batch; tests 8, 14, 18 |
+| "Handle cases of consumers not being available. What to do with those messages?" (interviewer: hold them, guaranteed delivery) | Razorpay | 2025, 2026 | same two | **FU7 (rewritten)**: the default ring counts a loss; the guaranteed version makes publishers wait for the slowest cursor (`BackPressure`, test 17) |
+| Follow-up: "your consume returns a message and moves on; the consumer crashes before processing" -> consume + acknowledge, message in flight | Razorpay | 2025 | https://leetcode.com/discuss/post/6890687/ | **FU10 (added)**: `PullConsumers.consume` moves nothing, `ack(next)` commits; test 18 |
+| Follow-up: make it thread-safe (a lock per topic, not one global lock) | Razorpay | 2025 | https://leetcode.com/discuss/post/6890687/ | moves 4, 7, 8; FU2, FU4 |
+| Follow-up: millions of messages and a subscriber offline for a week -> delete below the minimum offset, deque / ring buffer, TTL, back-pressure quotas | Razorpay | 2025 | https://leetcode.com/discuss/post/6890687/ | move 5 (the ring); FU7 (slowest cursor, back-pressure, spill to disk) |
+| Plus points: a separate component that creates and exposes topics; write messages to disk and restore them when the queue is full; "code should be runnable" | Razorpay | 2026 | https://leetcode.com/discuss/post/7600874/ | FU15 (topic registry, folded in); FU7 + FU12 (spill / restore; `FileStore` fixed, test 19); "copies of messages for serving faster" not covered |
+| Machine coding + LLD: "a system like Kafka with concurrency support" (verdict soft yes; "wanted the solution in a specific way") | Uber (SDE2) | 2024 | https://leetcode.com/discuss/post/5807498/ | core + race test (FU2), lost wakeup (FU3), stop mid-delivery (FU6) |
+| LLD: many producers publish to a queue, many consumers consume; many queues. Candidate deleted a message once all consumers had it, proposed per-consumer queues; rejected for over-building and no running code | Uber (Senior) | 2025 | https://leetcode.com/discuss/post/6603468/ | move 5 (cursor, not a queue per subscriber); FU7 (slowest cursor); implement card names the must-write core |
+| LLD: producer publishes, subscriber subscribes; "mainly around multithreading and a working solution was needed" | Uber | 2026 | https://leetcode.com/discuss/post/7801963/ | core, tests 1-20 |
+| LLD: in-memory queue; consumers must be notified when a new message arrives | Uber (L5A) | 2026 | https://leetcode.com/discuss/post/8084315/ | core push (`awaitAt` + signal, FU3); long poll in FU10 |
+| HLD "Design Kafka": push vs pull probed (settled on pull), consumer groups, poll + explicit ack, at-least-once, key-based partitions | Uber (L5) | 2026 | https://leetcode.com/discuss/post/7548356/ | Ask-table row 2 (push or pull, added); FU10; FU9 (groups, partitions) |
+| LLD of a pub/sub system similar to Kafka | Salesforce (SMTS) | 2026 | https://leetcode.com/discuss/post/8399267/ | whole page; FU12 Kafka mapping |
+| Observer pattern, then "modify it for Kafka (producer and consumer)", then Kafka questions | Salesforce (SMTS) | 2026 | https://leetcode.com/discuss/post/7619394/ | moves 3, 10 (Observer is the product); FU10 (poll/commit, push = a poll loop the library runs); FU12 mapping |
+| Machine coding: design a message broker | Dream11 (SSE) | 2024 | https://leetcode.com/discuss/post/5283151/ | whole page |
+| LLD: pub/sub system with events | ThoughtSpot (MTS4) | 2024 | https://leetcode.com/discuss/post/5253431/ | whole page |
+| 30-minute LLD after leadership questions: publisher sends events of a type, subscribers of that type receive; subscribe / unsubscribe per type | Amazon (SDE2, Spain) | 2026 | https://leetcode.com/discuss/post/8513742/ | implement card: "Amazon's 30-minute version is the must-write core alone" (added) |
+| Kafka-like streaming service: `createTopic(name, partitionCount)`, `publish(topic, partitionId, msg)` returns "p0:12", `consume(topic, consumerId, partitionId, max)`; a cursor per (topic, consumer, partition); order within a partition | codezym Q72, tagged Flipkart, Microsoft, Uber, Salesforce, ClearTrip, Razorpay, Super.Money (aggregator, undated) | - | https://codezym.com/question/72 | FU10 (consume = consume + ack in one call, at-most-once), FU9 partitions (`PartitionedTopic`); the explicit partitionId API and "p0:12" ids are not coded |
+| "Pub sub system like Kafka" in a list of LLD questions (companies not named) | unnamed | 2025 | https://leetcode.com/discuss/post/7144655/ | weak evidence; whole page |
+| Context: a Kafka-style design was rejected as over-built in a notification machine-coding round | Cleartrip | 2026 | https://leetcode.com/discuss/post/7533924/ | implement card (must-write core first) |

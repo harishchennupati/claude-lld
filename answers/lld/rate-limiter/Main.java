@@ -1,0 +1,584 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.concurrent.locks.*;
+
+/**
+ * Where "now" comes from. Every rule in a rate limiter is a statement about elapsed time, so time is the one
+ * input that must never be hard-wired: it is handed in, and a test can then move it by hand.
+ */
+interface Clock {
+    /** Milliseconds. Only differences matter here, so the origin may be arbitrary. */
+    long nowMs();
+}
+
+/**
+ * Production time. Uses System.nanoTime rather than the wall clock: only elapsed time matters, and nanoTime
+ * cannot jump backwards when NTP corrects the machine's clock.
+ */
+class SystemClock implements Clock {
+    /** Milliseconds from a fixed but arbitrary origin, never going backwards. */
+    public long nowMs() { return System.nanoTime() / 1_000_000L; }
+}
+
+/**
+ * Test time: the test sets it and advances it. "200 milliseconds later" becomes one line that runs
+ * instantly, instead of a Thread.sleep(200) in a suite nobody keeps.
+ */
+class ManualClock implements Clock {
+    private volatile long t;
+    /** Starts at the given instant. */
+    ManualClock(long startMs) { this.t = startMs; }
+    /** The instant this clock was last told about. */
+    public long nowMs() { return t; }
+    /** Move forward by ms; a negative value moves backwards, which one failure test does on purpose. */
+    void advance(long ms) { t += ms; }
+}
+
+/**
+ * Which plan a key is on. A tier is a row of numbers, not behaviour, so it is an enum and not a subclass:
+ * adding ENTERPRISE_PLUS is one constant and one row in the rule map.
+ */
+enum Tier { FREE, PRO, ENTERPRISE }
+
+/**
+ * The policy, as data: how many permits, over how long a window, and how many may be spent at one instant.
+ * permits/windowMs is the steady rate; burst is the depth of the bucket. Two different knobs: burst 100 lets
+ * a client empty its minute in a millisecond, burst 5 forces it to trickle.
+ */
+record Rule(long permits, long windowMs, long burst) {
+    /** Rejects a rule that cannot be enforced, so a bad config fails at startup and not at three in the morning. */
+    Rule {
+        if (permits <= 0)  throw new IllegalArgumentException("permits must be > 0");
+        if (windowMs <= 0) throw new IllegalArgumentException("window must be > 0");
+        if (burst <= 0)    throw new IllegalArgumentException("burst must be > 0");
+    }
+    /** Permits added per elapsed millisecond. The token bucket's whole refill rule. */
+    double perMs() { return (double) permits / (double) windowMs; }
+    /** N permits per second, burst N. */
+    static Rule perSecond(long n) { return new Rule(n, 1_000L, n); }
+    /** N permits per minute with an explicit burst, which is how real API plans are written. */
+    static Rule perMinute(long n, long burst) { return new Rule(n, 60_000L, burst); }
+}
+
+/**
+ * The answer to one call. Never a bare boolean: a caller told only "no" can only retry immediately, which is
+ * the worst thing it can do under load. remaining fills X-RateLimit-Remaining, retryAfterMs fills Retry-After.
+ */
+record Decision(boolean allowed, long remaining, long retryAfterMs, String reason) {
+    /** retryAfterMs for a call that no wait can help: it costs more than this key can ever hold. */
+    static final long NEVER = -1L;
+    /** Admitted, with the permits left afterwards. */
+    static Decision allow(long remaining) { return new Decision(true, remaining, 0L, "ok"); }
+    /** Refused, with the shortest wait after which this call fits if nobody else spends first; never zero. */
+    static Decision deny(long remaining, long retryAfterMs, String reason) {
+        return new Decision(false, remaining, Math.max(1L, retryAfterMs), reason);
+    }
+    /** Refused for good: the call is bigger than the whole bucket, so the caller must split it, not wait. */
+    static Decision never(long remaining, String reason) { return new Decision(false, remaining, NEVER, reason); }
+}
+
+/**
+ * Everything one key owns: the bucket, the window counters, the log, and the lock that guards them. This is
+ * the aggregate of this system - the smallest group of fields that must be read and written as one step.
+ * There is one of these per key, so two keys never wait for each other. An algorithm added later keeps its
+ * numbers in these same fields (Gcra and CreditWindow in Extensions.java say which), so this class is not
+ * reopened for it; one that needs a new kind of state would add a field here.
+ */
+class KeyState {
+    /** One lock per key, not one lock for the limiter: the whole scalability story is this field. */
+    final ReentrantLock lock = new ReentrantLock();
+    final String key;
+    double tokens;                                     // token bucket: permits available right now
+    long lastRefillMs;                                 // ... measured at this instant; the pair means nothing apart
+    long windowStartMs;                                // fixed and sliding counter: start of the current window
+    long currentCount;                                 // ... permits spent inside it
+    long previousCount;                                // ... and inside the window before it
+    final ArrayDeque<Long> log = new ArrayDeque<>();   // sliding window log: one timestamp per permit spent
+    long lastSeenMs;                                   // the sweeper's input: when this key was last asked about
+    boolean removed;                                   // set by the sweeper under the lock; see RateLimiter.lockState
+
+    /** A key nobody has seen before starts with a full burst, so a new tenant's first request is not refused. */
+    KeyState(String key, Rule rule, long nowMs) {
+        this.key = key;
+        this.tokens = rule.burst();
+        this.lastRefillMs = nowMs;
+        this.windowStartMs = Math.floorDiv(nowMs, rule.windowMs()) * rule.windowMs();
+        this.lastSeenMs = nowMs;
+    }
+}
+
+/**
+ * The rule that decides, behind one interface. Swapping a token bucket for a sliding window is a new class
+ * and one changed wiring line; this file's limiter is never opened for it.
+ */
+interface RateLimitAlgorithm {
+    /**
+     * Decide and charge one call. Always invoked with the key's lock held, so an implementation may read and
+     * write the state freely. It must charge before it returns true: nothing may be admitted on credit.
+     */
+    Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs);
+    /** Give permits back for a call that was admitted and then never made. Never above the burst. */
+    void refund(KeyState s, Rule rule, long cost, long nowMs);
+    /** How many permits are available now, charging nothing. Still a write: it brings the state up to date. */
+    long remaining(KeyState s, Rule rule, long nowMs);
+    /** The most one call can ever cost under this rule: the burst for a bucket, the permits for a window. */
+    long capacity(Rule rule);
+    /** A name for metrics and for the demo output. */
+    String name();
+}
+
+/**
+ * The default. A bucket refills at permits/window and holds at most burst; a call takes cost tokens or is
+ * refused. Constant time, constant memory, and it tolerates bursts, which is what real API traffic looks like.
+ */
+class TokenBucket implements RateLimitAlgorithm {
+    public Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs) {
+        refill(s, rule, nowMs);
+        if (s.tokens >= cost) {
+            s.tokens -= cost;                                    // charge first, then admit
+            return Decision.allow((long) Math.floor(s.tokens));
+        }
+        double missing = cost - s.tokens;
+        long waitMs = (long) Math.ceil(missing / rule.perMs());   // exactly when enough permits exist
+        return Decision.deny((long) Math.floor(s.tokens), waitMs, "no permits");
+    }
+    public void refund(KeyState s, Rule rule, long cost, long nowMs) {
+        refill(s, rule, nowMs);
+        s.tokens = Math.min(rule.burst(), s.tokens + cost);       // giving back may never exceed the burst
+    }
+    public long remaining(KeyState s, Rule rule, long nowMs) {
+        refill(s, rule, nowMs);
+        return (long) Math.floor(s.tokens);
+    }
+    public long capacity(Rule rule) { return rule.burst(); }
+    /**
+     * Bring tokens and lastRefillMs to nowMs as one step. Elapsed time is the only source of new permits, so
+     * there is no timer and no background thread: an idle bucket costs nothing until someone asks about it.
+     * A clock that went backwards mints nothing, and the measurement point is not moved back either. The
+     * cap is applied every time, so a burst that ops lowered live pulls the held tokens down at once.
+     */
+    private void refill(KeyState s, Rule rule, long nowMs) {
+        long elapsed = nowMs - s.lastRefillMs;
+        if (elapsed > 0) {
+            s.tokens += elapsed * rule.perMs();
+            s.lastRefillMs = nowMs;
+        }
+        s.tokens = Math.min(rule.burst(), s.tokens);
+    }
+    public String name() { return "token bucket"; }
+}
+
+/**
+ * A counter that resets on the hour, the minute, the second. Four lines, and wrong at the boundary: a client
+ * can spend a full window just before the reset and a full window just after, so twice the limit passes in an
+ * instant. Kept here because interviewers ask for it by name, and because the failure test proves the flaw.
+ */
+class FixedWindow implements RateLimitAlgorithm {
+    public Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs) {
+        roll(s, rule, nowMs);
+        if (s.currentCount + cost <= rule.permits()) {
+            s.currentCount += cost;
+            return Decision.allow(rule.permits() - s.currentCount);
+        }
+        return Decision.deny(rule.permits() - s.currentCount, s.windowStartMs + rule.windowMs() - nowMs, "window full");
+    }
+    public void refund(KeyState s, Rule rule, long cost, long nowMs) {
+        roll(s, rule, nowMs);
+        s.currentCount = Math.max(0, s.currentCount - cost);
+    }
+    public long remaining(KeyState s, Rule rule, long nowMs) {
+        roll(s, rule, nowMs);
+        return Math.max(0, rule.permits() - s.currentCount);
+    }
+    public long capacity(Rule rule) { return rule.permits(); }
+    /**
+     * Move to the window containing nowMs, remembering the one just before it. Windows sit on an absolute
+     * grid - they reset on the second, the minute, the hour - which is exactly why a client can predict the
+     * boundary and spend twice its limit across it.
+     */
+    static void roll(KeyState s, Rule rule, long nowMs) {
+        long w = rule.windowMs();
+        long aligned = Math.floorDiv(nowMs, w) * w;
+        long steps = (aligned - s.windowStartMs) / w;
+        if (steps <= 0) return;                           // same window, or the clock went backwards
+        s.previousCount = (steps == 1) ? s.currentCount : 0;
+        s.currentCount = 0;
+        s.windowStartMs = aligned;
+    }
+    public String name() { return "fixed window"; }
+}
+
+/**
+ * The O(1) answer to the boundary: count this window exactly and charge a share of the previous one, weighted
+ * by how much of it is still inside the last `window` milliseconds. Two counters per key. It assumes the
+ * previous window's calls were spread evenly: on real traffic that is close (Cloudflare, which runs it,
+ * measured 0.003% of requests decided wrongly), but a client that packs the end of a window can still get
+ * near twice the limit over a sliding minute. When that matters, use the log below.
+ */
+class SlidingWindowCounter implements RateLimitAlgorithm {
+    public Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs) {
+        FixedWindow.roll(s, rule, nowMs);
+        double estimated = estimate(s, rule, nowMs);
+        if (estimated + cost <= rule.permits() + 1e-9) {           // a hair of slack for rounding in the weight
+            s.currentCount += cost;
+            return Decision.allow(Math.max(0, (long) Math.floor(rule.permits() - (estimated + cost) + 1e-9)));
+        }
+        return Decision.deny(Math.max(0, (long) Math.floor(rule.permits() - estimated + 1e-9)),
+                             waitMs(s, rule, cost, nowMs), "window full");
+    }
+    public void refund(KeyState s, Rule rule, long cost, long nowMs) {
+        FixedWindow.roll(s, rule, nowMs);
+        s.currentCount = Math.max(0, s.currentCount - cost);
+    }
+    public long remaining(KeyState s, Rule rule, long nowMs) {
+        FixedWindow.roll(s, rule, nowMs);
+        return Math.max(0, (long) Math.floor(rule.permits() - estimate(s, rule, nowMs) + 1e-9));
+    }
+    public long capacity(Rule rule) { return rule.permits(); }
+    /** This window's exact count plus the previous window's count times the fraction still in range. */
+    private double estimate(KeyState s, Rule rule, long nowMs) {
+        double into = nowMs - s.windowStartMs;
+        double weight = Math.min(1.0, Math.max(0.0, (rule.windowMs() - into) / (double) rule.windowMs()));
+        return s.previousCount * weight + s.currentCount;
+    }
+    /**
+     * The shortest wait after which this call fits. If this window still has room, wait until the previous
+     * window's share has faded enough; if it has none, wait for the next window, where this window's count
+     * becomes the share that fades.
+     */
+    private long waitMs(KeyState s, Rule rule, long cost, long nowMs) {
+        double w = rule.windowMs(), into = nowMs - s.windowStartMs;
+        long room = rule.permits() - s.currentCount - cost;
+        if (room >= 0) return (long) Math.ceil(w * (1 - room / (double) s.previousCount) - into);
+        return (long) Math.ceil(w - into + w * (1 - (rule.permits() - cost) / (double) s.currentCount));
+    }
+    public String name() { return "sliding window counter"; }
+}
+
+/**
+ * The exact one: keep a timestamp per permit spent and drop the ones older than the window. No boundary error
+ * at all, and the price is memory - one boxed Long per permit, about 30 bytes, so 17 KB for a key on 600 a
+ * minute - and O(k) work per call to drop what expired. Right for a login endpoint at five per minute; wrong
+ * for a public API at six hundred per minute per key.
+ */
+class SlidingWindowLog implements RateLimitAlgorithm {
+    public Decision tryAcquire(KeyState s, Rule rule, long cost, long nowMs) {
+        evict(s, rule, nowMs);
+        if (s.log.size() + cost <= rule.permits()) {
+            for (long i = 0; i < cost; i++) s.log.addLast(nowMs);
+            return Decision.allow(rule.permits() - s.log.size());
+        }
+        long need = s.log.size() + cost - rule.permits();          // how many old stamps must expire first
+        Iterator<Long> it = s.log.iterator();
+        long expiresAt = nowMs;
+        for (long i = 0; i < need; i++) expiresAt = it.next();      // the need-th oldest decides the wait
+        return Decision.deny(Math.max(0, rule.permits() - s.log.size()), expiresAt + rule.windowMs() - nowMs, "window full");
+    }
+    public void refund(KeyState s, Rule rule, long cost, long nowMs) {
+        evict(s, rule, nowMs);
+        for (long i = 0; i < cost && !s.log.isEmpty(); i++) s.log.pollLast();
+    }
+    public long remaining(KeyState s, Rule rule, long nowMs) {
+        evict(s, rule, nowMs);
+        return Math.max(0, rule.permits() - s.log.size());
+    }
+    public long capacity(Rule rule) { return rule.permits(); }
+    /**
+     * Drop every timestamp that has fallen out of the trailing window. One call may drop many, but each stamp
+     * is added once and dropped once, so the work averages out to O(1) per permit (amortised).
+     */
+    private void evict(KeyState s, Rule rule, long nowMs) {
+        long cutoff = nowMs - rule.windowMs();
+        while (!s.log.isEmpty() && s.log.peekFirst() <= cutoff) s.log.pollFirst();
+    }
+    public String name() { return "sliding window log"; }
+}
+
+/** Which rule applies to a key. One method, handed in, so "PRO gets ten times FREE" is config, not an if. */
+interface RuleResolver {
+    /** The rule for this key right now. Read once per decision, so one decision never sees two rules. */
+    Rule ruleFor(String key);
+}
+
+/** Everybody gets the same rule. The default, and what a first version ships with. */
+class FlatRules implements RuleResolver {
+    private final Rule rule;
+    FlatRules(Rule rule) { this.rule = rule; }
+    public Rule ruleFor(String key) { return rule; }
+}
+
+/**
+ * A rule per tier, held in a live reference so ops can raise a limit during a sale without a restart. The
+ * limiter reads it once per call, so a change takes effect on the next decision and never inside one.
+ */
+class TierRules implements RuleResolver {
+    private final Map<String, Tier> tierOf = new ConcurrentHashMap<>();
+    private final Map<Tier, AtomicReference<Rule>> rules = new EnumMap<>(Tier.class);
+    /** Starts every tier on the same rule; callers then raise the ones they sell. */
+    TierRules(Rule defaultRule) {
+        for (Tier t : Tier.values()) rules.put(t, new AtomicReference<>(defaultRule));
+    }
+    /** Put a key on a plan. Unknown keys are FREE. */
+    void assign(String key, Tier tier) { tierOf.put(key, tier); }
+    /** Change a tier's rule while the process runs. The next decision sees it; the current one does not. */
+    void setRule(Tier tier, Rule rule) { rules.get(tier).set(rule); }
+    public Rule ruleFor(String key) { return rules.get(tierOf.getOrDefault(key, Tier.FREE)).get(); }
+}
+
+/**
+ * The one call everything in front of the service implements: may this key spend `cost` permits now? It is
+ * the seam the follow-ups hang off - a dry-run wrapper, a second global budget, a Redis-backed one - and it
+ * is why none of them has to open the limiter.
+ */
+interface Limiter {
+    /**
+     * Decide and charge. Must never block, and a refusal always carries a usable retry-after - or NEVER, for a
+     * call bigger than the whole bucket, which no wait can help.
+     */
+    Decision allow(String key, long cost);
+    /** One permit, the common case. */
+    default Decision allow(String key) { return allow(key, 1); }
+}
+
+/** Anyone who wants to know what was decided. Called after the lock is released, never inside it. */
+interface LimiterObserver {
+    /** One decision happened for one key. Must not throw; if it does, the limiter swallows it. */
+    void onDecision(String key, Decision d);
+}
+
+/** Allowed and refused counters: the observer every service actually ships. */
+class MetricsCounter implements LimiterObserver {
+    private final AtomicLong allowed = new AtomicLong(), refused = new AtomicLong();
+    public void onDecision(String key, Decision d) { (d.allowed() ? allowed : refused).incrementAndGet(); }
+    /** How many calls were admitted since startup. */
+    long allowed() { return allowed.get(); }
+    /** How many calls were refused since startup. */
+    long refused() { return refused.get(); }
+}
+
+/**
+ * The front door. Holds one KeyState per key and hands each decision to the algorithm it was configured with.
+ * What it guarantees: never more than the rule allows for a key, whatever the thread count; O(1) time and
+ * memory per call (the sliding log excepted); no timer, no background refill; nothing slow inside a lock.
+ */
+class RateLimiter implements Limiter {
+    private final ConcurrentHashMap<String, KeyState> keys = new ConcurrentHashMap<>();
+    private final List<LimiterObserver> observers = new CopyOnWriteArrayList<>();
+    private volatile RateLimitAlgorithm algo = new TokenBucket();
+    private volatile RuleResolver rules = new FlatRules(Rule.perSecond(5));
+    private volatile Clock clock = new SystemClock();
+
+    /** Hand in the three things that change: how to decide, what the limits are, and where time comes from. */
+    void configure(RateLimitAlgorithm algo, RuleResolver rules, Clock clock) {
+        this.algo = algo; this.rules = rules; this.clock = clock;
+    }
+    /** Add a listener. It hears about every decision, after the lock, and may not influence one. */
+    void addObserver(LimiterObserver o) { observers.add(o); }
+
+    /** One permit for this key. */
+    public Decision allow(String key) { return allow(key, 1); }
+
+    /**
+     * The critical step, in this order: read the rule once and the clock once, so the whole decision sees one
+     * policy and one instant; then, under this key's lock only, refill from elapsed time and charge. Nothing
+     * is admitted before it is charged - a permit spent can be refunded, a request admitted cannot be recalled.
+     * Observers are told afterwards, outside the lock. A call bigger than the whole bucket is refused for good
+     * first: a Retry-After for it would send the client round a retry loop that can never succeed.
+     */
+    public Decision allow(String key, long cost) {
+        if (cost <= 0) throw new IllegalArgumentException("cost must be > 0");
+        RateLimitAlgorithm algo = this.algo;                        // read once, like the rule and the clock
+        Rule rule = rules.ruleFor(key);
+        if (cost > algo.capacity(rule)) {                           // no wait can ever make room for this call
+            Decision never = Decision.never(remaining(key), "costs more than this key can ever hold");
+            publish(key, never);
+            return never;
+        }
+        long now = clock.nowMs();
+        KeyState s = lockState(key, rule, now);
+        Decision d;
+        try {
+            d = algo.tryAcquire(s, rule, cost, now);
+            s.lastSeenMs = now;
+        } finally {
+            s.lock.unlock();
+        }
+        publish(key, d);
+        return d;
+    }
+
+    /**
+     * Give permits back for a call that was admitted and then never made - the downstream call threw, or a
+     * later layer refused it. This is the compensating step that keeps the budget honest; it can never push a
+     * bucket above its burst, and an unknown key is ignored rather than created. Same removed-state check as
+     * allow(): a refund paid into a state the sweeper just deleted would vanish. Call it once, straight after
+     * the failed call: two refunds give back twice, and a late one returns a permit that time already returned.
+     */
+    void refund(String key, long cost) {
+        if (cost <= 0) return;
+        Rule rule = rules.ruleFor(key);
+        long now = clock.nowMs();
+        while (true) {
+            KeyState s = keys.get(key);
+            if (s == null) return;                            // never seen, or already swept: nothing to give back
+            s.lock.lock();
+            try {
+                if (s.removed) continue;                      // swept between the lookup and the lock: look again
+                algo.refund(s, rule, cost, now);
+                s.lastSeenMs = now;
+                return;
+            } finally { s.lock.unlock(); }
+        }
+    }
+
+    /**
+     * How many permits this key has right now, charging nothing. O(1). An unknown key answers what a new key
+     * would have (a full burst, for the bucket) and is deliberately not created. No removed-state retry here
+     * on purpose: a read that lands on a state the sweeper has just deleted answers from that state's own
+     * numbers, which at worst is fewer permits than the key's next call will find.
+     */
+    long remaining(String key) {
+        Rule rule = rules.ruleFor(key);
+        long now = clock.nowMs();
+        KeyState s = keys.get(key);
+        if (s == null) return algo.remaining(new KeyState(key, rule, now), rule, now);   // a throwaway new state
+        s.lock.lock();
+        try { return algo.remaining(s, rule, now); } finally { s.lock.unlock(); }
+    }
+
+    /**
+     * Forget keys nobody has asked about for idleMs. Lossless when idleMs is long enough for an idle key to be
+     * full again - for the bucket, burst divided by the refill rate, which is one window when the burst is no
+     * bigger than the permits, as on every plan here - because then a fresh state is the same state. Never
+     * called on the request path: a scheduled task runs it, taking each key's lock only while it checks it.
+     */
+    int sweepIdle(long idleMs) {
+        long now = clock.nowMs();
+        int removed = 0;
+        for (Map.Entry<String, KeyState> e : keys.entrySet()) {
+            KeyState s = e.getValue();
+            if (now - s.lastSeenMs < idleMs) continue;
+            s.lock.lock();
+            try {
+                if (now - s.lastSeenMs >= idleMs && keys.remove(e.getKey(), s)) { s.removed = true; removed++; }
+            } finally { s.lock.unlock(); }
+        }
+        return removed;
+    }
+
+    /** How many keys are held right now. The number the sweeper exists to bound. */
+    int size() { return keys.size(); }
+
+    /** This key's live state, or null. Only for a test that holds a key's lock on purpose; never on the request path. */
+    KeyState stateOf(String key) { return keys.get(key); }
+
+    /**
+     * Find or create this key's state and return it LOCKED. The loop closes the one race the map creates: the
+     * sweeper can delete a state between the lookup and the lock, and a permit spent on a deleted state would
+     * be lost, so a caller that finds a removed state simply fetches again.
+     */
+    private KeyState lockState(String key, Rule rule, long now) {
+        while (true) {
+            KeyState s = keys.computeIfAbsent(key, k -> new KeyState(k, rule, now));
+            s.lock.lock();
+            if (!s.removed) return s;
+            s.lock.unlock();
+        }
+    }
+
+    /** Tell the listeners, after the unlock, each in its own try/catch: a broken listener is not an outage. */
+    private void publish(String key, Decision d) {
+        for (LimiterObserver o : observers) {
+            try { o.onDecision(key, d); } catch (RuntimeException ignored) { }
+        }
+    }
+}
+
+/**
+ * The caller: a web filter. It owns no state of its own, which is why it is not a model but a thin caller.
+ * Its whole job is turning a Decision into what a client sees: 200, or 429 with the headers that tell the
+ * client when to come back.
+ */
+class ApiFilter {
+    private final Limiter limiter;
+    ApiFilter(Limiter limiter) { this.limiter = limiter; }
+    /** The status code this request would get. */
+    int handle(String apiKey, long cost) { return limiter.allow(apiKey, cost).allowed() ? 200 : 429; }
+    /** The response headers for a decision, the way a client library reads them. */
+    static String headers(Decision d) {
+        String wait = d.retryAfterMs() == Decision.NEVER ? "never (split the call)" : d.retryAfterMs() + "ms";
+        return "X-RateLimit-Remaining: " + d.remaining()
+             + (d.allowed() ? "" : " | Retry-After: " + wait + " | reason: " + d.reason());
+    }
+}
+
+/** Runs the system: a demo of every flow, then a hundred threads on one key proving the invariant. */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // ---------------- demo: one tenant, one afternoon, on a clock we control
+        ManualClock clock = new ManualClock(0);
+        TierRules rules = new TierRules(Rule.perMinute(60, 10));      // FREE: 60/min, burst 10
+        rules.setRule(Tier.PRO, Rule.perMinute(600, 100));            // PRO:  600/min, burst 100
+        rules.assign("acme", Tier.PRO);
+        RateLimiter limiter = new RateLimiter();
+        MetricsCounter metrics = new MetricsCounter();
+        limiter.configure(new TokenBucket(), rules, clock);
+        limiter.addObserver(metrics);
+        ApiFilter filter = new ApiFilter(limiter);
+
+        System.out.println("algorithm: token bucket | acme is PRO: 600/min, burst 100 | 10 permits a second");
+        Decision first = limiter.allow("acme");
+        System.out.println("first call ever          -> " + first.allowed() + "  " + ApiFilter.headers(first));
+
+        clock.advance(400);                                            // 0.4 s later: 4 permits minted
+        int ok = 0, blocked = 0; Decision last = first;
+        for (int i = 0; i < 120; i++) { last = limiter.allow("acme"); if (last.allowed()) ok++; else blocked++; }
+        System.out.println("a script fires 120 calls -> allowed " + ok + ", refused " + blocked
+                         + "  " + ApiFilter.headers(last));
+
+        clock.advance(last.retryAfterMs());                            // the client honours Retry-After
+        System.out.println("retry after " + last.retryAfterMs() + "ms          -> " + limiter.allow("acme").allowed());
+
+        clock.advance(1_900);                                          // 19 more permits minted
+        int retried = 0;
+        for (int i = 0; i < 19; i++) if (limiter.allow("acme").allowed()) retried++;
+        System.out.println("19 queued retries        -> allowed " + retried + ", remaining " + limiter.remaining("acme"));
+
+        clock.advance(500);                                            // 5 more permits
+        Decision heavy = limiter.allow("acme", 5);                     // one heavy endpoint costs five
+        System.out.println("a heavy endpoint costs 5 -> " + heavy.allowed() + ", remaining "
+                         + limiter.remaining("acme") + " | an unseen FREE key starts at "
+                         + limiter.remaining("newcomer"));
+        limiter.refund("acme", 5);                                     // ... and then the call never happened
+        System.out.println("that call never happened -> refunded, remaining " + limiter.remaining("acme"));
+        Decision batch = limiter.allow("acme", 150);                   // bigger than the whole burst of 100
+        System.out.println("a batch that costs 150   -> " + batch.allowed() + "  " + ApiFilter.headers(batch));
+
+        System.out.println("HTTP status through the filter: " + filter.handle("acme", 1)
+                         + " | keys held: " + limiter.size());
+        clock.advance(90_000);                                         // idle for more than one window
+        System.out.println("sweeper drops idle keys  -> removed " + limiter.sweepIdle(60_000)
+                         + ", keys held " + limiter.size());
+        System.out.println("metrics: allowed " + metrics.allowed() + ", refused " + metrics.refused());
+
+        // ---------------- the race: a hundred threads, one key, one instant, a budget of fifty
+        ManualClock frozen = new ManualClock(0);                       // frozen, so no permit is minted mid-race
+        RateLimiter hot = new RateLimiter();
+        hot.configure(new TokenBucket(), new FlatRules(new Rule(50, 1_000L, 50)), frozen);
+        int threads = 100;
+        CountDownLatch start = new CountDownLatch(1), done = new CountDownLatch(threads);
+        AtomicInteger admitted = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(32);
+        for (int i = 0; i < threads; i++) pool.submit(() -> {
+            try { start.await(); if (hot.allow("hot-key").allowed()) admitted.incrementAndGet(); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            finally { done.countDown(); }
+        });
+        start.countDown();
+        done.await();
+        pool.shutdown();
+        System.out.println("\n100 threads, one key, limit 50 -> admitted " + admitted.get()
+                         + ", refused " + (threads - admitted.get()) + ", remaining " + hot.remaining("hot-key"));
+    }
+}

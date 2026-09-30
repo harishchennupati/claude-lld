@@ -1,0 +1,715 @@
+# Pub/Sub LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"pubsub/Main.java").read_text()
+ext   = (H/"pubsub/Extensions.java").read_text()
+tests = (H/"pubsub/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+# what the code must do: publish, deliver, and the reads as a line
+pf = _D
+rows = [("publish", 30, [("a thread calls publish", "topic, key, payload"),
+                         ("take the topic's lock", "offset = base + log.size()"),
+                         ("append, trim, signal", "one step: nobody else is inside"),
+                         ("unlock, then tell listeners", "a slow listener stalls nobody")]),
+        ("deliver", 165, [("one thread per subscriber", "reads at its own cursor"),
+                          ("run the handler, no lock held", "it is allowed to throw"),
+                          ("retry, then park if hopeless", "the policy decides, not the broker"),
+                          ("only now: cursor + 1", "commit AFTER the handler")])]
+for lab, y, boxes in rows:
+    pf += _tx(78, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 165 + k*262
+        pf += _bx(x, y, 242, 54, b[0], b[1], acc=(k == 1))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+242, y+27, x+262), True)
+for x0, y0, w0, txt in [(430, 95, 340, "a publish never waits for a subscriber"),
+                        (395, 230, 440, "still failing: parked, and the cursor moves on")]:
+    pf += _ar("M%s %s V%s" % (x0 + w0/2, y0-11, y0), dash=True) + _bx(x0, y0, w0, 40, txt, "", dash=True)
+pf += _tx(78, 300, "read", "var(--acc)", 13) + _tx(165, 300, "at any moment, without touching a message: how far behind is this subscriber?   what is at offset 91,204?   who listens to orders?", "var(--text)", 12, "start")
+pf += _tx(615, 334, "fifty publishers at the same instant: every offset is handed out exactly once, and no cursor skips a message that was never given to its handler", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 350, pf)
+
+# one morning, replayed
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("09:00:00.000  the burst", ["8 threads, 2,000 orders in 340 ms", "offsets 0 .. 1999, none issued twice",
+                                   "tail = 2000, the log holds 2,000", "no publisher waited for a subscriber"], True),
+      ("09:00:00.004  three readers", ["audit at 2000, email at 2000", "fraud at 1412: it is 588 behind",
+                                       "one log, three longs", "not three copies of anything"], False),
+      ("09:03:11  fraud's handler throws", ["waits 10 ms, 20 ms, 40 ms, gives up", "orders@1584 parked, with the reason",
+                                            "cursor moves to 1585 anyway", "giving up must not stall a reader"], True),
+      ("09:40:00  fraud restarts", ["resumes at the offset it committed", "retention dropped 400 under it",
+                                    "fast-forwarded, and 400 is COUNTED", "visible loss beats invisible loss"], False)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 258, 128, t, lines, acc=acc)
+P_EX = _mv(1230, 200, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>A broker holds named topics; anybody can publish to one without knowing who is listening.</li>
+<li>Many subscribers per topic, and every one of them gets every message: fan-out.</li>
+<li>Each subscriber keeps its own read position, so a slow one lags instead of blocking anyone.</li>
+<li>A late subscriber can start at the end, or replay whatever history is still retained.</li>
+<li>A handler is allowed to fail: retry it on a rule, and park what can never work.</li>
+<li>Pause, resume, seek, unsubscribe, and report how far behind each subscriber is.</li>
+<li>A subscription can carry a filter, so it sees a slice of the topic and skips the rest.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many publishers at once: no offset duplicated, none skipped, and each publisher's own order kept.</li>
+<li>Publish is O(1) and read-by-offset is O(1); lag is one subtraction, never a scan.</li>
+<li>Per-subscriber order: a subscriber sees a topic's messages in the order they were published.</li>
+<li>One slow or throwing handler stalls no publisher and no other subscriber.</li>
+<li>Bounded memory per topic: retention is a number, and what it drops is counted, not hidden.</li>
+<li>Retry rule, dead-letter destination and time all swappable without touching the log.</li>
+<li>In memory, one process, nothing survives a restart (say it; a follow-up adds a store).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design an in-process pub/sub system. Publishers post messages to named topics and subscribers get '
+          'them without the two ever knowing about each other &mdash; many publishers, many subscribers, and a '
+          'handler that is allowed to fail. I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>One part of a program wants to announce that something '
+ 'happened &mdash; an order was placed, a file arrived &mdash; and other parts want to hear about it, without the '
+ 'announcer knowing who they are or how long they take. Messages go to a named <b>topic</b>; anybody can subscribe '
+ 'to a topic and is then handed every message published to it, in order. A subscriber can be slow, can be started '
+ 'an hour late, can crash and come back, and can fail on one particular message; none of that is allowed to hurt '
+ 'the publisher or any other subscriber. The thing that must always be true is about <b>offsets</b>: every message '
+ 'gets a position in its topic\'s log, those positions are handed out one at a time with no duplicate and no hole, '
+ 'and a subscriber\'s cursor never moves past a message its handler was never given. Everything else &mdash; '
+ 'retries, dead letters, replay, lag &mdash; hangs off that one decision.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, '
+ 'with a <code>main</code> that publishes, fans out to several subscribers and survives a handler that throws. The '
+ 'interviewer is watching for, in this order: the questions you ask before typing (fan-out or competing consumers, '
+ 'and at-most-once or at-least-once, are the first two); which classes exist and which one owns the log; a publish '
+ 'and a delivery end to end; what happens when two threads publish at the same instant; where the rule that will '
+ 'change &mdash; how to retry &mdash; lives, so a new one is a class and not an edit; and what the cursor does when '
+ 'a handler fails. Then the twists: consumer groups, dead-letter topics, back-pressure, retention, persistence, and '
+ '"so how is this different from Kafka?"</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>Fan-out, or competing consumers &mdash; does everyone get every message, or does each message go to one worker?</td><td>Fan-out; groups are a follow-up</td><td>A cursor per subscriber, not a queue per subscriber (moves 1, 5)</td></tr>'
+ '<tr><td>At-most-once or at-least-once? It is one line, so let us pick it deliberately.</td><td>At-least-once; handlers are idempotent</td><td>Where <code>cursor + 1</code> sits relative to the handler call (move 6)</td></tr>'
+ '<tr><td>Does a subscriber that joins late see history? How far back?</td><td>Yes, whatever retention still holds</td><td>An append-only log with a retention window, not delete-on-read (moves 5, 6)</td></tr>'
+ '<tr><td>Must a subscriber see one topic\'s messages in order?</td><td>Yes, per topic per subscriber</td><td>One dispatcher thread per subscription (moves 4, 7)</td></tr>'
+ '<tr><td>What happens to a message that can never be processed: drop, block, or park?</td><td>Retry a few times, then park it</td><td>A retry rule and a dead-letter sink, both handed in (move 3)</td></tr>'
+ '<tr><td>How many publishers at once, and how many subscribers per topic?</td><td>Tens of threads, tens of subscribers</td><td>One lock per topic is enough; the ladder is named, not climbed (moves 4, 8)</td></tr>'
+ '<tr><td>Does anything survive a restart?</td><td>No: one process, in memory</td><td>No store yet; a follow-up slots one in behind an interface (move 12)</td></tr>'
+ '<tr><td>Consumer groups, back-pressure, partitions, exactly-once?</td><td>Out of scope, named</td><td>Each is one of the five twist moves (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> fan-out, not competing consumers; at-least-once, so handlers must be '
+ 'idempotent; one append-only log per topic with a cursor per subscriber, not a queue per subscriber; retention is a '
+ 'fixed number of messages and what it drops is counted; one thread per subscription, so order per subscriber is free; '
+ 'in memory, one process. Named as out of scope: consumer groups, partitions, persistence, back-pressure, '
+ 'exactly-once &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a PUBLISHER puts a MESSAGE on a TOPIC; a SUBSCRIPTION reads it at its own OFFSET and hands it to a HANDLER; a RETRY RULE decides what happens when it fails", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 175, "Message", "immutable: a record", 1), (220, 185, "Topic", "log, offsets, one lock", 1),
+                          (420, 200, "Subscription", "cursor, thread, state", 1), (635, 165, "Broker", "the maps, the threads", 1),
+                          (815, 150, "Handler", "no state: an interface", 0), (980, 105, "Publisher", "a caller", 0),
+                          (1100, 110, "Lag", "a question", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: a caller, an interface, or a number a method computes", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("give a message its position", "Topic  (owns the log and the offsets)", "topic.append(key, payload, ...)"),
+                                       ("remember how far I have read", "Subscription  (owns one cursor)", "cursor.incrementAndGet()"),
+                                       ("hand it over and survive a throw", "Subscription  (owns the thread too)", "deliver(m): boolean"),
+                                       ("find the topic, start the thread", "Broker  (owns the maps)", "broker.publish / subscribe")]):
+    y = 22 + k*54
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 258, "and notice the verb that is NOT here: \"send it to everybody\". There is no fan-out loop and no copying:", "var(--muted)", 11)
+m2 += _tx(615, 277, "fan-out is three subscriptions reading one log at three positions, which is why a fourth subscriber costs eight bytes", "var(--acc)", 11)
+MV[2] = _mv(1230, 290, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(24, 76, 250, 90, "Broker / Subscription", "configure(...), SubscribeOptions", acc=True)
+for k, (t, sub, impl) in enumerate([("Handler", "the subscriber's own code", "any lambda:  m -> charge(m.payload())"),
+                                    ("RetryPolicy", "again, and how long?", "FixedDelayRetry / ExponentialBackoff / NoRetryFor"),
+                                    ("DeadLetterSink", "where a hopeless message goes", "InMemoryDeadLetters, or a .dlq topic"),
+                                    ("Filter / BrokerListener / Clock", "who sees what, who is told, the time", "a lambda each: they have one method")]):
+    y = 20 + k*58
+    m3 += _ar("M274 121 H330 V%s H390" % (y+22), True, True) + _bx(390, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(750, y, 450, 44, impl, "handed in, never built inside") + _ar("M750 %s H690" % (y+22))
+m3 += _tx(615, 268, "dashed = handed in. The broker never writes new on a rule, so a new backoff is a new class and one changed line", "var(--muted)", 11)
+m3 += _tx(615, 288, "and one rule wraps the others: BoundedRetry(policy) forces EVERY policy, including next year's, to give up eventually", "var(--acc)", 11)
+MV[3] = _mv(1230, 300, m3)
+
+# move 4: the gap, and one owner with one lock
+m4 = _D + _bx(30, 26, 190, 44, "thread A", "reads log.size() = 7") + _bx(30, 106, 190, 44, "thread B", "reads log.size() = 7")
+m4 += _bx(350, 66, 190, 44, "the log", "size 7", acc=True)
+m4 += _ar("M220 48 H350 V66") + _ar("M220 128 H350 V110") + _tx(285, 36, "read", "var(--muted)", 10.5) + _tx(285, 156, "read", "var(--muted)", 10.5)
+m4 += '<rect x="580" y="16" width="300" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(730, 42, "the gap", RED, 12) + _tx(730, 66, "both write at offset 7: one message", RED, 11) + _tx(730, 86, "is overwritten, and ArrayList itself", RED, 11) + _tx(730, 106, "corrupts under a concurrent add", RED, 11)
+m4 += _tx(730, 136, "fix: assign AND store as ONE step", "var(--text)", 11)
+m4 += _bx(910, 40, 290, 96, "Topic.lock", "assign, append, trim, signal", acc=True)
+m4 += _tx(615, 186, "the second shared thing is the WAIT: a dispatcher that checks \"anything at offset 7?\", sees nothing and then sleeps can miss a", "var(--muted)", 11)
+m4 += _tx(615, 205, "publish that lands in between. So the check and the wait sit inside the SAME lock the publisher signals under, in a while loop.", "var(--muted)", 11)
+m4 += _tx(615, 228, "one lock per TOPIC, not per broker: ten thousand topics never wait for each other, and a handler is never inside it", "var(--acc)", 11)
+MV[4] = _mv(1230, 242, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("what is at offset 91,204?", "ArrayList&lt;Message&gt; + baseOffset, index = off - base", "O(1)"),
+                                      ("how far behind is this subscriber?", "one AtomicLong cursor;  lag = tail - cursor", "O(1)"),
+                                      ("which subscription / which topic?", "ConcurrentHashMap by id", "O(1)"),
+                                      ("what did we give up on?", "an append-only list in the sink", "O(1) append")]):
+    y = 18 + k*48
+    m5 += _bx(30, y, 350, 40, q, "the question") + _ar("M380 %s H430" % (y+20), True)
+    m5 += _bx(430, y, 560, 40, shape, "the shape", acc=True) + _ar("M990 %s H1040" % (y+20), True) + _bx(1040, y, 160, 40, cost, "")
+m5 += _tx(615, 232, "and the shape that is WRONG here: a queue per subscriber. It copies every message N times, deletes on read, and with that", "var(--muted)", 11)
+m5 += _tx(615, 251, "one choice you have thrown away replay, late joiners and any lag number. Cursor, not queue &mdash; everything else hangs off it.", "var(--acc)", 11)
+MV[5] = _mv(1230, 264, m5)
+
+# move 6: the state machine and the ORDER at the critical step
+m6 = _D
+for x, y, w, t, sub, acc in [(24, 24, 178, "FETCHED", "read under the lock", 0),
+                             (242, 24, 178, "DELIVERING", "lock released, handler runs", 1),
+                             (24, 112, 178, "ACKED", "the handler returned", 0),
+                             (242, 112, 178, "RETRY WAIT", "sleep the backoff", 0),
+                             (242, 200, 178, "DEAD-LETTERED", "the policy gave up", 0)]:
+    m6 += _bx(x, y, w, 44, t, sub, acc=bool(acc))
+m6 += _ar("M202 46 H242", True)                       # FETCHED -> DELIVERING
+m6 += _ar("M260 68 V134 H202")                        # DELIVERING -> ACKED
+m6 += _ar("M380 68 V112")                             # DELIVERING -> RETRY WAIT
+m6 += _ar("M420 134 H444 V46 H424", dash=True)        # RETRY WAIT -> DELIVERING, attempt + 1
+m6 += _ar("M331 156 V200")                            # RETRY WAIT -> DEAD-LETTERED
+m6 += _tx(222, 272, "ACKED and DEAD-LETTERED both lead to cursor + 1", "var(--acc)", 11)
+m6 += '<rect x="460" y="16" width="750" height="200" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(835, 40, "the order at delivery, and why it is this order", "var(--text)", 12)
+for k, l in enumerate(["1 read the message at the cursor -- the topic's lock is held only for this",
+                       "2 release the lock; run the handler; it may take two seconds and it may throw",
+                       "3 on a throw: ask the policy, wait, try again, or park it in the sink",
+                       "4 only now: cursor + 1.  The commit is the LAST statement",
+                       "a crash or a shutdown in the middle redelivers, which is at-least-once;",
+                       "move the increment ABOVE the handler and it is at-most-once. That is the whole difference."]):
+    m6 += _tx(475, 64 + k*22, l, "var(--muted)" if k > 3 else "var(--text)", 11, "start")
+m6 += _tx(835, 200, "and the subscription itself has a life: ACTIVE &harr; PAUSED &rarr; STOPPED, the cursor kept across all three", "var(--acc)", 11)
+m6 += _tx(615, 294, "publishing has its own order: assign and store before signalling, and tell the listeners only after the unlock", "var(--muted)", 11)
+MV[6] = _mv(1230, 308, m6)
+
+# move 7: what is inside the lock, and ten publishers at the same instant
+m7 = _D + _card(30, 20, 545, 152, "inside the topic's lock: about 0.4 microseconds",
+                ["read the size, build the message, add it to the list", "trim the head if retention is full",
+                 "signal any waiting dispatchers", "about three field writes and one array store",
+                 "the one spike: a full log's trim copies 10,000 refs (~3 us)"], acc=True)
+m7 += _ar("M575 96 H645", True) + _tx(610, 86, "unlock", "var(--acc)", 10.5)
+m7 += _card(645, 20, 555, 152, "outside it: microseconds to seconds",
+            ["the handler: 50 us in process, up to 2 s over HTTP", "the retry backoff: 10 ms to a minute",
+             "the listeners: after the unlock, in a try/catch", "the dead-letter write: a list today, a topic later",
+             "none of these can make a publisher wait"])
+m7 += _tx(615, 200, "ten threads publish to the same topic at the same instant", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 215, 106, 40, "thread %d" % (k+1), "waits %s us" % ("0" if k == 0 else "%.1f" % (k*0.4)), acc=(k == 9))
+m7 += _tx(615, 283, "the tenth thread waits about three and a half microseconds for the lock and then returns; it never waits for a subscriber at all,", "var(--muted)", 11)
+m7 += _tx(615, 301, "because no handler, no retry and no listener is ever inside the lock. One at a time is true, and nobody can tell.", "var(--muted)", 11)
+MV[7] = _mv(1230, 315, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one lock per topic: is it a bottleneck? do the arithmetic", "var(--text)", 12)
+for k, l in enumerate(["the locked part of a publish: ~0.4 us, and nothing slow is in it",
+                       "an order service: 2,000 publishes a second into one topic",
+                       "that is 800 us of lock in every second: 0.08% busy",
+                       "even a 40,000/s burst is 16 ms a second: 1.6%",
+                       "20 subscribers cost 20 longs, not 20 copies of a 2 MB log"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 a ring buffer instead of ArrayList", "the trim becomes O(1); only Topic changes"),
+                              ("2 partitions: N logs, N locks, key &rarr; partition", "per-key order kept; total order across the topic is the price"),
+                              ("3 compare-and-set on a pre-sized ring", "the LMAX shape: no lock at all, right at millions a second")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+m8 += _tx(615, 222, "and a second ladder for the readers: one thread per subscription is fine to a few hundred; past that, a bounded pool with a", "var(--muted)", 11)
+m8 += _tx(615, 241, "serial executor per subscription &mdash; and Subscription itself does not change, because it was always just a Runnable with a cursor", "var(--muted)", 11)
+MV[8] = _mv(1230, 254, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two threads publish at the same instant", "assign and store as one locked step; test 1: 50 threads, 2,000 distinct offsets"),
+                                ("a dispatcher sleeps through a publish", "check and await under the SAME lock, in a while; test 2: three subscribers, all 20 each"),
+                                ("a handler throws on one message", "retry on the policy, park it, move the cursor on; test 5: the cursor still reaches the end"),
+                                ("a policy that never gives up", "BoundedRetry wraps every policy; test 9: stopped at 20 attempts, then parked"),
+                                ("retention overtakes a slow subscriber", "fast-forward and COUNT the gap; test 6: 11 delivered + 39 missed = 50"),
+                                ("one handler takes two seconds", "it runs outside the lock, on its own thread; test 7: six publishes in 0 ms"),
+                                ("the metrics listener throws", "publish after the unlock, in a try/catch; test 8: the offsets still come back")]):
+    y = 16 + k*40
+    m9 += _bx(30, y, 320, 36, bad, "") + _ar("M350 %s H396" % (y+18), True) + _bx(396, y, 804, 36, fix, "", acc=True)
+m9 += _tx(615, 320, "every claim this design makes has a failure test: FailureTests.java runs forty-six of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 334, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 200), ("the line in the code", 290), ("what it buys", 830)]
+rows10 = [[("Observer", "var(--text)"), ("move 3", None), ("broker.subscribe(id, topic, handler) -- publish names no subscriber", None), ("the whole point: neither side knows the other", None)],
+          [("Strategy", "var(--text)"), ("move 3", None), ("interface RetryPolicy { long backoffMs(attempt, failure); }", None), ("a new retry rule is a class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new BoundedRetry(policy, 20, 60_000) wraps EVERY policy", None), ("no rule, present or future, retries forever", None)],
+          [("Iterator", "var(--text)"), ("move 5", None), ("the cursor: one AtomicLong per subscription over one log", None), ("a fourth subscriber costs eight bytes", None)],
+          [("State", "var(--text)"), ("move 6", None), ("SubState, and the delivery order: read, deliver, THEN commit", None), ("at-least-once is one visible line", None)],
+          [("Builder", "var(--text)"), ("move 3", None), ("opts().fromEarliest().retry(p).filter(f) -- five optional knobs", None), ("the rare LLD where it truly earns its place", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the broker is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh broker per case", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("topics appear via topics.computeIfAbsent(name, ...), one line", "var(--muted)"), ("it earns the name when a topic needs a config", "var(--muted)")],
+          [("Command", "var(--muted)"), ("never", None), ("no move produced one: a message is data, not an instruction", "var(--muted)"), ("a pattern without a move is decoration", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 335, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 350, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 430), ("the line that shows it", 540)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Topic: the log. Subscription: one cursor, one handler. RetryPolicy: again or not.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("ExponentialBackoff, NoRetryFor, a .dlq sink, a FileStore: each one a new class", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("retry.backoffMs(attempt, e);  a negative answer means give up, from any policy", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("Handler, Filter, DeadLetterSink, BrokerListener, RetryPolicy: each can be a lambda", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("opts().retry(...).deadLetters(...).filter(...);  broker.setClock(() -&gt; t)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "backoff, a filter, a different sink", "a new class behind the interface, plus one line at subscribe", "", "move 3"),
+        ("someone new wants to know", "metrics, a lag alarm, tracing", "one more BrokerListener; the log and the cursors do not move", "", "move 3"),
+        ("a new step in a life", "paused, draining, quarantined", "one more SubState and one more checked transition", "", "move 6"),
+        ("a new invariant across readers", "each message handled by exactly one worker", "the same log, one filter per group member: consumer groups", "", "moves 3 + 5"),
+        ("state that must outlive the process", "persist it; then two processes", "the log behind a MessageStore and the cursor behind an OffsetStore;", "append becomes an fsync'd segment write, commit becomes an offset commit", "moves 5 + 12")]):
+    y = 22 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 308, "for all five the Topic, the cursor and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 322, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>publisher</b> puts a <b>message</b> on a <b>topic</b>; a <b>subscription</b> "
+ "reads it at its own <b>offset</b> and hands it to a <b>handler</b>; a <b>retry rule</b> decides what happens when "
+ "the handler fails. A topic has a log, a next offset and a lock, all of which change: a class, and the one that "
+ "matters. A subscription has a cursor, a thread and a state: a class. A message never changes once published, so it "
+ "is a record &mdash; and it must be immutable for a real reason, not for tidiness: one object sits in the log and is "
+ "handed to twenty handlers on twenty threads at once. A broker has the map of topics and the map of subscriptions: a "
+ "class. A handler has no state at all, so it is an interface. A publisher is not a class here &mdash; it is whoever "
+ "calls <code>publish</code>. And an offset is not a class either: it is a long, on the message and on the cursor.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Give a message its position\" touches the log and the next offset, so it belongs to the topic: "
+ "<code>topic.append(...)</code>. \"Remember how far I have read\" touches one cursor, so it belongs to the "
+ "subscription. \"Hand it over and survive a throw\" touches the cursor too &mdash; whether it moves is the whole "
+ "question &mdash; so <code>deliver</code> is the subscription's as well. \"Find the topic, start a thread\" touches "
+ "the two maps and the pool, so it is the broker's. Now notice the verb that is <i>not</i> in that list: \"send it to "
+ "everybody\". There is no fan-out loop anywhere in this design and nothing is ever copied. Fan-out is three "
+ "subscriptions reading one log at three different positions, which is why a fourth subscriber costs eight bytes and "
+ "not another copy of every message.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "How to retry will change &mdash; twenty minutes in they will say \"a flat twenty milliseconds hammers a struggling "
+ "downstream; back off exponentially, and never retry a message that can never work\". Where a hopeless message goes "
+ "will change: a list today, a dead-letter topic tomorrow. Who is told will change: metrics, a lag alarm, a trace. "
+ "What a subscriber sees will change: a filter. Each becomes a one-method interface that the subscription is "
+ "<i>given</i> and never builds. This is where the patterns come from, not the other way round: a swappable rule "
+ "behind an interface is <b>Strategy</b>; a rule that wraps another rule and adds to it is <b>Decorator</b>, and here "
+ "the one that matters is <code>BoundedRetry</code>, which the broker wraps around every policy it is handed so that "
+ "a rule written next year cannot retry a poison message until the end of time. A broker that announces \"a message "
+ "landed\" without knowing what a metrics system is, is <b>Observer</b> &mdash; and in this system Observer is not a "
+ "detail, it is the entire product. I do them; I do not announce them.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one lock.",
+ "Two threads publish at the same instant. Assigning an offset and storing at it are two operations: both read "
+ "<code>log.size()</code> as 7, both write at 7, and one message is simply gone &mdash; and worse, ArrayList's own "
+ "internals corrupt under a concurrent add, so you may not even get a clean loss. So the two operations happen as "
+ "one step, inside a lock owned by the class that owns the log: the topic. The second shared thing is less obvious "
+ "and is the one that separates a good answer from a great one: the <i>waiting</i>. A dispatcher that asks \"is there "
+ "anything at offset 7?\", sees nothing, and then goes to sleep can miss a publish that lands in the gap between the "
+ "question and the sleep. So the check and the wait sit inside the same lock the publisher signals under, in a "
+ "<code>while</code> loop, which also makes a spurious wakeup harmless. The lock is per <i>topic</i>, and no handler, "
+ "no retry and no listener is ever inside it.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"What is at offset 91,204?\" is an ArrayList plus a base offset, so the index is a subtraction: O(1). \"How far "
+ "behind is this subscriber?\" is one AtomicLong per subscription, and lag is tail minus cursor: O(1), never a scan "
+ "of anything. \"Which subscription, which topic?\" are concurrent hash maps by id. \"What did we give up on?\" is an "
+ "append-only list in the sink. But the shape worth arguing about is the one you do <i>not</i> pick: a queue per "
+ "subscriber. It copies every message once per subscriber, it deletes on read, and with that single choice you have "
+ "thrown away replay, late joiners and any lag number you could put on a dashboard. One log, N cursors. Cursor, not "
+ "queue &mdash; every other decision in this design hangs off that one, including the fact that the stated price is "
+ "honest: the log is bounded, so a subscriber can fall off the back of it.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations is part of the design.",
+ "One message's trip through one subscription: FETCHED under the topic's lock, DELIVERING once the lock is released, "
+ "then ACKED if the handler returns, or RETRY WAIT and back to DELIVERING, or DEAD-LETTERED when the policy gives up. "
+ "Both ACKED and DEAD-LETTERED lead to the same place &mdash; <code>cursor + 1</code> &mdash; because giving up must "
+ "never stall a subscription, which is the commonest bug in a hand-rolled bus. That gives the order: read at the "
+ "cursor with the lock held only for the read; release it; run the handler, which may take two seconds and may throw; "
+ "retry or park; and only then move the cursor. The commit is the last statement, and that is the delivery guarantee "
+ "written down: a crash in the middle redelivers, so this is at-least-once and handlers must be idempotent. Move the "
+ "increment above the handler call and you have at-most-once, which is the right choice for a metrics ping. One line, "
+ "the whole difference &mdash; say which one you picked before you write the loop. The subscription has a life of its "
+ "own too: ACTIVE to PAUSED and back, then STOPPED, with the cursor kept across all of it.", 6),
+("Move 7: yes, the lock makes one topic's publishes happen one at a time. Ask for how long, and what is inside it.",
+ "The question you will be asked, and should ask yourself: if every publish takes the topic's lock, is this a queue "
+ "with extra steps? It is, for about four tenths of a microsecond. Inside the lock there is a size read, an object "
+ "construction, one array store, the retention check and a signal to whoever is waiting &mdash; and one spike worth "
+ "naming out loud: when the log is full, trimming the head of an ArrayList copies ten thousand references, about "
+ "three microseconds, which is exactly why a ring buffer is the first rung of the ladder. Everything else is outside: "
+ "the handler, fifty microseconds in process and up to two seconds over HTTP; the retry backoff, which can be a "
+ "minute; the listeners, called after the unlock inside a try/catch. So when ten threads publish to one topic at the "
+ "same instant, the tenth waits about three and a half microseconds and then returns &mdash; and it never waits for a "
+ "subscriber at all, which is the property publishers actually care about.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "An order service publishing two thousand messages a second into one topic holds that topic's lock for eight hundred "
+ "microseconds in every second: busy eight hundredths of one per cent. A forty-thousand-a-second burst is sixteen "
+ "milliseconds a second, one and a half per cent. And the lock is per topic, so the number of topics is irrelevant. "
+ "Memory is the other number to say: ten thousand retained messages at roughly two hundred bytes is two megabytes per "
+ "topic, and twenty subscribers on it cost twenty longs, not twenty copies. Then the ladder, cheapest first: replace "
+ "the ArrayList with a ring buffer, so the trim is O(1) and the three-microsecond spike disappears &mdash; only Topic "
+ "changes; then partition the topic into N logs with N locks keyed by the message key, which keeps per-key order and "
+ "gives up total order across the topic, exactly the trade Kafka makes; then, if you really are at millions a second, "
+ "drop the lock for a pre-sized ring with a published sequence per slot claimed by compare-and-set. There is a second "
+ "ladder for the reading side: one thread per subscription is fine to a few hundred, and past that a bounded pool "
+ "with a serial executor per subscription &mdash; and Subscription does not change, because it was always a Runnable "
+ "with a cursor. Say the arithmetic first: climbing either ladder without it is complexity nobody asked for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Two threads publishing at the same instant (fifty of them, and every offset must be distinct). A dispatcher "
+ "sleeping through a publish (the lost wakeup: the check and the await under one lock). A handler that throws on one "
+ "message (retry, park, and the cursor must still reach the end). A retry policy that never gives up (the wrapper "
+ "stops it, and the message is parked rather than retried forever). Retention overtaking a slow subscriber (the "
+ "cursor is fast-forwarded and the gap is counted, so eleven delivered plus thirty-nine missed is exactly fifty). One "
+ "handler that takes two seconds (six publishes must still return in no measurable time, and the other subscriber "
+ "must get all six). A metrics listener that throws (the publish must still return its offset). Each of these is a "
+ "few lines in FailureTests.java, which runs forty-six checks; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Observer is not a pattern this design uses, it is the thing this design <i>is</i>: <code>publish</code> names a "
+ "topic and never a subscriber, and that came out of move 3, not out of a pattern book. Strategy is the same move: "
+ "how to retry, where to park, what to filter and what time it is are rules that will change, so each is a "
+ "one-method interface the subscription is handed. Decorator is that move's wrapper, <code>BoundedRetry</code>, which "
+ "adds \"you will give up eventually\" to every policy instead of copying the check into each one. Iterator is move "
+ "5, quietly: the cursor is an iterator over a shared log, which is the reason a fourth subscriber costs eight bytes. "
+ "State is move 6, the delivery life cycle plus the subscription's own. Builder is move 3 again, and this is one of "
+ "the few LLDs where it genuinely earns its place: <code>SubscribeOptions</code> has five knobs and every one is "
+ "optional, which is exactly the case a five-argument constructor handles badly. Singleton earned nothing &mdash; the "
+ "broker is handed to its callers, so a test builds a fresh one per case. Factory is \"not yet\": topics appear "
+ "through one <code>computeIfAbsent</code>, and it earns the name the day a topic needs a configuration of its own. "
+ "Command is \"never\" here: a message is data, not an instruction. A pattern without a move behind it is decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "S: a class has one reason to change, which move 2 gave you &mdash; the topic changes when storage changes, the "
+ "subscription when delivery changes, a retry policy when that rule changes, the broker when the wiring changes, and "
+ "nobody does two of those. O: exponential backoff, never-retry-this, a dead-letter topic and a file-backed store are "
+ "each a new class behind an existing interface, and Topic and Subscription were never reopened to add any of them. "
+ "L: any policy stands in for any other, because the contract is only \"a negative answer means give up\" and nothing "
+ "asks which one it got. I: five interfaces with one method each, so every fake in the tests is a lambda. D: the "
+ "subscription is handed its policy, its sink, its filter and its clock and never writes <code>new</code> on any of "
+ "them &mdash; which is exactly why a test can hand it a clock that reports a five-minute backoff schedule in no time "
+ "at all, and a policy that refuses to ever give up.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (exponential backoff, never retry a malformed payload, a different sink) is a new class behind an "
+ "existing interface plus one line at the subscribe call. Someone new who wants to know (metrics, a lag alarm, "
+ "tracing) is one more listener; the log and the cursors do not move. A new step in a life (paused, draining, "
+ "quarantined) is one more state and one more checked transition. A new invariant across readers &mdash; each message "
+ "handled by exactly one worker instead of all of them &mdash; is consumer groups, and it needs no new broker code at "
+ "all: it is the same log with one filter per group member, which is move 3 on top of move 5. State that must outlive "
+ "the process is the log behind a <code>MessageStore</code> and the cursor behind an <code>OffsetStore</code>: the "
+ "append becomes a segment write and the commit becomes an offset commit, and every class keeps its name, which is "
+ "why \"explain Kafka\" and \"explain this file\" turn out to be the same explanation at two different sizes. Page 05 "
+ "has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, BookMyShow) and the class diagram, the lock, the tests, "
+ "the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing is "
+ "named before the move that produced it. On this problem one decision carries everything: one append-only log per topic "
+ "with a cursor per subscriber, instead of a queue per subscriber. Get that in move 5 and replay, late joiners, lag and "
+ "cheap fan-out are all free; get it wrong and no amount of later cleverness buys them back.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the caller and the one-method interfaces it supplies
+put("caller", 10, 20, 235, "your code", ["a publisher thread", "a subscriber's handler"],
+    ["broker.publish(topic, key, body)", "broker.subscribe(id, topic, h)"])
+put("handler", 10, 160, 235, "Handler", [], ["onMessage(m) throws Exception"], "interface")
+put("filter", 10, 240, 235, "Filter", [], ["accepts(m): boolean", "static all()"], "interface")
+put("clock", 10, 335, 235, "Clock", [], ["nowMs(): long", "sleepMs(ms)   (default)"], "interface")
+put("listener", 10, 430, 235, "BrokerListener", [], ["onEvent(Event e)"], "interface")
+# centre column: the owner, the aggregate root, and the reader
+put("broker", 310, 20, 330, "Broker",
+    ["topics: Map&lt;String, Topic&gt;", "subs: Map&lt;String, Subscription&gt;", "dispatchers: ExecutorService",
+     "listeners: List&lt;BrokerListener&gt;", "defaultRetry / defaultSink / clock"],
+    ["configure(retry, sink)", "publish(topic, key, payload): long", "subscribe(id, topic, handler, opts)",
+     "unsubscribe(id) / close()", "lag(id) / lagReport() / subscribersOf(t)", "topic(name): Topic"])
+put("topic", 310, 275, 330, "Topic",
+    ["name: String", "log: ArrayList&lt;Message&gt;", "baseOffset: long,  dropped: long", "maxRetained: int",
+     "lock: ReentrantLock", "appended: Condition"],
+    ["append(key, payload, hdrs, atMs)", "readAt(offset): Message", "awaitAt(offset, timeoutMs)",
+     "tailOffset() / earliestOffset()", "droppedCount() / retained()"])
+put("sub", 310, 530, 330, "Subscription   (Runnable)",
+    ["id: String,  topic: Topic", "handler: Handler", "cursor: AtomicLong", "state: SubState  (volatile)",
+     "retry / sink / filter / clock", "delivered / deadLettered / missed"],
+    ["run()  -- the dispatch loop", "deliver(m): boolean", "pause() / resume() / stop()", "lag() / seek(off) / offset()"])
+# third column: the values and the enums
+put("event", 690, 20, 225, "Event", ["type: EventType", "topic / subscriptionId", "offset: long,  attempts: int"], [])
+put("etype", 690, 135, 225, "EventType", ["PUBLISHED, DELIVERED,", "RETRIED, DEAD_LETTERED,", "SKIPPED, FAST_FORWARDED"], [], "enum")
+put("msg", 690, 250, 225, "Message", ["offset: long", "topic / key / payload", "headers: Map&lt;String,String&gt;", "atMs: long"], [])
+put("dead", 690, 385, 225, "Dead", ["message: Message", "subscriptionId: String", "attempts: int,  reason: String", "atMs: long"], [])
+put("substate", 690, 520, 225, "SubState", ["ACTIVE, PAUSED, STOPPED"], [], "enum")
+# fourth column: the rules that are handed in
+put("rp", 960, 20, 255, "RetryPolicy", [], ["backoffMs(attempt, failure)", "  : long   (&lt; 0 = give up)"], "interface")
+put("bounded", 960, 115, 255, "BoundedRetry", ["base: RetryPolicy (wrapped)"], ["wraps ANY policy and", "caps attempts + backoff"])
+put("fixed", 960, 215, 255, "FixedDelayRetry", [], ["the same wait, n times"])
+put("expo", 960, 290, 255, "ExponentialBackoff", [], ["base &lt;&lt; (attempt-1), capped"])
+put("dls", 960, 380, 255, "DeadLetterSink", [], ["park(Dead d)"], "interface")
+put("imdl", 960, 455, 255, "InMemoryDeadLetters", [], ["park(d) &rarr; a list", "all() / size()"])
+put("opts", 960, 560, 255, "SubscribeOptions", ["retry / sink / filter", "startAt: long,  earliest: boolean"],
+    ["opts()  -- a fresh set", "retry(r) / deadLetters(s) / filter(f)", "fromEarliest() / fromOffset(n)"])
+
+EDGES = [
+ # the caller reaches the broker
+ ln(B["caller"]["r"], (310, 129), "assoc", ""),
+ # the broker owns its topics, its subscriptions and its threads
+ ln(B["broker"]["b"], B["topic"]["t"], "compose", "owns, by name"),
+ ln((310, 180), (310, 631), "compose", "", [(300, 180), (300, 631)]),
+ ln((310, 129), (245, 457), "notify", "", [(290, 129), (290, 457)]),
+ # the subscription is handed its handler, its filter and its clock
+ ln((310, 631), (245, 187), "inject", "", [(258, 631), (258, 187)]),
+ ln((310, 660), (245, 275), "inject", "", [(270, 660), (270, 275)]),
+ ln((310, 690), (245, 370), "inject", "", [(282, 690), (282, 370)]),
+ # a subscription reads a topic it does not own; the topic owns the log
+ ln((640, 631), (640, 384), "assoc", "", [(655, 631), (655, 384)]),
+ _tx(662, 500, "reads by offset;", "var(--muted)", 10.5, "start"),
+ _tx(662, 516, "many share one", "var(--muted)", 10.5, "start"),
+ ln(B["topic"]["r"], B["msg"]["l"], "compose", "", [(670, 384), (670, 299)]),
+ ln((640, 570), (690, 545), "assoc", ""),
+ # the values
+ ln(B["etype"]["t"], B["event"]["b"], "assoc"),
+ ln(B["dead"]["t"], B["msg"]["b"], "assoc", "carries"),
+ ln(B["broker"]["r"], B["event"]["l"], "assoc", "", [(668, 129), (668, 61)]),
+ # the rules are handed in
+ ln((640, 700), B["dls"]["l"], "inject", "", [(930, 700), (930, 407)]),
+ ln((640, 715), B["rp"]["l"], "inject", "", [(945, 715), (945, 55)]),
+ ln(B["opts"]["b"], B["sub"]["b"], "inject", "", [(1087, 748), (475, 748)]),
+ _tx(925, 690, "the rules, handed in", "var(--acc)", 10.5, "end"),
+ _tx(700, 742, "the options a caller builds, read once at subscribe", "var(--acc)", 10.5, "start"),
+ # the policies and the sink
+ ln(B["bounded"]["t"], B["rp"]["b"], "inherit"),
+ ln((960, 152), (960, 55), "assoc", "", [(950, 152), (950, 55)]),
+ ln(B["fixed"]["l"], B["rp"]["l"], "inherit", "", [(938, 242), (938, 55)]),
+ ln(B["expo"]["l"], B["rp"]["l"], "inherit", "", [(928, 317), (928, 55)]),
+ ln(B["imdl"]["t"], B["dls"]["b"], "inherit"),
+ ln(B["dls"]["l"], B["dead"]["r"], "assoc", "", [(940, 407), (940, 434)]),
+]
+UMLSVG = uml_svg(1230, 800, EDGES, legend_y=778)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements. Filled diamond = owns: the broker owns its topics and its subscriptions, and a topic owns its log of '
+ 'messages. Plain arrow = references: a subscription points at a topic it does <i>not</i> own, because many '
+ 'subscriptions share one topic and stopping one must not close it. Dashed lavender = handed in. Dotted blue = '
+ 'notifies. <b>Where state lives:</b> the topic has the log, the base offset, the retention counter and the one lock, '
+ 'and nothing else in the system writes an offset; a subscription has exactly one long &mdash; its cursor &mdash; plus '
+ 'its thread, its state and its counters; the broker has the two maps and the thread pool and no lock at all; a retry '
+ 'policy and a filter have no state, which is why one instance can serve every subscription. Notice what is <i>not</i> '
+ 'here: no queue anywhere, and no list of subscribers on the topic. A topic does not know who is reading it; the '
+ 'cursors do all the work, which is the whole design in one sentence.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does; read only those first for the shape, then the bodies for the mechanics &mdash; and '
+ 'when you get to <code>Subscription.run()</code>, read the last two statements of the loop slowly, because they are the '
+ 'delivery guarantee. Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java (every '
+ 'follow-up\'s reference code, with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (forty-six checks '
+ 'proving the claims of move 9; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> '
+ 'prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (fan-out versus competing consumers, and at-most-once '
+ 'versus at-least-once, come first); then type in the order of Main.java: the two enums, the records (Message, Dead, '
+ 'Event), the Clock, the one-method interfaces (Handler, Filter, RetryPolicy, DeadLetterSink, BrokerListener), two '
+ 'retry policies and the BoundedRetry wrapper, the in-memory sink, then Topic with its lock and its append and '
+ 'awaitAt, then SubscribeOptions, then Subscription with its dispatch loop and the commit as the last statement, then '
+ 'the thin Broker, then a main with fifty publishing threads.</div></div>')
+
+FU = [
+("Twenty minutes in: \"back off exponentially instead of a flat 20 ms, and never retry a message that can never work.\"", "twist", 10,
+ "Two changes, both new classes, and nothing inside Topic, Subscription or Broker moves. ExponentialBackoff returns "
+ "base shifted left by the attempt number, capped, and gives up after n attempts &mdash; 10 ms, 20 ms, 40 ms, then "
+ "stop. \"Never retry a message that can never work\" is a wrapper rather than a new policy: NoRetryFor holds any "
+ "policy and answers &minus;1 the moment the failure is of a type you have declared permanent, so it composes with "
+ "the backoff instead of replacing it. The call site is one line: "
+ "<code>opts().retry(new NoRetryFor(new ExponentialBackoff(6, 10, 1000), PermanentFailure.class))</code>. The seam "
+ "that made this cheap is that the failure is passed to the policy, so telling a timeout from a malformed payload "
+ "never needed a signature change.",
+ sect(src, "final class ExponentialBackoff", "final class BoundedRetry") + "\n" + X("never retry a message that can never work", "a dead-letter TOPIC")),
+("Fifty threads publish to one topic at the same instant. Prove you cannot duplicate or lose an offset, with a test.", "non-functional", 10,
+ "The race lives between reading the log's size and storing at it: two threads both read 7, both write at 7, one "
+ "message disappears, and ArrayList's internals corrupt on top of that. append does both operations inside the "
+ "topic's lock, so no other publisher can run in that gap. The proof is not a count but a set: fifty threads wait on "
+ "one latch, each publishes forty messages, and each collects the offsets it was handed. The test then checks that "
+ "the two thousand offsets are two thousand distinct values, that the log's tail is exactly 2000, that every offset "
+ "from 0 to 1999 reads back non-null (no hole), and that each publisher's own offsets increased. A subscriber "
+ "counting in the background must also have seen all two thousand.",
+ T("        // 1. fifty threads publish into ONE topic", "        // 2. fan-out")),
+("One lock per topic. Have you just serialised the whole broker?", "non-functional", 5,
+ "No, and the answer is arithmetic. The locked part of a publish is a size read, an object construction, one array "
+ "store, the retention check and a signal: about four tenths of a microsecond. An order service at two thousand "
+ "messages a second holds the lock eight hundred microseconds in every second, eight hundredths of one per cent; a "
+ "forty-thousand-a-second burst is one and a half per cent. The lock is per topic, so ten thousand topics never meet. "
+ "There is one spike worth naming before they find it: when the log is full, trimming the head of an ArrayList copies "
+ "ten thousand references, about three microseconds &mdash; which is exactly why rung one of the ladder is a ring "
+ "buffer, where only Topic changes. Rung two is partitions: N logs and N locks keyed by the message key, keeping "
+ "per-key order and giving up total order. Rung three, at millions a second, is a pre-sized ring with a sequence per "
+ "slot claimed by compare-and-set, and no lock at all.",
+ sect(src, "final class Topic", "// \"the knobs are about to multiply\"")),
+("A handler throws. Where is the cursor afterwards, and what guarantee have you just implemented?", "functional", 10,
+ "The cursor has not moved, because the increment is the last statement of the loop and it runs only when deliver "
+ "returns true. deliver calls the handler with no lock held; on an exception it asks the policy for a backoff, waits "
+ "and tries again; when the policy answers a negative number it parks the message in the dead-letter sink and returns "
+ "true anyway, because giving up must advance the cursor or the subscription is stuck forever on one bad message. A "
+ "shutdown in the middle returns false, so that message is delivered again next time. That is at-least-once, and it "
+ "is one line: move the increment above the handler call and you have at-most-once, which is right for a metrics "
+ "ping. The price of at-least-once is duplicates, so handlers must be idempotent &mdash; and when the business code "
+ "is not, a decorator that remembers message ids gets you there.",
+ sect(src, "    private boolean deliver(", "    void pause()") + "\n" + X("exactly-once for the handler", "back-pressure")),
+("A subscriber was down for an hour. It comes back. What does it see?", "functional", 5,
+ "Whatever it had not finished, and nothing twice. Its cursor is the offset it will read next, committed only after a "
+ "handler returned, so a restart from that number replays nothing it acknowledged and skips nothing it did not. "
+ "Subscribing with fromOffset does exactly that in one line; fromEarliest replays all the retained history instead, "
+ "which is what a brand-new analytics consumer wants. The hard case is the honest one: if retention dropped messages "
+ "under the cursor while it was down, the dispatcher fast-forwards to the earliest surviving offset and adds the gap "
+ "to a missed counter, so the loss is a number on a dashboard rather than a silence. Nothing else in the system "
+ "notices any of this, because a cursor is a private long.",
+ T("        // 3. a subscriber restarts", "        // 4. the handler throws") + "\n"
+ + T("        // 6. retention overtakes a slow subscriber", "        // 7. one slow subscriber")),
+("One subscriber takes two seconds per message. What happens to the publisher, and to the other subscribers?", "non-functional", 5,
+ "Nothing happens to either. The publisher's call ends when the message is in the log, which takes under a "
+ "microsecond, and it never looks at a subscriber; the slow handler runs on its own dispatcher thread with no lock "
+ "held, so the only thing that grows is that subscription's own lag. The test publishes six messages, asserts the "
+ "publish loop took no measurable time, asserts the fast subscriber received all six, and asserts the slow one is "
+ "still behind. The junior version of this design calls every handler inside publish, which makes one slow "
+ "subscriber a global outage and one throwing subscriber a fan-out that stops halfway. The cost of the good version "
+ "is real and worth saying: a stuck handler stalls its own subscription forever, so production wraps delivery in a "
+ "timeout, and back-pressure or retention has to bound the memory.",
+ T("        // 7. one slow subscriber", "        // 8. a handler that always throws")),
+("Now make it competing consumers: a group of three workers, each message handled by exactly one of them, and per-key order kept.", "twist", 10,
+ "It needs no new broker code at all, which is the sign that move 5 was right. A group member is a normal "
+ "subscription with a filter that accepts only its own slice of the key space, so the three of them read the same log "
+ "at three cursors and each handles one message in three. Messages with the same key hash to the same member, so "
+ "per-key order survives; a message with no key falls back to its offset, which round-robins. The honest price is "
+ "that each member walks the whole log and skips two thirds of it, which is fine at these volumes and is exactly what "
+ "real Kafka fixes by giving each member its own partition log instead &mdash; that is the partitions extension, the "
+ "same idea one level down, and the reason consumer groups rebalance partitions rather than keys.",
+ X("consumer groups", "never retry a message that can never work") + "\n" + X("partitions", "persistence")),
+("The dashboard asks every subscriber's lag a thousand times a second. Make it O(1).", "non-functional", 5,
+ "It already is. Lag is the topic's tail offset minus the subscription's cursor, which is two volatile reads and a "
+ "subtraction, and nothing is scanned, counted or re-read. That is a direct consequence of one log with a cursor per "
+ "subscriber: with a queue per subscriber you would be asking for the size of a concurrent queue, which is at best "
+ "approximate and at worst O(n). The broker's lagReport walks the subscription map once and does that subtraction "
+ "per subscriber, so the whole dashboard is O(number of subscriptions). The alarm on top is a listener plus a filter "
+ "over the report, and it needs no new state anywhere.",
+ X("lag metrics and an alarm", "partitions")),
+("Where do messages that can never be processed go, and how do I stop a burst from eating the heap?", "twist", 5,
+ "Two different answers. A message nobody can handle is retried on the policy and then parked in a dead-letter sink, "
+ "never dropped and never blocked on; in production the sink is another topic, so the repair tool is another "
+ "subscriber and a replay is another publish. Memory is bounded by retention: each topic keeps a fixed number of "
+ "messages and trims the head, counting what it dropped, so a subscriber that falls off the window is fast-forwarded "
+ "visibly instead of stalling everybody. If dropping is not acceptable, back-pressure is a gate in front of publish "
+ "rather than a change to the broker: wait while the slowest subscriber on that topic is beyond a high-water mark, "
+ "and fail loudly after a budget instead of buffering forever.",
+ X("a dead-letter TOPIC", "exactly-once for the handler") + "\n" + X("back-pressure", "lag metrics and an alarm")),
+("Persist it: messages must survive a restart. And then there are two processes.", "twist", 5,
+ "The log goes behind a MessageStore and the cursors behind an OffsetStore, and no other class changes &mdash; the "
+ "topic's ArrayList becomes a cache of the tail of a segment file, and a restart replays the file in order so the "
+ "offsets come out identical. A subscriber resumes with one line, because its cursor was always just a number. Two "
+ "processes is where an in-process broker stops being the right tool and you should say so: the log moves out to "
+ "Kafka or Pulsar or a table with a monotonic id, the topic's lock becomes the partition leader's, and the cursor "
+ "becomes a committed offset in the broker's own store. Every class here keeps its name, which is why the mapping "
+ "table is worth memorising: it is the same explanation at two different sizes.",
+ X("persistence", "replay from a point in time") + "\n" + X("the Kafka mapping", "Runs every extension")),
+("Where does time come from, and how do you test a five-minute backoff schedule without waiting five minutes?", "design", 3,
+ "One injected interface does both jobs: Clock answers what time it is and also performs the wait, with a default "
+ "method so the production one is still a lambda. Nothing else in the system reads the wall clock or calls "
+ "Thread.sleep. A test hands in a clock that records every requested wait and returns at once, so the exponential "
+ "schedule can be asserted exactly &mdash; 10, 20, 40 &mdash; and the whole suite runs in milliseconds. The same seam "
+ "stamps message timestamps, which is what makes seek-by-timestamp testable.",
+ sect(src, "interface Clock", "// \"a handler will fail") + "\n"
+ "// in a test: the clock records what it was asked to wait for, and never actually waits\n"
+ "static final class TestClock implements Clock {\n"
+ "    volatile long now = 1_700_000_000_000L;\n"
+ "    final List<Long> sleeps = new CopyOnWriteArrayList<>();\n"
+ "    public long nowMs() { return now; }\n"
+ "    @Override public void sleepMs(long ms) { sleeps.add(ms); now += ms; }\n"
+ "}\n"
+ "broker.setClock(clock);\n"
+ "// ... a handler that throws three times ...\n"
+ "check(clock.sleeps.equals(List.of(10L, 20L, 40L)), \"the waits before giving up were 10, 20 and 40 ms\");\n"),
+("Which pattern is where, and why did each one earn its place?", "design", 8,
+ "None was chosen up front; each is what a move produced. Observer is not a pattern this design uses, it is what the "
+ "design is: publish names a topic and never a subscriber. Strategy is move 3 &mdash; retry, sink, filter and clock "
+ "are rules that will change, so each is a one-method interface handed in. Decorator is that move's wrapper, "
+ "BoundedRetry, which the broker puts around every policy so no rule, present or future, can retry forever; NoRetryFor "
+ "is the same trick applied by a caller. Iterator is move 5: the cursor is an iterator over a shared log, and it is "
+ "the reason a fourth subscriber costs eight bytes instead of a copy of everything. State is move 6, twice over: the "
+ "delivery life cycle and the subscription's own. Builder is move 3 again, and this is the rare LLD where it earns "
+ "its place, because SubscribeOptions has five knobs and all five are optional. Singleton earned nothing: the broker "
+ "is handed to its callers, so each test builds a fresh one.",
+ "// Observer: the whole product. publish names a topic; it has never heard of a subscriber\n"
+ "long publish(String topicName, String key, String payload) { ... }\n"
+ "Subscription subscribe(String subId, String topicName, Handler h, SubscribeOptions o) { ... }\n\n"
+ "// Strategy: a rule behind a one-method interface, handed in, never built by the broker\n"
+ "interface RetryPolicy { long backoffMs(int attempt, Exception failure); }\n\n"
+ "// Decorator: add the invariant to every policy, present and future, instead of trusting each one\n"
+ "new BoundedRetry(o.retry == null ? defaultRetry : o.retry, MAX_ATTEMPTS, MAX_BACKOFF_MS)\n\n"
+ "// Iterator: one log, N cursors. This line is the entire fan-out mechanism\n"
+ "private final AtomicLong cursor;            // the next offset to read; written by one thread\n\n"
+ "// State: the delivery life cycle, and the subscription's own\n"
+ "enum SubState { ACTIVE, PAUSED, STOPPED }\n"
+ "if (deliver(m)) cursor.incrementAndGet();   // ACKED and DEAD-LETTERED both commit; nothing else does\n\n"
+ "// Builder: five optional knobs, which is exactly the case a long constructor handles badly\n"
+ "SubscribeOptions.opts().fromEarliest().retry(new ExponentialBackoff(5, 10, 1000)).filter(m -> \"IN\".equals(m.key()))\n"),
+("Which SOLID letter is where in this code, and where would a Factory earn its place?", "design", 5,
+ "S: the topic stores and hands back by offset, the subscription drives one cursor and one handler, a policy answers "
+ "\"again, and how long\", the broker wires &mdash; changing the retry rule cannot break the log. O: exponential "
+ "backoff, never-retry-this, a dead-letter topic and a file store were each a new class behind an existing interface, "
+ "and Topic and Subscription were never reopened. L: any policy substitutes for any other, because the contract is "
+ "only that a negative answer means give up, and no caller asks which policy it got. I: five interfaces with one "
+ "method each, so every fake in the tests is a lambda. D: the subscription is handed its policy, sink, filter and "
+ "clock and never writes new on any of them, which is why a test can hand in a policy that refuses to give up. "
+ "Factory: topics appear through a single computeIfAbsent, which is a registry already; it earns the name the day a "
+ "topic needs a configuration of its own &mdash; its own retention, its own partition count &mdash; because that is "
+ "when construction stops being one line.",
+ "// S: four classes, four reasons to change\n"
+ "final class Topic { /* the log and the offsets */ }\n"
+ "final class Subscription { /* one cursor, one handler, one thread */ }\n"
+ "interface RetryPolicy { long backoffMs(int attempt, Exception failure); }\n\n"
+ "// D + I: handed in, one method each, so a test fake is a lambda\n"
+ "cap.configure((attempt, failure) -> 0, parked);       // \"always retry, immediately\" -- and BoundedRetry stops it\n"
+ "broker.setClock(() -> fixedInstant);\n\n"
+ "// Factory: not yet. This one line is the registry; it earns the name when a topic needs a config\n"
+ "Topic topic(String name) { return topics.computeIfAbsent(name, n -> new Topic(n, retention)); }\n"
+ "// the day it becomes:  topics.computeIfAbsent(name, n -> topicFactory.create(n, configFor(n)));\n"),
+]
+
+build(dict(
+    slug="pubsub", title="Pub/Sub System",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 46 failure checks and a 50-thread publish race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

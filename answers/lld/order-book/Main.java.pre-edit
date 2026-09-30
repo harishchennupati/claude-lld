@@ -1,0 +1,714 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+import java.util.function.*;
+
+/** Which way an order points. A buy takes from the asks; a sell takes from the bids. */
+enum Side {
+    BUY, SELL;
+    /** The side of the book this order matches against. */
+    Side opposite() { return this == BUY ? SELL : BUY; }
+}
+
+/** LIMIT names the worst price it will accept. MARKET accepts any price and never rests. */
+enum OrderType { LIMIT, MARKET }
+
+/**
+ * How long the order is allowed to live. GTC rests what it could not fill; IOC takes what is
+ * there and cancels the rest; FOK fills completely or does nothing at all.
+ */
+enum TimeInForce { GTC, IOC, FOK }
+
+/**
+ * An order's life. The engine never sets a field directly: it calls moveTo(), which refuses an
+ * illegal move, so a bug shows up as an exception instead of a corrupt book.
+ */
+enum OrderStatus {
+    NEW, ACCEPTED, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED;
+    /** The legal edges of the state machine drawn on page 02, move 6. */
+    boolean canMoveTo(OrderStatus next) {
+        return switch (this) {
+            case NEW              -> next == ACCEPTED || next == REJECTED;
+            case ACCEPTED         -> next == PARTIALLY_FILLED || next == FILLED || next == CANCELLED;
+            case PARTIALLY_FILLED -> next == PARTIALLY_FILLED || next == FILLED || next == CANCELLED;
+            default               -> false;                       // FILLED, CANCELLED, REJECTED are the end
+        };
+    }
+    /** True once the order can never change again. */
+    boolean isTerminal() { return this == FILLED || this == CANCELLED || this == REJECTED; }
+}
+
+/**
+ * Exact prices, in ticks. One tick here is one paise, so 1500.05 is 150005 and every comparison is
+ * integer equality. There is no double and no BigDecimal anywhere past these two helpers.
+ */
+final class Ticks {
+    private Ticks() {}
+    /** Parse "1500.05" into 150005 ticks. Used at the edge (a form, a file), never in the matching loop. */
+    static long of(String rupees) { return new java.math.BigDecimal(rupees).movePointRight(2).longValueExact(); }
+    /** Print 150005 ticks as "1500.05". Presentation only. */
+    static String fmt(long ticks) {
+        String sign = ticks < 0 ? "-" : ""; long a = Math.abs(ticks);
+        return sign + (a / 100) + "." + String.format("%02d", a % 100);
+    }
+}
+
+/** Where time comes from. Injected, so a test can stamp a trade with any instant it likes. */
+interface Clock { long nowMs(); }
+
+/**
+ * One order. Everything is final except remaining, the status and the arrival sequence: matching
+ * only ever shrinks remaining, and it does so under the book's lock.
+ */
+final class Order {
+    private final String id, symbol, memberId;
+    private final Side side;
+    private final OrderType type;
+    private final TimeInForce tif;
+    private final long limitTicks, qty;
+    private long remaining, seq;
+    private OrderStatus status = OrderStatus.NEW;
+
+    Order(String id, String symbol, String memberId, Side side, OrderType type, TimeInForce tif,
+          long limitTicks, long qty) {
+        this.id = id; this.symbol = symbol; this.memberId = memberId; this.side = side;
+        this.type = type; this.tif = tif; this.limitTicks = limitTicks; this.qty = qty;
+        this.remaining = qty;
+    }
+    /** A good-till-cancelled limit order: the ordinary case, and the only kind that rests. */
+    static Order limit(String id, String symbol, String member, Side side, long priceTicks, long qty) {
+        return new Order(id, symbol, member, side, OrderType.LIMIT, TimeInForce.GTC, priceTicks, qty);
+    }
+    /** A limit order with an explicit time-in-force: GTC rests, IOC cancels the rest, FOK is all-or-nothing. */
+    static Order limit(String id, String symbol, String member, Side side, long priceTicks, long qty, TimeInForce tif) {
+        return new Order(id, symbol, member, side, OrderType.LIMIT, tif, priceTicks, qty);
+    }
+    /** A market order: it takes whatever is crossing and never rests, so its time-in-force is IOC. */
+    static Order market(String id, String symbol, String member, Side side, long qty) {
+        return new Order(id, symbol, member, side, OrderType.MARKET, TimeInForce.IOC, 0, qty);
+    }
+
+    String id() { return id; }
+    String symbol() { return symbol; }
+    String memberId() { return memberId; }
+    Side side() { return side; }
+    OrderType type() { return type; }
+    TimeInForce tif() { return tif; }
+    long limitTicks() { return limitTicks; }
+    long qty() { return qty; }
+    long remaining() { return remaining; }
+    /** How much of the order has traded. Always qty - remaining; the two never drift. */
+    long filled() { return qty - remaining; }
+    long seq() { return seq; }
+    OrderStatus status() { return status; }
+
+    /** The engine's arrival stamp, taken inside the lock, so it IS the book's own order of events. */
+    void stamp(long s) { seq = s; }
+    /** Move the state machine, or throw. An illegal move is a bug, not a business case. */
+    void moveTo(OrderStatus next) {
+        if (!status.canMoveTo(next))
+            throw new IllegalStateException(id + ": " + status + " -> " + next + " is not a legal move");
+        status = next;
+    }
+    /** Take q lots off this order. The last line of defence: nothing can fill more than it offered. */
+    void take(long q) {
+        if (q <= 0) throw new IllegalStateException(id + ": a fill must be positive, got " + q);
+        if (q > remaining) throw new IllegalStateException(id + ": fill of " + q + " but only " + remaining + " left");
+        remaining -= q;
+    }
+    /** Amend down: give up lots without giving up queue place. Never used to raise a quantity. */
+    void shrinkTo(long newRemaining) {
+        if (newRemaining <= 0 || newRemaining > remaining)
+            throw new IllegalArgumentException(id + ": can only shrink, " + remaining + " -> " + newRemaining);
+        remaining = newRemaining;
+    }
+    @Override public String toString() {
+        return id + " " + side + " " + remaining + "/" + qty + " @" +
+               (type == OrderType.MARKET ? "MKT" : Ticks.fmt(limitTicks)) + " " + status;
+    }
+}
+
+/** One printed trade: what left the building. The price is always the resting order's price. */
+record Trade(long seq, String symbol, long priceTicks, long qty,
+             String buyOrderId, String sellOrderId, Side takerSide, long atMs) {
+    /** One line of tape. */
+    String text() { return "#" + seq + " " + qty + " @ " + Ticks.fmt(priceTicks) + " (" + buyOrderId + "/" + sellOrderId + ")"; }
+}
+
+/** One line of an allocator's plan: this resting order gives up this many lots. A decision, not a write. */
+record Allocation(String makerOrderId, long qty) {}
+
+/** The top of the book. A price of -1 means that side is empty. */
+record Quote(long bidTicks, long bidQty, long askTicks, long askQty) {
+    /** A one-line quote for a screen or a log. */
+    String text() {
+        return (bidQty == 0 ? "--" : bidQty + " @ " + Ticks.fmt(bidTicks)) + "  |  " +
+               (askQty == 0 ? "--" : Ticks.fmt(askTicks) + " @ " + askQty);
+    }
+}
+
+/** One rung of the depth ladder: a price, the lots resting there, and how many orders make it up. */
+record Rung(long priceTicks, long qty, int orders) {
+    /** One rung, as a screen would show it: "500 @ 1499.95 (2 orders)". */
+    String text() { return qty + " @ " + Ticks.fmt(priceTicks) + " (" + orders + (orders == 1 ? " order)" : " orders)"); }
+}
+
+/** What submit() gives back: the order's end state, what it traded, and what is left resting. */
+record SubmitResult(String orderId, OrderStatus status, long filledQty, long restingQty,
+                    List<Trade> trades, String rejectReason) {}
+
+/**
+ * One price, one queue. Within a price the promise is first-come-first-served, so the queue is a
+ * LinkedHashMap: iteration stays arrival order and a cancel from the middle is O(1), which is the
+ * operation a live book does most.
+ */
+final class PriceLevel {
+    private final long priceTicks;
+    private final LinkedHashMap<String, Order> fifo = new LinkedHashMap<>();
+    private long totalQty;                       // kept, never recomputed: the FOK pre-check reads it
+
+    PriceLevel(long priceTicks) { this.priceTicks = priceTicks; }
+
+    long priceTicks() { return priceTicks; }
+    /** Lots resting at this price. O(1), because it is maintained on every add and every fill. */
+    long totalQty() { return totalQty; }
+    int orderCount() { return fifo.size(); }
+    boolean isEmpty() { return fifo.isEmpty(); }
+    /** The resting order with this id, or null. O(1). */
+    Order find(String orderId) { return fifo.get(orderId); }
+    /** The queue in arrival order, as a snapshot the allocator can walk without touching the book. */
+    List<Order> queue() { return new ArrayList<>(fifo.values()); }
+
+    /** Join the back of the queue. O(1). */
+    void add(Order o) { fifo.put(o.id(), o); totalQty += o.remaining(); }
+    /** Take q lots off a resting order and drop it from the queue when it is exhausted. O(1). */
+    void reduce(Order maker, long q) { maker.take(q); totalQty -= q; if (maker.remaining() == 0) fifo.remove(maker.id()); }
+    /** Pull an order out of the queue, wherever it is standing. O(1). */
+    Order remove(String orderId) {
+        Order o = fifo.remove(orderId);
+        if (o != null) totalQty -= o.remaining();
+        return o;
+    }
+    /** Amend a resting order down without losing its place. O(1). */
+    void shrink(Order o, long newRemaining) { totalQty -= (o.remaining() - newRemaining); o.shrinkTo(newRemaining); }
+}
+
+/**
+ * One symbol's book: two ladders of price levels sorted opposite ways, plus the index that makes
+ * cancel O(1). It holds state and answers questions; it never decides anything and takes no lock.
+ */
+final class OrderBook {
+    private final String symbol;
+    private final NavigableMap<Long, PriceLevel> bids = new TreeMap<>(Comparator.reverseOrder());  // highest first
+    private final NavigableMap<Long, PriceLevel> asks = new TreeMap<>();                           // lowest first
+    private final Map<String, Order> byId = new HashMap<>();                                       // cancel in O(1)
+
+    OrderBook(String symbol) { this.symbol = symbol; }
+
+    String symbol() { return symbol; }
+    /** The ladder for one side: bids highest-first, asks lowest-first, so both are read front to back. */
+    NavigableMap<Long, PriceLevel> ladder(Side side) { return side == Side.BUY ? bids : asks; }
+    /** The best price level on a side, or null. O(log P) in the number of live price levels. */
+    Map.Entry<Long, PriceLevel> best(Side side) { NavigableMap<Long, PriceLevel> l = ladder(side); return l.isEmpty() ? null : l.firstEntry(); }
+    /** Any live order by id, resting or not yet removed. O(1). */
+    Order find(String orderId) { return byId.get(orderId); }
+
+    /** Would this incoming order accept a trade at this resting price? */
+    static boolean crosses(Order taker, long restingTicks) {
+        if (taker.type() == OrderType.MARKET) return true;
+        return taker.side() == Side.BUY ? taker.limitTicks() >= restingTicks : taker.limitTicks() <= restingTicks;
+    }
+
+    /** Put the remainder at the back of its price queue. O(log P) to find or create the level. */
+    void rest(Order o) {
+        ladder(o.side()).computeIfAbsent(o.limitTicks(), PriceLevel::new).add(o);
+        byId.put(o.id(), o);
+    }
+    /** Pull a resting order out and prune an emptied level. Returns null if it is not resting. O(1) + O(log P). */
+    Order cancel(String orderId) {
+        Order o = byId.remove(orderId);
+        if (o == null) return null;
+        NavigableMap<Long, PriceLevel> lad = ladder(o.side());
+        PriceLevel level = lad.get(o.limitTicks());
+        if (level != null) { level.remove(orderId); if (level.isEmpty()) lad.remove(o.limitTicks()); }
+        return o;
+    }
+    /** Forget a maker that matching exhausted; the level already dropped it. O(1). */
+    void forget(String orderId) { byId.remove(orderId); }
+    /** Drop a level that a fill emptied. */
+    void pruneIfEmpty(Side side, long priceTicks) {
+        NavigableMap<Long, PriceLevel> lad = ladder(side);
+        PriceLevel level = lad.get(priceTicks);
+        if (level != null && level.isEmpty()) lad.remove(priceTicks);
+    }
+    /** How many lots this order could take right now, walking the opposite ladder while it crosses. O(L). */
+    long availableAgainst(Order taker) {
+        long sum = 0;
+        for (Map.Entry<Long, PriceLevel> e : ladder(taker.side().opposite()).entrySet()) {
+            if (!crosses(taker, e.getKey())) break;
+            sum += e.getValue().totalQty();
+            if (sum >= taker.qty()) return sum;
+        }
+        return sum;
+    }
+    /** Lots resting on one side of the book. Used by the tests to prove nothing went missing. */
+    long totalQty(Side side) {
+        long sum = 0;
+        for (PriceLevel l : ladder(side).values()) sum += l.totalQty();
+        return sum;
+    }
+    /** Best bid and best ask with their sizes. O(log P). */
+    Quote quote() {
+        Map.Entry<Long, PriceLevel> b = best(Side.BUY), a = best(Side.SELL);
+        return new Quote(b == null ? -1 : b.getKey(), b == null ? 0 : b.getValue().totalQty(),
+                         a == null ? -1 : a.getKey(), a == null ? 0 : a.getValue().totalQty());
+    }
+    /** The top n rungs of one ladder, best price first. O(n). */
+    List<Rung> depth(Side side, int n) {
+        List<Rung> out = new ArrayList<>();
+        for (PriceLevel l : ladder(side).values()) {
+            if (out.size() == n) break;
+            out.add(new Rung(l.priceTicks(), l.totalQty(), l.orderCount()));
+        }
+        return out;
+    }
+}
+
+// "this contract allocates pro-rata, not first-come-first-served" -> the rule goes behind an interface -> Strategy
+/**
+ * Who gets filled inside one price level. The exchange rulebook decides this, not the engine, so it
+ * is one method handed in. It must be PURE: it decides a plan and mutates nothing.
+ */
+interface Allocator {
+    /** How the taker's remaining lots are shared out among the orders resting at this level. */
+    List<Allocation> allocate(Order taker, PriceLevel level);
+}
+
+/** Price-time priority: the exchange's default. Walk the queue in arrival order until the taker is full. */
+final class PriceTimeAllocator implements Allocator {
+    public List<Allocation> allocate(Order taker, PriceLevel level) {
+        List<Allocation> plan = new ArrayList<>();
+        long left = taker.remaining();
+        for (Order maker : level.queue()) {
+            if (left <= 0) break;
+            long q = Math.min(left, maker.remaining());
+            if (q > 0) { plan.add(new Allocation(maker.id(), q)); left -= q; }
+        }
+        return plan;
+    }
+}
+
+// the same move: one rule that wraps every other rule, so a rulebook written next year cannot overfill -> Decorator
+/**
+ * Wraps any allocator and refuses a plan that would hand out more than exists: more than the taker
+ * has left, more than a maker is offering, an order that is not at this level, or the same order
+ * twice. It throws BEFORE the engine applies anything, so a broken rulebook writes nothing.
+ */
+final class CheckedAllocator implements Allocator {
+    private final Allocator base;
+    CheckedAllocator(Allocator base) { this.base = base; }
+    /** The rule this wrapper is enforcing, for a message or a test. */
+    Allocator base() { return base; }
+    public List<Allocation> allocate(Order taker, PriceLevel level) {
+        List<Allocation> plan = base.allocate(taker, level);
+        long total = 0;
+        Set<String> seen = new HashSet<>();
+        for (Allocation a : plan) {
+            Order maker = level.find(a.makerOrderId());
+            if (maker == null) throw new IllegalStateException("allocator named " + a.makerOrderId() + ", which is not resting at " + Ticks.fmt(level.priceTicks()));
+            if (!seen.add(a.makerOrderId())) throw new IllegalStateException("allocator named " + a.makerOrderId() + " twice in one plan");
+            if (a.qty() <= 0) throw new IllegalStateException("allocator gave " + a.makerOrderId() + " a non-positive fill: " + a.qty());
+            if (a.qty() > maker.remaining()) throw new IllegalStateException("allocator gave " + a.makerOrderId() + " " + a.qty() + " lots but it is only offering " + maker.remaining());
+            total += a.qty();
+        }
+        if (total > taker.remaining()) throw new IllegalStateException("allocator handed out " + total + " lots for a taker with " + taker.remaining() + " left");
+        return plan;
+    }
+}
+
+// "the tape wants fills, market data wants the top of book, risk wants exposure" -> announce, do not call -> Observer
+/**
+ * Everything downstream of matching. Every method has a no-op default, so a listener implements only
+ * the events it cares about. Listeners are called AFTER the lock is released, each inside a try/catch.
+ */
+interface BookListener {
+    /** The order passed validation and is about to be matched. */
+    default void onAccepted(Order o) {}
+    /** A trade printed, at the resting order's price. */
+    default void onTrade(Trade t) {}
+    /** What could not be filled is now resting in the book. */
+    default void onRested(Order o, long restingQty) {}
+    /** The order left the book, or its remainder was thrown away (IOC, FOK, market). */
+    default void onCancelled(Order o, long cancelledQty) {}
+    /** The order never entered the book: a bad price, a bad quantity, a reused id. */
+    default void onRejected(String orderId, String reason) {}
+    /** The top of the book after this event. */
+    default void onQuote(Quote q) {}
+}
+
+/** The tape: it prints trades, and nothing else. Interface segregation, in one class. */
+final class ConsoleTape implements BookListener {
+    private final List<Trade> printed = Collections.synchronizedList(new ArrayList<>());
+    public void onTrade(Trade t) { printed.add(t); }
+    /** Every trade this tape saw, in the order it saw them. */
+    List<Trade> printed() { return List.copyOf(printed); }
+}
+
+/** Market data's level 1 feed: the last quote, readable without touching the book or its lock. */
+final class TopOfBook implements BookListener {
+    private volatile Quote last = new Quote(-1, 0, -1, 0);
+    public void onQuote(Quote q) { last = q; }
+    /** The most recent top of book. A read, never a lock. */
+    Quote last() { return last; }
+}
+
+/**
+ * The aggregate root: one symbol's book, one lock, one allocator, the listeners and the clock.
+ * Every state change in this file happens inside submit() or cancel(), and both take this lock.
+ */
+final class MatchingEngine {
+    private final String symbol;
+    private final OrderBook book;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final List<BookListener> listeners = new CopyOnWriteArrayList<>();
+    private final Set<String> usedIds = new HashSet<>();       // guarded by lock: a reused id is rejected
+    private final long tickSize, lotSize;
+
+    private volatile Allocator allocator = new CheckedAllocator(new PriceTimeAllocator());
+    private volatile Clock clock = System::currentTimeMillis;
+    private long seq;                                          // guarded by lock: the book's own clock
+
+    MatchingEngine(String symbol, long tickSize, long lotSize) {
+        this.symbol = symbol; this.book = new OrderBook(symbol);
+        this.tickSize = tickSize; this.lotSize = lotSize;
+    }
+
+    /** Hand in the rulebook. The engine never builds an allocator, and always wraps it in the checker. */
+    void configure(Allocator a) { allocator = new CheckedAllocator(a); }
+    /** Hand in the clock. Tests set it; production leaves it as the wall clock. */
+    void setClock(Clock c) { clock = c; }
+    /** Add a downstream consumer: tape, market data, risk, journal. */
+    void addListener(BookListener l) { listeners.add(l); }
+
+    String symbol() { return symbol; }
+    /** Top of book, read under the lock so it is never half-updated. */
+    Quote quote() { lock.lock(); try { return book.quote(); } finally { lock.unlock(); } }
+    /** The top n rungs of one ladder. */
+    List<Rung> depth(Side side, int n) { lock.lock(); try { return book.depth(side, n); } finally { lock.unlock(); } }
+    /** Lots resting on one side. */
+    long restingQty(Side side) { lock.lock(); try { return book.totalQty(side); } finally { lock.unlock(); } }
+    /** A live order by id, or null if it never rested, was filled or was cancelled. */
+    Order resting(String orderId) { lock.lock(); try { return book.find(orderId); } finally { lock.unlock(); } }
+
+    /**
+     * Take an order. Everything that reads and writes the book happens inside the lock; the
+     * listeners are called after the unlock, so a slow or broken consumer cannot stall matching.
+     */
+    SubmitResult submit(Order taker) {
+        List<Consumer<BookListener>> events = new ArrayList<>();
+        SubmitResult result;
+        lock.lock();
+        try { result = submitLocked(taker, events); } finally { lock.unlock(); }
+        fire(events);
+        return result;
+    }
+
+    /**
+     * The critical step, in order: validate, then the fill-or-kill pre-check, then match, then decide
+     * the remainder. Nothing is written until every check has passed, so a rejected order leaves the
+     * book exactly as it was and the member can retry.
+     */
+    private SubmitResult submitLocked(Order taker, List<Consumer<BookListener>> events) {
+        String bad = validate(taker);
+        if (bad != null) {                                       // 1. nothing has been touched yet
+            taker.moveTo(OrderStatus.REJECTED);
+            events.add(l -> l.onRejected(taker.id(), bad));
+            return new SubmitResult(taker.id(), OrderStatus.REJECTED, 0, 0, List.of(), bad);
+        }
+        usedIds.add(taker.id());
+        taker.stamp(++seq);                                      // 2. the arrival stamp IS the book's order
+        taker.moveTo(OrderStatus.ACCEPTED);
+        events.add(l -> l.onAccepted(taker));
+
+        if (taker.tif() == TimeInForce.FOK) {                    // 3. all-or-nothing is decided BEFORE any write
+            long available = fillable(taker);
+            if (available < taker.qty()) {
+                long killed = taker.remaining();
+                taker.moveTo(OrderStatus.CANCELLED);
+                String why = "fill-or-kill: wanted " + taker.qty() + ", only " + available + " available";
+                events.add(l -> l.onCancelled(taker, killed));
+                events.add(l -> l.onQuote(book.quote()));
+                return new SubmitResult(taker.id(), OrderStatus.CANCELLED, 0, 0, List.of(), why);
+            }
+        }
+
+        List<Trade> trades = match(taker, events);               // 4. decide a plan, then apply it, level by level
+        SubmitResult out = settle(taker, trades, events);        // 5. rest the remainder, or throw it away
+        events.add(l -> l.onQuote(book.quote()));
+        return out;
+    }
+
+    /**
+     * Walk the opposite ladder while it crosses: best price first, and inside a price whatever the
+     * allocator says. Each level is looked at once, so the loop always ends.
+     */
+    private List<Trade> match(Order taker, List<Consumer<BookListener>> events) {
+        List<Trade> trades = new ArrayList<>();
+        NavigableMap<Long, PriceLevel> opposite = book.ladder(taker.side().opposite());
+        Long seen = null;                                                  // the last price we looked at
+        while (taker.remaining() > 0) {
+            Map.Entry<Long, PriceLevel> best = (seen == null) ? opposite.firstEntry() : opposite.higherEntry(seen);
+            if (best == null) break;                                       // the ladder ran out
+            if (!OrderBook.crosses(taker, best.getKey())) break;           // the price stopped crossing
+            PriceLevel level = best.getValue();
+            seen = best.getKey();
+            List<Allocation> plan = allocator.allocate(taker, level);      // decide: pure, mutates nothing
+            for (Allocation a : plan) {                                    // apply: the same lock, the same instant
+                Order maker = level.find(a.makerOrderId());
+                long q = a.qty();
+                level.reduce(maker, q);
+                taker.take(q);
+                if (maker.remaining() == 0) { maker.moveTo(OrderStatus.FILLED); book.forget(maker.id()); }
+                else maker.moveTo(OrderStatus.PARTIALLY_FILLED);
+                Trade t = new Trade(++seq, symbol, level.priceTicks(), q,
+                        taker.side() == Side.BUY ? taker.id() : maker.id(),
+                        taker.side() == Side.BUY ? maker.id() : taker.id(),
+                        taker.side(), clock.nowMs());
+                trades.add(t);
+                events.add(l -> l.onTrade(t));
+            }
+            if (level.isEmpty()) opposite.remove(best.getKey());           // prune an emptied level
+        }
+        return trades;
+    }
+
+    /**
+     * How much this order would really fill: the same walk, the same rulebook, run against a copy of
+     * the taker so the book is not touched. Fill-or-kill uses it, which is why all-or-nothing stays
+     * honest even when the allocator is changed to pro-rata or a self-trade guard.
+     */
+    private long fillable(Order taker) {
+        Order probe = new Order(taker.id(), symbol, taker.memberId(), taker.side(), taker.type(),
+                                TimeInForce.IOC, taker.limitTicks(), taker.qty());
+        NavigableMap<Long, PriceLevel> opposite = book.ladder(taker.side().opposite());
+        long total = 0; Long seen = null;
+        while (probe.remaining() > 0) {
+            Map.Entry<Long, PriceLevel> best = (seen == null) ? opposite.firstEntry() : opposite.higherEntry(seen);
+            if (best == null || !OrderBook.crosses(probe, best.getKey())) break;
+            seen = best.getKey();
+            for (Allocation a : allocator.allocate(probe, best.getValue())) { probe.take(a.qty()); total += a.qty(); }
+        }
+        return total;
+    }
+
+    /** What happens to what did not fill: rest it (GTC limit) or throw it away (market, IOC, FOK). */
+    private SubmitResult settle(Order taker, List<Trade> trades, List<Consumer<BookListener>> events) {
+        long filled = taker.filled();
+        if (taker.remaining() == 0) {
+            taker.moveTo(OrderStatus.FILLED);
+            return new SubmitResult(taker.id(), OrderStatus.FILLED, filled, 0, List.copyOf(trades), null);
+        }
+        if (taker.type() == OrderType.MARKET || taker.tif() != TimeInForce.GTC) {
+            long killed = taker.remaining();
+            taker.moveTo(OrderStatus.CANCELLED);
+            events.add(l -> l.onCancelled(taker, killed));
+            return new SubmitResult(taker.id(), OrderStatus.CANCELLED, filled, 0, List.copyOf(trades), null);
+        }
+        book.rest(taker);
+        if (filled > 0) taker.moveTo(OrderStatus.PARTIALLY_FILLED);
+        long rested = taker.remaining();
+        events.add(l -> l.onRested(taker, rested));
+        return new SubmitResult(taker.id(), taker.status(), filled, rested, List.copyOf(trades), null);
+    }
+
+    /** The exchange rulebook's entry checks. All of them run before a single byte of the book changes. */
+    private String validate(Order o) {
+        if (!o.symbol().equals(symbol)) return "wrong symbol: " + o.symbol() + " is not " + symbol;
+        if (usedIds.contains(o.id())) return "order id already used: " + o.id();
+        if (o.qty() <= 0) return "quantity must be positive, got " + o.qty();
+        if (o.qty() % lotSize != 0) return "quantity " + o.qty() + " is not a multiple of the lot size " + lotSize;
+        if (o.type() == OrderType.LIMIT) {
+            if (o.limitTicks() <= 0) return "a limit price must be positive, got " + o.limitTicks();
+            if (o.limitTicks() % tickSize != 0) return "price " + Ticks.fmt(o.limitTicks()) + " is not a multiple of the tick size " + Ticks.fmt(tickSize);
+        } else if (o.tif() == TimeInForce.GTC) {
+            return "a market order never rests, so it cannot be GTC";
+        }
+        return null;
+    }
+
+    /**
+     * Cancel a resting order. Returns false, not an exception, for an id that already filled, was
+     * cancelled or never existed: a cancel racing a fill is ordinary life on an exchange.
+     */
+    boolean cancel(String orderId) {
+        List<Consumer<BookListener>> events = new ArrayList<>();
+        boolean done;
+        lock.lock();
+        try {
+            Order o = book.cancel(orderId);
+            done = o != null;
+            if (done) {
+                long left = o.remaining();
+                o.moveTo(OrderStatus.CANCELLED);
+                events.add(l -> l.onCancelled(o, left));
+                events.add(l -> l.onQuote(book.quote()));
+            }
+        } finally { lock.unlock(); }
+        fire(events);
+        return done;
+    }
+
+    /**
+     * Amend a resting order down. Giving up lots keeps queue place, because the order object never
+     * leaves its queue; asking for more lots is a cancel and a new order, which loses it.
+     */
+    boolean amendDown(String orderId, long newRemaining) {
+        List<Consumer<BookListener>> events = new ArrayList<>();
+        boolean done = false;
+        lock.lock();
+        try {
+            Order o = book.find(orderId);
+            if (o != null && newRemaining > 0 && newRemaining < o.remaining()) {
+                PriceLevel level = book.ladder(o.side()).get(o.limitTicks());
+                level.shrink(o, newRemaining);
+                events.add(l -> l.onQuote(book.quote()));
+                done = true;
+            }
+        } finally { lock.unlock(); }
+        fire(events);
+        return done;
+    }
+
+    /** Announce, after the unlock, one listener at a time. A listener that throws is logged and skipped. */
+    private void fire(List<Consumer<BookListener>> events) {
+        for (Consumer<BookListener> e : events)
+            for (BookListener l : listeners) {
+                try { e.accept(l); }
+                catch (RuntimeException ex) { /* a broken consumer must never break the book */ }
+            }
+    }
+}
+
+/**
+ * The router in front: one engine per symbol, so two symbols never wait for each other. This is the
+ * sharding knob of page 02, move 8, and it is one line.
+ */
+final class Exchange {
+    private final Map<String, MatchingEngine> engines = new ConcurrentHashMap<>();
+    private final long tickSize, lotSize;
+    private final List<BookListener> defaults = new CopyOnWriteArrayList<>();
+
+    Exchange(long tickSize, long lotSize) { this.tickSize = tickSize; this.lotSize = lotSize; }
+
+    /** Every new book gets these listeners. */
+    void addDefaultListener(BookListener l) { defaults.add(l); }
+    /** The book for a symbol, created on first use. O(1). */
+    MatchingEngine book(String symbol) {
+        return engines.computeIfAbsent(symbol, s -> {
+            MatchingEngine e = new MatchingEngine(s, tickSize, lotSize);
+            for (BookListener l : defaults) e.addListener(l);
+            return e;
+        });
+    }
+    /** Every symbol with a live book. */
+    Set<String> symbols() { return Set.copyOf(engines.keySet()); }
+}
+
+/**
+ * Proof it works: a narrated session on one book -- makers rest, a taker sweeps, price-time priority
+ * decides, a fill-or-kill is refused, an IOC keeps what it got -- and then fifty threads crossing at
+ * once with every lot accounted for.
+ */
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Exchange exchange = new Exchange(5, 1);                       // tick 0.05, lot 1
+        ConsoleTape tape = new ConsoleTape();
+        TopOfBook l1 = new TopOfBook();
+        exchange.addDefaultListener(tape);
+        exchange.addDefaultListener(l1);
+        MatchingEngine infy = exchange.book("INFY");
+
+        // makers rest and the ladder builds: two buys at the same price, one behind the other
+        infy.submit(Order.limit("b1", "INFY", "ANA", Side.BUY,  Ticks.of("1499.95"), 200));
+        infy.submit(Order.limit("b2", "INFY", "BEN", Side.BUY,  Ticks.of("1499.95"), 300));
+        infy.submit(Order.limit("b3", "INFY", "CHE", Side.BUY,  Ticks.of("1499.90"), 500));
+        infy.submit(Order.limit("a1", "INFY", "DEV", Side.SELL, Ticks.of("1500.05"), 400));
+        infy.submit(Order.limit("a2", "INFY", "ESH", Side.SELL, Ticks.of("1500.10"), 600));
+        System.out.println("quote           " + infy.quote().text());
+        System.out.println("bids            " + ladder(infy.depth(Side.BUY, 3)));
+        System.out.println("asks            " + ladder(infy.depth(Side.SELL, 3)));
+
+        // an aggressive buy sweeps two levels and prints at each RESTING price, never at its own
+        SubmitResult sweep = infy.submit(Order.limit("t1", "INFY", "FIR", Side.BUY, Ticks.of("1500.10"), 900));
+        System.out.println("sweep 900       " + sweep.status() + ", filled " + sweep.filledQty() + " lots");
+        for (Trade t : sweep.trades()) System.out.println("  tape          " + t.text());
+
+        // price-time priority: b1 arrived first at 1499.95, so b1 fills before b2
+        SubmitResult hit = infy.submit(Order.limit("t2", "INFY", "GIR", Side.SELL, Ticks.of("1499.95"), 300));
+        System.out.println("sell 300        " + hit.trades().get(0).text() + " then " + hit.trades().get(1).text()
+                + "  (b1 first: it arrived first)");
+        System.out.println("b2 still rests  " + infy.resting("b2"));
+
+        // fill-or-kill: not enough depth, so nothing at all happens
+        long bidsBefore = infy.restingQty(Side.BUY);
+        SubmitResult fok = infy.submit(Order.limit("t3", "INFY", "HAR", Side.SELL, Ticks.of("1499.90"), 5000, TimeInForce.FOK));
+        System.out.println("FOK 5000        " + fok.status() + ": " + fok.rejectReason());
+        System.out.println("book untouched  " + (infy.restingQty(Side.BUY) == bidsBefore) + ", still " + bidsBefore + " lots bid");
+
+        // IOC takes what is there and throws the rest away; a market order behaves the same way
+        SubmitResult ioc = infy.submit(Order.limit("t4", "INFY", "IND", Side.SELL, Ticks.of("1499.90"), 1000, TimeInForce.IOC));
+        System.out.println("IOC 1000        " + ioc.status() + ", filled " + ioc.filledQty() + ", rested " + ioc.restingQty());
+
+        // cancel: a resting order goes in O(1); an order that already filled simply says no
+        System.out.println("cancel a2       " + infy.cancel("a2"));
+        System.out.println("cancel b1       " + infy.cancel("b1") + "  (it had already filled: false, not an exception)");
+        System.out.println("bad tick        " + infy.submit(Order.limit("t5", "INFY", "JAY", Side.BUY, Ticks.of("1499.97"), 100)).rejectReason());
+
+        // a fresh maker, and a market order that sweeps it without ever resting
+        infy.submit(Order.limit("a3", "INFY", "KAV", Side.SELL, Ticks.of("1500.00"), 250));
+        System.out.println("quote           " + l1.last().text());
+        SubmitResult mkt = infy.submit(Order.market("t6", "INFY", "LAL", Side.BUY, 400));
+        System.out.println("market 400      " + mkt.status() + ", filled " + mkt.filledQty()
+                + ", rested " + mkt.restingQty() + "  (a market order never rests)");
+        System.out.println("tape            " + tape.printed().size() + " trades printed");
+
+        // fifty threads crossing at one book at the same instant: every lot must be accounted for
+        MatchingEngine tcs = exchange.book("TCS");
+        List<Order> sentOrders = Collections.synchronizedList(new ArrayList<>());
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            final int n = i;
+            futures.add(pool.submit(() -> {
+                go.await();
+                Order o = Order.limit("r" + n, "TCS", "M" + (n % 5),
+                        n % 2 == 0 ? Side.BUY : Side.SELL, Ticks.of("3000.00"), n % 2 == 0 ? 100 : 80);
+                sentOrders.add(o);
+                return tcs.submit(o);
+            }));
+        }
+        go.countDown();
+        for (Future<?> f : futures) f.get();
+        pool.shutdown();
+        long bought = 0, sold = 0, sentBuy = 0, sentSell = 0, broken = 0;
+        for (Order o : sentOrders) {
+            if (o.remaining() < 0 || o.filled() > o.qty()) broken++;
+            if (o.side() == Side.BUY) { bought += o.filled(); sentBuy += o.qty(); }
+            else                      { sold   += o.filled(); sentSell += o.qty(); }
+        }
+        long restingBids = tcs.restingQty(Side.BUY), restingAsks = tcs.restingQty(Side.SELL);
+        System.out.println("race            50 orders at once: bought " + bought + ", sold " + sold
+                + ", resting " + restingBids + " bid / " + restingAsks + " ask");
+        if (bought != sold || broken != 0 || sentBuy - bought != restingBids || sentSell - sold != restingAsks)
+            throw new AssertionError("the book lost or invented lots: bought=" + bought + " sold=" + sold);
+        System.out.println("conserved       every lot bought was a lot sold; sent = filled + resting on both sides");
+    }
+
+    /** The depth ladder as one readable line. */
+    private static String ladder(List<Rung> rungs) {
+        StringBuilder sb = new StringBuilder();
+        for (Rung r : rungs) sb.append(sb.length() == 0 ? "" : "   ").append(r.text());
+        return sb.toString();
+    }
+}

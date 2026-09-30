@@ -1,0 +1,425 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Reference code for every follow-up on page 05. Each block is one twist, and each is small on purpose:
+// a twist that needs a big block means the derivation on page 02 went wrong.
+
+// ---- ext: k in a row -- the payoff. A new class behind WinStrategy; Board, Game, Player and the observers never move.
+/**
+ * "On a 5x5, four in a row wins." The counters in FullLineWinStrategy can only answer "is this whole line
+ * mine" and cannot see four inside a row of five, so this is a different rule, not a patched one. It walks
+ * outward from the square that was just played in four directions, which is O(k) instead of O(1) -- the
+ * honest cost of the change. It keeps no state at all, so the interface's no-op undo() is already correct.
+ * Call site: new Game("g", 5, seats) then configure(new KInARowWinStrategy(4), clock).
+ */
+class KInARowWinStrategy implements WinStrategy {
+    private static final int[][] DIRS = { {0, 1}, {1, 0}, {1, 1}, {1, -1} };
+    private final int k;
+    /** k marks in an unbroken line win. k must be at most the board size or nobody can ever win. */
+    KInARowWinStrategy(int k) { this.k = k; }
+
+    /** The played square plus its run in each direction and the opposite one. */
+    @Override public boolean isWinning(Board board, Move move) {
+        for (int[] d : DIRS)
+            if (1 + walk(board, move, d[0], d[1]) + walk(board, move, -d[0], -d[1]) >= k) return true;
+        return false;
+    }
+    private int walk(Board board, Move move, int dr, int dc) {
+        int n = 0, r = move.cell().row() + dr, c = move.cell().col() + dc;
+        while (move.symbol().equals(board.at(r, c))) { n++; r += dr; c += dc; }   // at() returns null off the board
+        return n;
+    }
+}
+
+// ---- ext: the scan rule -- the obvious O(n) win check, kept as a rule so it can be swapped in and measured.
+/**
+ * The rule most people write first: after a move, walk its row, its column and the two diagonals through it.
+ * That is about 4n reads per move instead of four increments, and it keeps no state, so it inherits the
+ * interface's no-op undo(). On a fixed 3x3 it is the simpler, cheaper choice; the counters win the moment the
+ * board size is a parameter. Both rules are handed to the same Game, which is Liskov with a test behind it.
+ */
+class ScanWinStrategy implements WinStrategy {
+    /** Only the four lines through the square just played can have changed, so only those are walked. */
+    @Override public boolean isWinning(Board board, Move move) {
+        int n = board.size(), r = move.cell().row(), c = move.cell().col();
+        Symbol s = move.symbol();
+        boolean row = true, col = true;
+        for (int i = 0; i < n; i++) {
+            if (!s.equals(board.at(r, i))) row = false;
+            if (!s.equals(board.at(i, c))) col = false;
+        }
+        if (row || col) return true;
+        if (r == c            && full(board, s, 0, 0, 1, 1))  return true;
+        if (r + c == n - 1    && full(board, s, 0, n - 1, 1, -1)) return true;
+        return false;
+    }
+    /** Is that whole line one mark? */
+    private boolean full(Board b, Symbol s, int r0, int c0, int dr, int dc) {
+        for (int i = 0, r = r0, c = c0; i < b.size(); i++, r += dr, c += dc) if (!s.equals(b.at(r, c))) return false;
+        return true;
+    }
+}
+
+// ---- ext: gravity -- Connect-4 is this game with one mapping: a piece falls to the lowest free row of its column.
+/** Where a piece dropped into a column comes to rest. The only new idea Connect-4 needs. */
+class Gravity {
+    /** The lowest free square in that column. Throws the same typed rejection the engine would. */
+    static Cell drop(Board board, int col) {
+        if (col < 0 || col >= board.size())
+            throw new InvalidMoveException(InvalidMoveException.Reason.OUT_OF_BOUNDS, "no column " + col);
+        for (int r = board.size() - 1; r >= 0; r--) if (board.at(r, col) == null) return new Cell(r, col);
+        throw new InvalidMoveException(InvalidMoveException.Reason.CELL_TAKEN, "column " + col + " is full");
+    }
+}
+
+/**
+ * Connect-4 as a thin front for the same Game: the rule is KInARowWinStrategy(4) and the only new code maps a
+ * column to a square. The snapshot is read before the move and re-validated inside the lock, so if another
+ * player fills that column in between, the caller gets CELL_TAKEN and drops again -- the ordinary retry.
+ */
+class ConnectFour {
+    private final Game game;
+    /** Wraps a game that was configured with a k-in-a-row rule. */
+    ConnectFour(Game game) { this.game = game; }
+    /** Drop a piece into a column. */
+    Move drop(Player p, int col) { return game.play(p, Gravity.drop(game.snapshot(), col)); }
+}
+
+/** A bot that thinks in columns. Proof that gravity needs no change in Game, Board or the win rule. */
+class ColumnBot implements MoveStrategy {
+    private final Random rng;
+    /** Seeded, so a demo replays exactly. */
+    ColumnBot(long seed) { rng = new Random(seed); }
+    @Override public Cell chooseMove(Board board, Symbol symbol) {
+        List<Integer> open = new ArrayList<>();
+        for (int c = 0; c < board.size(); c++) if (board.at(0, c) == null) open.add(c);
+        return open.isEmpty() ? null : Gravity.drop(board, open.get(rng.nextInt(open.size())));
+    }
+}
+
+// ---- ext: the unbeatable bot -- a new MoveStrategy and nothing else; the engine does not know bots exist.
+/**
+ * Minimax with alpha-beta pruning: it plays the move that gives the opponent the worst best answer, so on a
+ * 3x3 it wins or draws and never loses. It works on a COPY of the board, which is why Board.copy() exists,
+ * and it judges hypothetical positions with its own full scan -- those are not the hot path, so O(n^2) there
+ * costs nothing. Depth is in the score, so a win in three beats the same win in five.
+ */
+class MinimaxStrategy implements MoveStrategy {
+    private final Symbol opponent;
+    /** Needs to know who it is playing against, because it scores the opponent's best reply. */
+    MinimaxStrategy(Symbol opponent) { this.opponent = opponent; }
+
+    /** The best square available, judged to the end of the game. */
+    @Override public Cell chooseMove(Board board, Symbol me) {
+        Board work = board.copy();
+        Cell best = null; int bestScore = Integer.MIN_VALUE;
+        for (Cell c : work.freeCells()) {
+            work.place(c, me);
+            int s = score(work, me, false, 1, Integer.MIN_VALUE, Integer.MAX_VALUE);
+            work.lift(c);
+            if (s > bestScore) { bestScore = s; best = c; }
+        }
+        return best;
+    }
+    private int score(Board b, Symbol me, boolean myTurn, int depth, int alpha, int beta) {
+        if (wins(b, me))       return 10 - depth;                 // sooner is better
+        if (wins(b, opponent)) return depth - 10;
+        List<Cell> free = b.freeCells();
+        if (free.isEmpty()) return 0;
+        int best = myTurn ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+        for (Cell c : free) {
+            b.place(c, myTurn ? me : opponent);
+            int s = score(b, me, !myTurn, depth + 1, alpha, beta);
+            b.lift(c);
+            if (myTurn) { best = Math.max(best, s); alpha = Math.max(alpha, best); }
+            else        { best = Math.min(best, s); beta  = Math.min(beta,  best); }
+            if (beta <= alpha) break;                             // this branch cannot change the answer
+        }
+        return best;
+    }
+    /** A full scan, on a hypothetical board. The real game never uses this: it has the O(1) counters. */
+    private boolean wins(Board b, Symbol s) {
+        int n = b.size();
+        for (int i = 0; i < n; i++) {
+            boolean row = true, col = true;
+            for (int j = 0; j < n; j++) {
+                if (!s.equals(b.at(i, j))) row = false;
+                if (!s.equals(b.at(j, i))) col = false;
+            }
+            if (row || col) return true;
+        }
+        boolean diag = true, anti = true;
+        for (int i = 0; i < n; i++) {
+            if (!s.equals(b.at(i, i)))         diag = false;
+            if (!s.equals(b.at(i, n - 1 - i))) anti = false;
+        }
+        return diag || anti;
+    }
+}
+
+// ---- ext: undo and redo for a whole match -- the history IS the undo log, so redo is a stack and five lines.
+/**
+ * Redo on top of the engine's undo. Every undone move is pushed on a stack; redo replays it through the
+ * ordinary play(), so it passes every check again and cannot smuggle an illegal position back in. A fresh
+ * move clears the stack, because the branch it belonged to no longer exists.
+ */
+class MatchHistory {
+    private final Game game;
+    private final Deque<Move> undone = new ArrayDeque<>();
+
+    /** Wraps one game. */
+    MatchHistory(Game game) { this.game = game; }
+    /** A new move ends the redo branch. */
+    Move play(Player p, Cell c) { Move m = game.play(p, c); undone.clear(); return m; }
+    /** Take one back and remember it. */
+    Move undo() { Move m = game.undo(); undone.push(m); return m; }
+    /** Put the last undone move back, through the same validation as any other move. */
+    Move redo() {
+        Move m = undone.poll();
+        if (m == null) throw new IllegalStateException("nothing to redo");
+        return game.play(m.player(), m.cell());
+    }
+    /** How many moves are waiting to be redone. */
+    int pending() { return undone.size(); }
+}
+
+// ---- ext: persistence -- save the MOVE LIST, not the board; resuming is a replay, and audit comes free.
+/**
+ * The move list is the source of truth, so persistence is a text file of moves and loading is replaying them
+ * through play(). Nothing serialises the board, the counters or the turn: they are rebuilt, which means a
+ * saved game can never be restored into a state the rules would not allow.
+ */
+class MoveLog {
+    /** One line per move: seq,playerName,row,col. A real system would write these rows to a table. */
+    static List<String> save(Game g) {
+        List<String> rows = new ArrayList<>();
+        for (Move m : g.history()) rows.add(m.seq() + "," + m.player().name() + "," + m.cell().row() + "," + m.cell().col());
+        return rows;
+    }
+    /** Rebuild a game from its moves. The seats must be the same seats, in the same order. */
+    static Game load(GameService service, String id, int size, List<Player> seats, WinStrategy rule, List<String> rows) {
+        Game g = service.newGame(id, size, seats, rule);
+        Map<String, Player> byName = new HashMap<>();
+        for (Player p : seats) byName.put(p.name(), p);
+        for (String row : rows) {
+            String[] f = row.split(",");
+            g.play(byName.get(f[1]), new Cell(Integer.parseInt(f[2]), Integer.parseInt(f[3])));
+        }
+        return g;
+    }
+}
+
+// ---- ext: a move clock -- thirty seconds a turn; time comes from the injected Clock, so a test can fake it.
+/**
+ * A turn that runs out abandons the game. It listens for moves to learn when the current turn started, and a
+ * scheduler calls tick() every second or so. Every reading of "now" comes from the injected Clock, which is
+ * what makes this testable without sleeping: a test moves the clock forward by thirty-one seconds.
+ */
+class TurnTimer implements GameObserver {
+    private final Clock clock;
+    private final long limitMs;
+    private volatile long turnStartedMs;
+    private volatile Player waitingFor;
+
+    /** The clock this timer reads, and how long a seat may think. */
+    TurnTimer(Clock clock, long limitMs) { this.clock = clock; this.limitMs = limitMs; }
+    /** Start the clock for the seat about to move. */
+    void start(Game g) { turnStartedMs = clock.nowMs(); waitingFor = g.currentPlayer(); }
+    @Override public void onMove(Game g, Move m) { turnStartedMs = m.atMs(); waitingFor = g.currentPlayer(); }
+    /** A scheduler tick. True if this tick ended the game. */
+    boolean tick(Game g) {
+        if (g.state().isTerminal() || clock.nowMs() - turnStartedMs <= limitMs) return false;
+        g.abandon("move clock ran out for " + waitingFor);
+        return true;
+    }
+}
+
+// ---- ext: three seats on a 5x5 -- the counters are already [line][seat], so the win maths needs no edit.
+/** Three players, one table. The only guard to revisit is seats <= board size, which the Game already makes. */
+class ThreeSeats {
+    /** A 5x5 table with three seeded bots, using the ordinary full-line rule. */
+    static Game table(GameService service, String id) {
+        Player ann = new Player("Ann", new Symbol('X', 0), new RandomBotStrategy(7));
+        Player bob = new Player("Bob", new Symbol('O', 1), new RandomBotStrategy(8));
+        Player cal = new Player("Cal", new Symbol('Z', 2), new RandomBotStrategy(9));
+        return service.newGame(id, 5, List.of(ann, bob, cal), null);
+    }
+}
+
+// ---- ext: early draw -- spot a dead game before the board fills, as a WATCHER, with no change to the engine.
+/**
+ * A line is dead once two different marks appear in it; when every row, column and diagonal is dead, nobody
+ * can win and the game is already a draw. This is written as an observer precisely so the engine does not
+ * move: it scans a snapshot, O(n^2) per move. Making it free would mean a second injected rule on the Game
+ * that keeps a "distinct marks" count per line -- the one twist on this page that reopens Game.
+ */
+class DeadLineWatcher implements GameObserver {
+    private volatile Long drawnAtSeq;
+
+    @Override public void onMove(Game g, Move m) {
+        if (drawnAtSeq == null && !g.state().isTerminal() && allLinesDead(g.snapshot())) drawnAtSeq = m.seq();
+    }
+    /** The move number after which no player could still win, or null if the game was still alive. */
+    Long drawnAtSeq() { return drawnAtSeq; }
+
+    private boolean allLinesDead(Board b) {
+        int n = b.size();
+        for (int i = 0; i < n; i++) {
+            if (!dead(b, i, 0, 0, 1) || !dead(b, 0, i, 1, 0)) return false;
+        }
+        return dead(b, 0, 0, 1, 1) && dead(b, 0, n - 1, 1, -1);
+    }
+    private boolean dead(Board b, int r0, int c0, int dr, int dc) {
+        Symbol seen = null;
+        for (int i = 0, r = r0, c = c0; i < b.size(); i++, r += dr, c += dc) {
+            Symbol s = b.at(r, c);
+            if (s == null) continue;
+            if (seen == null) seen = s;
+            else if (!seen.equals(s)) return true;                // two different marks: this line can never be won
+        }
+        return false;
+    }
+}
+
+// ---- ext: a game server -- thousands of games, one lock each, and a spectator feed that is never in the way.
+/**
+ * What a spectator sees. Frames are appended per game, so a late joiner can be sent the whole feed. Wrap this
+ * in AsyncObserver when the spectator is a socket: then a slow client drops frames instead of adding latency.
+ */
+class SpectatorFeed implements GameObserver {
+    private final Map<String, List<String>> frames = new ConcurrentHashMap<>();
+    @Override public void onMove(Game g, Move m) { frame(g.id(), m.toString()); }
+    @Override public void onStateChange(Game g, GameState from, GameState to) { frame(g.id(), from + " -> " + to); }
+    private void frame(String id, String text) { frames.computeIfAbsent(id, k -> new CopyOnWriteArrayList<>()).add(text); }
+    /** Everything that has happened in that game, in order. */
+    List<String> feed(String gameId) { return frames.getOrDefault(gameId, List.of()); }
+}
+
+/** Plays a fleet of games at once, to show that the per-game lock is the whole scaling story. */
+class Fleet {
+    /** Creates games games of 3x3 bots and plays every one of them to the end on a pool. Returns how many finished. */
+    static int playAll(GameService service, int games, int threads) throws Exception {
+        List<Game> all = new ArrayList<>();
+        for (int i = 0; i < games; i++) {
+            Player a = new Player("A" + i, new Symbol('X', 0), new RandomBotStrategy(i));
+            Player b = new Player("B" + i, new Symbol('O', 1), new RandomBotStrategy(1000 + i));
+            all.add(service.newGame("f" + i, 3, List.of(a, b), null));
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        List<Future<?>> running = new ArrayList<>();
+        for (Game g : all) running.add(pool.submit(() -> { while (!g.state().isTerminal()) g.playAuto(); return null; }));
+        for (Future<?> f : running) f.get();
+        pool.shutdown();
+        int done = 0;
+        for (Game g : all) if (g.state().isTerminal()) done++;
+        return done;
+    }
+}
+
+/** Runs every extension above so none of them can rot. */
+class ExtDemo {
+    public static void main(String[] args) throws Exception {
+        GameService service = new GameService();
+
+        // 1. k in a row: four in a row on a 5x5, a new rule class and nothing else
+        Player ann = new Player("Ann", new Symbol('X', 0),
+                new ScriptedStrategy(new Cell(2, 1), new Cell(2, 2), new Cell(2, 3), new Cell(2, 4)));
+        Player bob = new Player("Bob", new Symbol('O', 1),
+                new ScriptedStrategy(new Cell(0, 0), new Cell(0, 1), new Cell(0, 2)));
+        Game five = service.newGame("k5", 5, List.of(ann, bob), new KInARowWinStrategy(4));
+        while (!five.state().isTerminal()) five.playAuto();
+        System.out.println("k-in-a-row 5x5: " + five.state() + " winner=" + five.winner() + " after " + five.history().size() + " moves");
+
+        // 2. gravity: Connect-4 on a 6x6, same engine, same lock
+        Player red = new Player("Red", new Symbol('R', 0), new ColumnBot(3));
+        Player yel = new Player("Yel", new Symbol('Y', 1), new ColumnBot(4));
+        Game c4 = service.newGame("c4", 6, List.of(red, yel), new KInARowWinStrategy(4));
+        ConnectFour table = new ConnectFour(c4);
+        table.drop(red, 2); table.drop(yel, 5);
+        while (!c4.state().isTerminal()) c4.playAuto();
+        System.out.println("connect-4 6x6: " + c4.state() + " winner=" + c4.winner() + " after " + c4.history().size() + " moves");
+        System.out.print(c4.render());
+
+        // 3. the unbeatable bot: minimax never loses on a 3x3
+        Symbol x = new Symbol('X', 0), o = new Symbol('O', 1);
+        int losses = 0;
+        for (int seed = 0; seed < 6; seed++) {
+            Player brain = new Player("Mini", x, new MinimaxStrategy(o));
+            Player dice  = new Player("Dice", o, new RandomBotStrategy(seed));
+            Game g = service.newGame("mm" + seed, 3, List.of(brain, dice), null);
+            while (!g.state().isTerminal()) g.playAuto();
+            if (g.state() == GameState.WON && g.winner() == dice) losses++;
+        }
+        System.out.println("minimax over 6 games: losses=" + losses);
+
+        // 4. undo and redo
+        Player cat = new Player("Cat", new Symbol('X', 0), new ScriptedStrategy());
+        Player dan = new Player("Dan", new Symbol('O', 1), new ScriptedStrategy());
+        Game ur = service.newGame("ur", 3, List.of(cat, dan), null);
+        MatchHistory match = new MatchHistory(ur);
+        match.play(cat, new Cell(0, 0)); match.play(dan, new Cell(1, 1)); match.play(cat, new Cell(0, 1));
+        match.undo(); match.undo();
+        System.out.println("undo twice: moves=" + ur.history().size() + " turn=" + ur.currentPlayer() + " pending redo=" + match.pending());
+        match.redo(); match.redo();
+        System.out.println("redo twice: moves=" + ur.history().size() + " last=" + ur.history().get(ur.history().size() - 1));
+
+        // 5. persistence: save the moves, replay them into a fresh game
+        List<String> rows = MoveLog.save(ur);
+        Player cat2 = new Player("Cat", new Symbol('X', 0), new ScriptedStrategy());
+        Player dan2 = new Player("Dan", new Symbol('O', 1), new ScriptedStrategy());
+        Game back = MoveLog.load(service, "ur-restored", 3, List.of(cat2, dan2), null, rows);
+        System.out.println("replayed " + rows.size() + " rows: same board=" + back.render().equals(ur.render())
+                + " same state=" + (back.state() == ur.state()));
+
+        // 6. a move clock, on a clock the test owns
+        long[] now = { 1_700_000_000_000L };
+        service.setClock(() -> now[0]);
+        Player eve = new Player("Eve", new Symbol('X', 0), new ScriptedStrategy());
+        Player fin = new Player("Fin", new Symbol('O', 1), new ScriptedStrategy());
+        Game timed = service.newGame("timed", 3, List.of(eve, fin), null);
+        TurnTimer timer = new TurnTimer(() -> now[0], 30_000);
+        timed.addObserver(timer);
+        timer.start(timed);
+        timed.play(eve, new Cell(0, 0));
+        now[0] += 31_000;                                          // Fin thinks for thirty-one seconds
+        System.out.println("move clock: fired=" + timer.tick(timed) + " state=" + timed.state());
+        service.setClock(System::currentTimeMillis);
+
+        // 7. three seats on a 5x5
+        Game three = ThreeSeats.table(service, "three");
+        while (!three.state().isTerminal()) three.playAuto();
+        System.out.println("three seats 5x5: " + three.state() + " winner=" + three.winner() + " after " + three.history().size() + " moves");
+
+        // 8. early draw, spotted by a watcher with no change to the engine
+        DeadLineWatcher watcher = new DeadLineWatcher();
+        Player gil = new Player("Gil", new Symbol('X', 0),
+                new ScriptedStrategy(new Cell(0, 0), new Cell(0, 2), new Cell(1, 0), new Cell(2, 1), new Cell(2, 2)));
+        Player hal = new Player("Hal", new Symbol('O', 1),
+                new ScriptedStrategy(new Cell(0, 1), new Cell(1, 1), new Cell(1, 2), new Cell(2, 0)));
+        Game dead = service.newGame("dead", 3, List.of(gil, hal), null);
+        dead.addObserver(watcher);
+        while (!dead.state().isTerminal()) dead.playAuto();
+        System.out.println("early draw: result=" + dead.state() + " no line could still be won after move " + watcher.drawnAtSeq());
+
+        // 9. a game server: a spectator feed, and two hundred games at once
+        SpectatorFeed feed = new SpectatorFeed();
+        AsyncObserver socket = new AsyncObserver(feed, 8192);
+        GameService server = new GameService();
+        server.addObserver(socket);
+        int finished = Fleet.playAll(server, 200, 8);
+        Thread.sleep(200);                                         // let the pump drain before we read the feed
+        System.out.println("fleet: " + finished + "/200 games finished, feed for f0 has " + feed.feed("f0").size() + " frames");
+        socket.close();
+
+        // 10. the same scripted 3x3, judged by the O(n) scan rule instead of the O(1) counters
+        Cell[] sx = { new Cell(0, 0), new Cell(0, 2), new Cell(2, 0), new Cell(2, 2), new Cell(1, 1) };
+        Cell[] so = { new Cell(0, 1), new Cell(1, 0), new Cell(1, 2), new Cell(2, 1) };
+        Game scanned = service.newGame("scan", 3, List.of(
+                new Player("Uma", new Symbol('X', 0), new ScriptedStrategy(sx)),
+                new Player("Vik", new Symbol('O', 1), new ScriptedStrategy(so))), new ScanWinStrategy());
+        while (!scanned.state().isTerminal()) scanned.playAuto();
+        System.out.println("scan rule: " + scanned.state() + " winner=" + scanned.winner()
+                + " on the " + scanned.history().size() + "th square, same as the counters");
+        System.out.println("done.");
+    }
+}

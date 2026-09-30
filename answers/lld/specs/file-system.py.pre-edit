@@ -1,0 +1,724 @@
+# In-memory File System LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"file-system/Main.java").read_text()
+ext   = (H/"file-system/Extensions.java").read_text()
+tests = (H/"file-system/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+pf = _D
+rows = [("write", 30, [("a path and some bytes", "/home/h/notes/todo.txt"),
+                       ("hold the name still", "the namespace read lock"),
+                       ("reserve, then ask the rule", "the quota sees the resulting size"),
+                       ("publish the new array", "one reference: never half a file")]),
+        ("rearrange", 165, [("mkdir -p, mv, rm", "the shape of the tree"),
+                            ("one exclusive lock", "nobody sees a half-moved node"),
+                            ("check every rule first", "exists? own subtree? empty?"),
+                            ("unlink, rename, link", "three pointer ops, any subtree")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 2))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+27, x+260), True)
+pf += _ar("M815 84 V95", dash=True) + _bx(660, 95, 310, 40, "refused: the old bytes, untouched", "", dash=True)
+pf += _tx(88, 266, "read", "var(--acc)", 13)
+pf += _tx(175, 266, "at any moment, without walking the tree: what is at this path?  what is in this directory?  how many bytes exist?", "var(--text)", 12, "start")
+pf += _tx(615, 305, "many threads at once: two appends to one file never lose a byte, and a rename can never slide a directory out from under a write in flight", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 320, pf)
+
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("09:00  mkdir -p /home/h/notes", ["3 levels created, 0 already there", "the exclusive lock, held 0.3 us",
+                                         "4 nodes now hang off the root"], False),
+      ("09:01  8 threads append", ["one file, one lock: 4000 bytes", "0 lost; about 0.6 us per write",
+                                   "unlocked, the same run loses 2869"], True),
+      ("09:02  a 200-byte file, 64 cap", ["reserved 200, the rule said no", "the reservation was released",
+                                          "no file was created to undo"], False),
+      ("09:03  rm a file being read", ["the name leaves the tree", "the reader still gets its bytes",
+                                       "freed when that handle closes"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li><code>mkdir -p</code>: create every missing level of a path, and say nothing if it is already there.</li>
+<li>Create or replace a file, read the whole of it, and append to the end.</li>
+<li>List a directory, in name order.</li>
+<li>Move or rename anything, including a directory with ten thousand descendants.</li>
+<li>Delete, with an explicit recursive flag, so <code>rm</code> on a non-empty directory fails loudly.</li>
+<li>Paths are absolute and normalised once: <code>.</code> vanishes, <code>..</code> pops, <code>..</code> above the root clamps at the root.</li>
+<li>Search on one traversal: by extension, by size, by modified time, and any combination of those.</li>
+<li>One hook on the write path, so a quota or a permission rule is a class and not an edit.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Many threads at once: two appends to one file never lose a byte, and two creates in one directory never lose a file.</li>
+<li>Writers to different files must not block each other, and a rename must not slide a directory out from under a write.</li>
+<li>Resolving a path is O(depth &times; log children); a quota check is O(1), never a walk of the tree.</li>
+<li>Moving a directory is three pointer operations whatever the subtree weighs.</li>
+<li>The write rule, the search predicate and the clock are swappable without touching the core.</li>
+<li>Nothing half-done: a refused write leaves the old bytes, the old counters and no new node.</li>
+<li>In memory, one process, no durability (say it; a follow-up adds the journal).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design an in-memory file system. <code>mkdir -p</code>, create and read a file, append to it, list a '
+          'directory, move it, delete it &mdash; and it has to stay correct when several threads use it at once. '
+          'I want working code, not a diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>Somebody types <code>/home/harish/notes/todo.txt</code> '
+ 'and expects bytes back. So there is a thing that holds bytes, a thing that holds other things, and a string that '
+ 'addresses both. A file and a folder are not unrelated: listing wants a name from both, and a folder\'s size is the '
+ 'sum of what is inside it, which may be another folder &mdash; that recursion is the shape of the problem. On top of '
+ 'the tree sit the operations people actually use: make a directory and its parents, write a file, read it, append to '
+ 'it, list, move, delete. Several threads do all of that at the same time, and there are two different things they can '
+ 'break: the bytes of one file, and the shape of the tree. The one rule that must hold is that no write is ever half '
+ 'done &mdash; every byte a caller was told was written is readable, and a call that was refused left the file system '
+ 'exactly as it found it.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile, with a '
+ '<code>main</code> that builds a tree, writes files and then runs threads at it. The interviewer is watching for, in '
+ 'this order: the questions you ask before typing (durability and threads are the first two); which classes exist and '
+ 'which one owns what a path means; a write and a move end to end; what happens when two threads touch the same file '
+ 'and when two threads touch the same directory; where the rule that will change mid-round lives, so a quota is a new '
+ 'class and not an edit; what the system looks like after a refused write. Then the twists: symlinks, hard links, '
+ 'permissions, a recoverable delete, files too big for one array, and surviving a restart.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>One process holding everything in RAM, or must it survive a restart?</td><td>In memory, one process</td><td>No journal in the core; a write-ahead log is a follow-up (moves 6, 12)</td></tr>'
+ '<tr><td>One thread at a time, or many? That answer changes half the code.</td><td>Many, and it is a requirement</td><td>Two invariants, two locks, one stated lock order (moves 4, 7)</td></tr>'
+ '<tr><td>Absolute paths only, or a working directory and relative paths? Case sensitive?</td><td>Absolute, case sensitive, normalised at the edge</td><td>One immutable <code>FsPath</code>; no method ever sees a slash (move 1)</td></tr>'
+ '<tr><td>A strict tree, or symlinks and hard links?</td><td>A strict tree: one parent per node</td><td>Whether the path walk can loop, and whether bytes need a refcount (move 12)</td></tr>'
+ '<tr><td>Is a write whole-file plus append, or random access at a byte offset?</td><td>Whole file plus append</td><td>One <code>byte[]</code> behind one lock, or a chunk list (moves 5, 12)</td></tr>'
+ '<tr><td>Is delete recoverable, and what happens to somebody mid-read when a file is unlinked?</td><td>Not recoverable; a reader finishes what it started</td><td>A life cycle with open handles, and where the bytes are freed (move 6)</td></tr>'
+ '<tr><td>Are there quotas, permissions, read-only areas?</td><td>Not today, but they will ask for one</td><td>One hook on the write path instead of a thicket of ifs (move 3)</td></tr>'
+ '<tr><td>How big does this get &mdash; a hundred files, or two hundred thousand?</td><td>Big enough that a full walk per call is wrong</td><td>Incremental byte accounting and a paged listing (moves 5, 8)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One morning, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> in memory, one process, no durability; absolute case-sensitive paths, '
+ 'normalised once at the edge so no method below ever sees a slash; a strict tree, one parent per node; whole-file '
+ 'read and replace plus append, no byte offsets; many threads is a requirement, not an extension. Named as out of '
+ 'scope: symlinks, hard links, permissions, a recoverable delete, and persistence &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+
+# move 1: nouns with state -> classes, and the composite
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a PATH names a FILE or a DIRECTORY; both are NODES; the FILE SYSTEM owns the root, the locks and the count; a RULE allows a write; a WATCHER is told", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 170, "FsPath", "parsed once, then frozen", 0), (228, 180, "FileNode", "bytes, version, its lock", 1),
+                          (436, 200, "DirNode", "children by name", 1), (664, 150, "FileSystem", "root, locks, counters", 1),
+                          (842, 170, "WriteGuard", "no state: an interface", 0), (1040, 160, "FsWatcher", "no state: an interface", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _bx(400, 190, 460, 44, "FsNode  (abstract)", "name, times, isDirectory(), sizeBytes()")
+m1 += _ar("M318 156 V172 H470 V190") + _ar("M536 156 V172 H700 V190")
+m1 += _tx(615, 252, "solid = state of its own, so it becomes a class.   dashed = no state: a parsed value, or a one-method interface", "var(--muted)", 11)
+m1 += _tx(615, 270, "a file and a folder answer the same two questions, so they share one base type &mdash; the composite. A folder's size is the sum of its children's, and a child may be a folder.", "var(--muted)", 11)
+MV[1] = _mv(1230, 285, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("hold bytes, and grow them", "FileNode  (owns the array and its lock)", "f.setContentLocked(bytes, now)"),
+                                       ("hold names", "DirNode  (owns the children map)", "dir.put(n) / dir.remove(name)"),
+                                       ("say what a path means", "FileSystem  (owns the root)", "nodeAt(FsPath)"),
+                                       ("rearrange the tree, count the bytes", "FileSystem  (owns the shape and the counters)", "mkdirs / move / delete / write")]):
+    y = 24 + k*56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 258, "a node never parses a path and never points back at the file system: that one rule is what keeps the locking story short", "var(--muted)", 11)
+m2 += _tx(615, 277, "and the verb that touches two of them &mdash; a write &mdash; goes to the one class that can see both, which makes it the orchestrator", "var(--muted)", 11)
+MV[2] = _mv(1230, 292, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 80, 220, 90, "FileSystem", "configure(guard), watch(prefix)", acc=True)
+for k, (t, sub, impl) in enumerate([("WriteGuard", "quota, max size, read-only, permissions", "CapacityGuard / AuditGuard / PermissionGuard"),
+                                    ("NodeFilter", "by extension, size, mtime, name", "Filters.extension(...).and(largerThan(...))"),
+                                    ("FsWatcher", "an indexer, a log rotator, a backup", "a lambda, or AsyncWatcher(pool, w)"),
+                                    ("Clock", "the mtime stamped on every node", "Clock.SYSTEM, or a test's fixed instant")]):
+    y = 24 + k*60
+    m3 += _ar("M250 125 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 420, 44, impl, "the classes that can be handed in") + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 272, "dashed = handed in. A swappable rule behind a one-method interface is Strategy; a file system that announces without knowing who listens is Observer", "var(--muted)", 11)
+m3 += _tx(615, 290, "a rule that wraps another rule and adds to it is Decorator: AuditGuard(inner) records every refusal, and neither rule knows it is there", "var(--acc)", 11)
+MV[3] = _mv(1230, 305, m3)
+
+# move 4: two invariants, two gaps, two locks
+m4 = _D
+m4 += _bx(30, 30, 190, 44, "thread A appends", "reads 3 bytes, builds 4")
+m4 += _bx(30, 100, 190, 44, "thread B appends", "reads the same 3, builds 4")
+m4 += _bx(330, 65, 180, 44, "todo.txt", "3 bytes", acc=True)
+m4 += _ar("M220 52 H295 V87 H330") + _ar("M220 122 H295 V87 H330")
+m4 += '<rect x="560" y="25" width="300" height="130" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(710, 52, "gap 1: the bytes", RED, 12) + _tx(710, 82, "both start from 3 and publish 4", RED, 11)
+m4 += _tx(710, 104, "the file ends at 4 bytes, not 5", RED, 11) + _tx(710, 132, "nobody notices: it still looks like a file", "var(--muted)", 11)
+m4 += _bx(900, 45, 300, 90, "the file's OWN lock", "read and publish as one step", acc=True)
+m4 += _bx(30, 185, 190, 44, "thread C writes", "resolved /a/b/f.txt")
+m4 += _bx(30, 250, 190, 44, "thread D renames", "/a becomes /z")
+m4 += _bx(330, 217, 180, 44, "the tree", "/a/b/f.txt", acc=True)
+m4 += _ar("M220 207 H295 V239 H330") + _ar("M220 272 H295 V239 H330")
+m4 += '<rect x="560" y="180" width="300" height="118" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(710, 207, "gap 2: the shape", RED, 12) + _tx(710, 237, "C writes into a node that", RED, 11)
+m4 += _tx(710, 259, "nothing can reach any more", RED, 11) + _tx(710, 285, "the bytes are fine; the subtree is lost", "var(--muted)", 11)
+m4 += _bx(900, 194, 300, 90, "the namespace lock", "shape changes take the WRITE side", acc=True)
+m4 += _tx(615, 322, "two different invariants, so two different locks &mdash; never the same one. A byte write takes only the READ side of the namespace lock, so writers to different files never wait.", "var(--muted)", 11)
+m4 += _tx(615, 340, "lock order is a stated rule: namespace first, then a file, never the reverse. Shape changes take no file lock at all, so a deadlock is structurally impossible.", "var(--muted)", 11)
+MV[4] = _mv(1230, 355, m4)
+
+# move 5: each collection, its question, its shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("what is at this path?", "a walk of TreeMap&lt;name, FsNode&gt;", "O(d x log k)"),
+                                      ("what is in this directory, in order?", "TreeMap: already sorted by name", "O(k), no sort"),
+                                      ("am I over quota?", "two AtomicLongs, moved as writes land", "O(1)"),
+                                      ("what are the bytes?", "one byte[], read under the file's lock", "O(1) + a copy"),
+                                      ("who is watching /var?", "a copy-on-write list of (prefix, watcher)", "O(watchers)")]):
+    y = 20 + k*50
+    m5 += _bx(30, y, 360, 40, q, "the question") + _ar("M390 %s H450" % (y+20), True)
+    m5 += _bx(450, y, 520, 40, shape, "the shape", acc=True) + _ar("M970 %s H1030" % (y+20), True) + _bx(1030, y, 170, 40, cost, "")
+m5 += _tx(615, 288, "a hash map would resolve in O(1) but re-sort on every ls; a sorted map resolves in eleven hops at a thousand entries and hands ls the order for free", "var(--muted)", 11)
+m5 += _tx(615, 306, "and the byte count is incremental on purpose: walking the tree to answer \"am I over quota?\" would make every single write O(n)", "var(--muted)", 11)
+MV[5] = _mv(1230, 320, m5)
+
+# move 6: the life cycle, and the ORDER on a write
+m6 = _D + _bx(30, 30, 190, 44, "LIVE", "reachable by name", acc=True)
+m6 += _bx(30, 130, 190, 44, "UNLINKED", "name gone, still being read")
+m6 += _bx(320, 130, 190, 44, "FREED", "the last handle closed")
+m6 += _ar("M125 74 V130", True) + _ar("M220 152 H320", True)
+m6 += _ar("M220 52 H415 V130", True) + _tx(330, 44, "nobody had it open", "var(--muted)", 10.5, "start")
+m6 += _tx(125, 196, "delete(path)", "var(--muted)", 10.5) + _tx(268, 196, "close()", "var(--muted)", 10.5)
+m6 += '<rect x="560" y="20" width="650" height="252" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m6 += _tx(885, 44, "the order on a write, and why a refusal leaves nothing behind", "var(--text)", 12)
+for k, l in enumerate(["1  parse the path -- no lock held, and nothing written",
+                       "2  namespace READ lock: the name will stay resolved",
+                       "3  the file's own lock -- order is namespace, then file",
+                       "4  work out the resulting sizes and RESERVE them",
+                       "5  ask the guard; if it says no, release the reservation",
+                       "6  publish the new array: one reference, cannot half-fail",
+                       "7  unlock, then tell the watchers, inside a try/catch",
+                       "a refused write leaves the old bytes, the old counters and no new node;",
+                       "a create asks the guard BEFORE it links the node in, so there is nothing to undo"]):
+    m6 += _tx(575, 70 + k*21, l, "var(--muted)" if k > 6 else "var(--text)", 11, "start")
+m6 += _tx(615, 292, "a delete unlinks the name inside the lock and frees the bytes outside it, so a reader mid-read finishes: the states make that a rule and not an accident", "var(--muted)", 11)
+MV[6] = _mv(1230, 305, m6)
+
+# move 7: what is inside the lock, and eight threads at the same instant
+m7 = _D + _card(30, 20, 540, 125, "inside a lock: under a microsecond",
+                ["a shape change at depth 3: about 0.3 us", "a 4 KB overwrite: about 0.6 us, measured",
+                 "a 64 KB overwrite: about 14 us", "the guard: arithmetic on three numbers",
+                 "nothing that waits on anything, ever"], acc=True)
+m7 += _ar("M570 82 H640", True) + _tx(605, 72, "unlock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 125, "outside the lock: milliseconds",
+            ["parsing the path: before any lock is taken", "the watchers: after the unlock, in a try/catch",
+             "a slow subscriber: its own executor", "freeing an unlinked file's bytes: at close",
+             "a disk or a network call: never inside"])
+m7 += _tx(615, 172, "eight threads appending to EIGHT different files: nobody waits", "var(--text)", 12)
+for k in range(8):
+    x = 30 + k*148
+    m7 += _bx(x, 185, 136, 38, "file %d" % (k+1), "waits 0 us", acc=False)
+m7 += _tx(615, 252, "eight threads appending to ONE file: one at a time", "var(--text)", 12)
+for k in range(8):
+    x = 30 + k*148
+    m7 += _bx(x, 265, 136, 38, "thread %d" % (k+1), "waits %s us" % ("0" if k == 0 else "%.1f" % (k*0.6)), acc=(k == 7))
+m7 += _tx(615, 326, "the read side of the namespace lock is shared, so eight writers to eight files are genuinely parallel; only the eight sharing one file queue up", "var(--muted)", 11)
+m7 += _tx(615, 344, "and the eighth of those waits four microseconds &mdash; one at a time is true, and nobody can tell, because nothing slow is allowed inside a lock", "var(--muted)", 11)
+MV[7] = _mv(1230, 356, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="195" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m8 += _tx(300, 42, "one lock for the shape of the tree: is it a bottleneck?", "var(--text)", 12)
+for k, l in enumerate(["a shape change holds the exclusive lock about 0.3 us",
+                       "a busy build machine: 2,000 mkdir / mv / rm a second",
+                       "that is 0.6 ms of lock in every second: 0.06% busy",
+                       "invent 100,000 a second and it is still only 3% busy",
+                       "byte writes take the READ side, so they never queue here"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1  keep everything slow out of the locks", "already done: parsing before them, watchers after them"),
+                              ("2  a lock per directory, always taken parent first", "when mkdir, mv and rm are what is actually queueing"),
+                              ("3  an immutable tree with a CAS on the root", "readers take no lock at all, and a backup snapshot is free")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("\"..\" walks above the root", "the path is normalised once and clamps at the root; test 2: /a/../../.. is /"),
+                                ("mv a directory into its own subtree", "one prefix comparison on the segments refuses it; test 3: the tree is unchanged"),
+                                ("rm on a directory that has children", "it throws unless recursive was asked for; test 4: nothing was freed"),
+                                ("two threads append to one file", "the file's own lock; test 6: 8 x 500 appends leave exactly 4000 bytes"),
+                                ("a write goes over the quota", "reserve, ask, release; test 5: no file, no bytes, no drifted counter"),
+                                ("two threads create the same name", "one entry in the map and one increment; test 7: 51 files, not 52"),
+                                ("a watcher is slow, or throws", "called after the unlock in a try/catch; test 8: a second writer gets through"),
+                                ("rm a file somebody is reading", "the name goes, the bytes wait for close; test 9: the reader still reads")]):
+    y = 16 + k*40
+    m9 += _bx(30, y, 330, 36, bad, "") + _ar("M360 %s H410" % (y+18), True) + _bx(410, y, 790, 36, fix, "", acc=True)
+m9 += _tx(615, 356, "every claim this page makes has a test: FailureTests.java runs twenty-seven of them and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 370, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 860)]
+rows10 = [[("Composite", "var(--text)"), ("move 1", None), ("abstract class FsNode { boolean isDirectory(); long sizeBytes(); }", None), ("du and find never ask which kind a node is", None)],
+          [("Strategy", "var(--text)"), ("move 3", None), ("interface WriteGuard { void check(WriteRequest r); }", None), ("a new rule is a new class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new AuditGuard(WriteGuard.allOf(new CapacityGuard(64, 1024)))", None), ("every refusal recorded; no rule knows", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("publish(event) after every unlock, inside a try/catch", None), ("an indexer hears; the tree never waits", None)],
+          [("State", "var(--text)"), ("move 6", None), ("LIVE &rarr; UNLINKED &rarr; FREED, checked on unlink and on close", None), ("a reader mid-read cannot be broken", None)],
+          [("Null Object", "var(--text)"), ("move 3", None), ("WriteGuard UNLIMITED = r -&gt; {};   AccessPolicy.ALLOW_ALL", None), ("no \"if (guard != null)\" anywhere", None)],
+          [("Iterator / fold", "var(--text)"), ("move 5", None), ("walk(path, node, filter, out) -- one traversal, any predicate", None), ("no findByExtensionAndSize, ever", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the file system is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh tree", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("two constructors: new FileNode(name, now) and new DirNode(name, now)", "var(--muted)"), ("it earns the name when kinds come from config", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("never", None), ("a node is a name, two timestamps and nothing optional", "var(--muted)"), ("there would be nothing to build", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=28, widths=1190)
+m10 += _tx(615, 350, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 365, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("DirNode holds names. FileNode holds bytes. FileSystem holds what a path means.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("CapacityGuard is a new file plus fs.configure(...); FileSystem is never opened", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 1", None), ("walk, du and every filter call sizeBytes(); there is not one downcast", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("WriteGuard, NodeFilter, FsWatcher, Clock &mdash; a test hands in a lambda", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("new FileSystem(clock);  fs.configure(guard);  the tree builds neither", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "a quota, read-only /etc, permissions", "a new WriteGuard plus one configure line", "allOf composes it with the rules already there", "move 3"),
+        ("someone new wants to know", "an indexer, a log rotator, a backup", "one more watcher, on its own executor", "the tree, the locks and the tests do not change", "move 4"),
+        ("a new step in a life", "trash, restore, purge", "one more state and one more checked move", "delete becomes a move into /.trash; restore is the move back", "move 6"),
+        ("a new invariant across names", "hard links: two names, one set of bytes", "the refcount and the unlink under the SAME lock", "the bytes go when the last name goes, not the first", "move 4"),
+        ("state that must outlive the process", "survive a restart; two machines", "a write-ahead journal, appended in the critical section", "replay at boot; then the tree itself behind a repository", "moves 6 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 306, "for all five, the node classes, the path parser and the two locks do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 320, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the prompt again: a <b>path</b> names a <b>file</b> or a <b>directory</b>; a <b>file system</b> holds the "
+ "root and decides what a path means; a <b>rule</b> says whether bytes may be written; a <b>watcher</b> wants to be "
+ "told. A file has bytes, a version and the lock that guards them, so it is a class. A directory has its children by "
+ "name, so it is a class. A path has segments that never change once parsed, so it is an immutable value: parse it "
+ "once at the edge and no method below ever sees a slash again, which is why <code>..</code> cannot mean two different "
+ "things in two different methods. A write rule has no state at all, so it is a one-method interface, not a class with "
+ "fields. And the important one: a file and a folder are not unrelated, because listing wants a name from both and "
+ "<code>du</code> wants a size from both, and a folder's size is the sum of its children's, one of which may be "
+ "another folder. That recursion is the shape of the problem, so they share an abstract <code>FsNode</code> and a "
+ "folder holds a collection of it &mdash; the composite, forced by the feature rather than chosen.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Hold bytes and grow them\" touches one array and the lock over it, so it belongs to the file: "
+ "<code>setContentLocked(bytes, now)</code>. \"Hold names\" touches the children map, so it belongs to the directory. "
+ "\"Say what a path means\" touches the root, which only the file system has, so <code>nodeAt(FsPath)</code> lives "
+ "there. \"Rearrange the tree\" and \"count the volume\" touch the shape and the counters, and again only the file "
+ "system sees both, so <code>mkdirs</code>, <code>move</code>, <code>delete</code> and the write path are its methods "
+ "and it is the orchestrator. Then resist the instinct that ruins this design: do not give a node a pointer back to "
+ "the file system and do not let a node parse a path. A file guards its bytes, a directory holds names, and the object "
+ "above owns what a path means and who may rearrange things. That split is what makes the concurrency answer short "
+ "enough to say out loud.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind a one-method interface and is handed in.",
+ "What will change? What is allowed to be written &mdash; a quota today, a maximum file size next, a read-only "
+ "<code>/etc</code>, permissions after that. What people search for &mdash; by extension today, by size and modified "
+ "time tomorrow, by a combination the day after. Who is told when something changes &mdash; nobody today, an indexer "
+ "and a backup later. And what time it is, because a test needs to control it. So each is a one-method interface the "
+ "file system is <i>given</i> and never builds: <code>WriteGuard</code>, <code>NodeFilter</code>, "
+ "<code>FsWatcher</code>, <code>Clock</code>. This is where the patterns are born, not announced: a swappable rule "
+ "behind an interface is <b>Strategy</b>; a rule that wraps another rule and adds to it is <b>Decorator</b>, and "
+ "<code>AuditGuard(inner)</code> is the real one here &mdash; it records every refusal without either the rule or the "
+ "file system knowing it exists; an object that announces something without knowing who listens is <b>Observer</b>. "
+ "One extra touch worth stealing: <code>WriteGuard.allOf(a, b)</code> and <code>filter.and(other)</code> compose rules "
+ "the same way the tree composes nodes, so combining two rules is never an edit either.", 3),
+("Move 4: name the invariants. Each one gets its own owner and its own lock, and the lock order is a rule you say out loud.",
+ "There are two things threads can break here, and they are not the same thing. The first is a file's bytes: an append "
+ "reads the current array, builds a bigger one and publishes it, so two threads that both read three bytes both publish "
+ "four, and the file ends at four instead of five with nobody the wiser. The second is the shape of the tree: one thread "
+ "resolves <code>/a/b/f.txt</code> while another renames <code>/a</code> to <code>/z</code>, and the first thread writes "
+ "into a node nothing can reach any more. Two invariants, two locks: the content of a file under that file's own "
+ "<code>ReentrantLock</code>, and the shape of the tree under one <code>ReentrantReadWriteLock</code> on the file system. "
+ "The trick that makes this fast is the read side: a byte write only needs the name to stay resolved, so it takes the "
+ "namespace <i>read</i> lock and the file's own lock, which means writers to different files never wait for each other "
+ "while a concurrent <code>mv</code> still cannot move the ground out from under them. And state the order before you "
+ "write a single <code>lock()</code>: namespace first, then a file, never the reverse. Shape changes take no file lock "
+ "at all except to publish bytes into a file they just created, so a cycle cannot be built &mdash; deadlock is "
+ "structurally impossible here, not merely unobserved.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers it cheaply.",
+ "\"What is at this path?\" is a walk down the tree, one map lookup per segment: O(depth &times; log children). \"What "
+ "is in this directory, in order?\" is why the children live in a sorted map rather than a hash map &mdash; a hash map "
+ "would look up in O(1) but would have to sort on every single listing, while a tree map looks up in eleven hops at a "
+ "thousand entries and hands the listing its order for free. \"Am I over quota?\" is two <code>AtomicLong</code>s moved "
+ "as each write lands, because a quota check sits on the write path and must be O(1); computing <code>du</code> on "
+ "demand would quietly make every write O(n), which is the mistake that only shows up in production. \"What are the "
+ "bytes?\" is one array read under the file's lock. \"Who is watching?\" is a copy-on-write list of prefix and watcher, "
+ "which is the right shape because it is read on every change and written almost never. And notice the thing that is "
+ "<i>not</i> a collection: a flat map from full path to file. It would make listing a prefix scan and would turn moving "
+ "a directory with ten thousand descendants into ten thousand key rewrites, where a real tree does it in three pointer "
+ "operations.", 5),
+("Move 6: anything with a life cycle is a state machine, and the order of operations at the write is part of the design.",
+ "A file is LIVE while a name points at it, UNLINKED when the name is deleted but somebody still has it open, and FREED "
+ "when the last reader closes. Writing that down answers the question the interviewer will ask &mdash; what happens to "
+ "a reader when somebody deletes the file underneath them &mdash; with a rule instead of a shrug: the name leaves the "
+ "tree inside the lock and the bytes are released outside it, when the handle closes, so the reader finishes what it "
+ "started. Then the order on a write, which is the other half of this move. Parse the path with no lock held. Take the "
+ "namespace read lock so the name stays resolved, then the file's lock. Work out the resulting file size and the "
+ "resulting volume size and <i>reserve</i> them on the counter &mdash; a number moves, no bytes do. Ask the guard, and "
+ "if it refuses, release the reservation and throw: the old bytes are still there and the counter reads exactly what it "
+ "read before. Only then publish the new array, which is a single reference assignment and therefore cannot fail half "
+ "way. The same logic runs the create: the guard is asked <i>before</i> the node is linked into the tree, so a refused "
+ "create has nothing to roll back, which is strictly better than creating the file and undoing it.", 6),
+("Move 7: yes, the locks make some things happen one at a time. Say which things, and for how long.",
+ "Inside the exclusive namespace lock there is a handful of sorted-map operations &mdash; about three tenths of a "
+ "microsecond for a <code>mkdir -p</code> or a <code>mv</code> at depth three, measured, not guessed. Inside a file's "
+ "lock there is an allocation and an array copy: about six tenths of a microsecond for four kilobytes, about fourteen "
+ "for sixty-four. The guard runs in there too, which is exactly why the guard is defined as arithmetic on three numbers "
+ "and not as something that may call out to anything; a guard that made a network call would be the one thing that "
+ "breaks this design. Everything else is outside. The path is parsed before any lock is taken. The watchers are called "
+ "after the unlock, in a <code>try</code>/<code>catch</code>, so a subscriber that sleeps for fifty milliseconds delays "
+ "nobody but itself. Freeing an unlinked file's bytes happens when the reader closes, not while anyone is waiting. So: "
+ "eight threads appending to eight different files run genuinely in parallel, because they share the read side of the "
+ "namespace lock and hold eight different file locks; eight threads appending to <i>one</i> file queue, and the eighth "
+ "waits about four microseconds.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "The one lock worth arguing about is the exclusive namespace lock, because every <code>mkdir</code>, <code>mv</code> "
+ "and <code>rm</code> takes it. Hold it for three tenths of a microsecond. A busy build machine churning two thousand "
+ "shape changes a second therefore holds it for six tenths of a millisecond in every second: six hundredths of one per "
+ "cent. Invent a machine doing a hundred thousand a second and it is still only three per cent busy, and byte writes "
+ "never queue there at all because they take the read side. Then the ladder, in the order you would climb it. One: keep "
+ "everything slow out of the locks, which this code already does &mdash; parsing before them, watchers after them, no "
+ "IO inside them. Two: if <code>mkdir</code> and <code>mv</code> really are the queue, replace the single lock with a "
+ "lock per directory taken strictly from the root downwards, so two threads locking a chain can never hold it in "
+ "opposite orders; the cost is a longer rule to keep in your head, which is why it is rung two and not rung one. Three: "
+ "make the tree immutable and swap the root with a compare-and-set, so readers take no lock at all and a backup "
+ "snapshot becomes free. Say the arithmetic before you climb: this is where candidates invent complexity nobody asked "
+ "for.", 8),
+("Move 9: list what can go wrong, and write the test for each before the hour is over.",
+ "<code>..</code> walking above the root (the path is normalised once and clamps there, so <code>/a/../../..</code> is "
+ "<code>/</code>). Moving a directory into its own subtree, which silently orphans it (one prefix comparison on the "
+ "segments refuses it, and the tree afterwards is identical). <code>rm</code> on a directory with children (it throws "
+ "unless recursive was asked for, and nothing is freed by the refusal). Two threads appending to one file (the file's "
+ "own lock; eight threads by five hundred appends must leave exactly four thousand bytes, and the unlocked version of "
+ "the same run loses about two thousand eight hundred). A write over the quota (reserve, ask, release: no file, no "
+ "bytes and no drifted counter). Two threads creating the same name (one entry in the map and exactly one increment of "
+ "the file count). A watcher that is slow or throws (called after the unlock in a try/catch, proved by a second writer "
+ "getting through while the first one's watcher is still running). And <code>rm</code> on a file somebody is reading "
+ "(the name goes, the bytes wait for the close). Each is a few lines in FailureTests.java; a design that cannot show "
+ "its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Composite came out of move 1: a file and a folder answer the same two questions, so <code>walk</code>, <code>du</code> "
+ "and every filter treat them identically and there is not one downcast in the file. Strategy came out of move 3: the "
+ "write rule, the search predicate and the clock are the things that change, so each sits behind a one-method interface "
+ "the file system is handed. Decorator is the same move's wrapper &mdash; <code>AuditGuard(inner)</code> adds "
+ "\"remember what you refused\" to any rule, including rules written next year, instead of copying that into each. "
+ "Observer is move 4's rule that nothing slow may sit inside a lock. State is move 6, the file's life written down. "
+ "Null Object is the small one worth naming: <code>WriteGuard.UNLIMITED</code> means no method anywhere contains "
+ "<code>if (guard != null)</code>. And the honest negatives. Singleton earned nothing: the file system is handed to its "
+ "callers, so a test builds a fresh tree in one line. Factory is \"not yet\" &mdash; there are exactly two node "
+ "constructors, and it earns the name the day node kinds arrive as strings from configuration, which is also the day "
+ "symlinks show up. Builder is \"never\" on this problem: a node is a name and two timestamps, with nothing optional to "
+ "build. A pattern without a move behind it is decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "S: one reason to change per class, which move 2 handed you &mdash; the directory changes when name-keeping changes, "
+ "the file when byte-keeping changes, the file system when the meaning of a path changes, and no class does two of "
+ "those. The practical payoff is that the race lives in one class and the path bugs in another. O: a new behaviour is a "
+ "new class and one changed line &mdash; <code>CapacityGuard</code> is a new file plus a call to "
+ "<code>configure</code>, and <code>FileSystem</code> is never opened. L: wherever an <code>FsNode</code> is expected "
+ "both kinds work, because <code>sizeBytes()</code> means \"bytes underneath you\" for both; it simply recurses for one "
+ "of them. I: four interfaces, one method each, so a fake in a test is a lambda and not nine stubbed callbacks. D: the "
+ "file system depends on <code>Clock</code> and <code>WriteGuard</code> and is handed the implementations, which is "
+ "exactly why a test can give it a clock that says last Tuesday and a rule that refuses everything.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (a quota, a read-only <code>/etc</code>, permissions) is a new <code>WriteGuard</code> plus one line, and "
+ "<code>allOf</code> composes it with the rules already there. Someone new who wants to know (an indexer, a log "
+ "rotator, a backup) is one more watcher, wrapped in an executor if it is slow; the tree, the locks and the tests do "
+ "not move. A new step in a life (trash, restore, purge) is one more state and one more checked transition &mdash; "
+ "delete becomes a move into a hidden <code>/.trash</code>, restore is the same move backwards, and purge is the only "
+ "step that frees anything. A new invariant across names (hard links: two names for one set of bytes) is a refcount, "
+ "and the rule is that the refcount and the unlink happen under the <i>same</i> lock, so the bytes go when the last "
+ "name goes and not the first. State that must outlive the process is a write-ahead journal appended inside the same "
+ "critical section as the mutation and replayed at boot, and then the tree behind a repository. Symlinks are the one "
+ "twist that touches the core, and even then only one method: the path walk restarts from the link's target with a hop "
+ "counter, so a loop becomes an error instead of a hang. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these twelve on any LLD and the class diagram, the locks, the tests, the patterns, SOLID and the "
+ "answer to every twist fall out in that order; nothing is chosen up front, and nothing is named before the move that "
+ "produced it. On this problem move 4 is the one that separates candidates, because there are two invariants here and "
+ "not one, and the design is only as good as the sentence you can say about the lock order.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# left column: the value types, the injected interfaces, the open handle
+put("path", 10, 20, 230, "FsPath", ["segs: List&lt;String&gt;  (frozen)"],
+    ["of(raw): FsPath", "parent() / child(n) / name()", "startsWith(p): boolean"])
+put("clock", 10, 150, 230, "Clock", [], ["nowMs(): long"], "interface")
+put("watch", 10, 228, 230, "FsWatcher", [], ["onEvent(e: FsEvent)"], "interface")
+put("ev", 10, 306, 230, "FsEvent", ["kind: EventKind", "path: String", "atMs: long"], [])
+put("handle", 10, 412, 230, "Handle", ["node: FileNode"], ["read(): byte[]", "close()"])
+# centre: the aggregate root, the abstract node, and the two shapes of node
+put("fs", 300, 20, 340, "FileSystem",
+    ["root: DirNode", "namespace: ReadWriteLock", "totalBytes / fileCount: AtomicLong", "guard: WriteGuard",
+     "clock: Clock", "watchers: List&lt;prefix, FsWatcher&gt;"],
+    ["configure(guard) / setClock / watch", "mkdirs(path)", "putFile(path, content)", "overwrite / append(path, bytes)",
+     "read / ls / du / find / open", "move(from, to) / delete(path, rec)", "totalBytes() / fileCount()"])
+put("node", 300, 320, 340, "FsNode", ["name: String", "createdMs / modifiedMs: long"],
+    ["isDirectory(): boolean", "sizeBytes(): long", "rename(n) / touch(now)"], abstract=True)
+put("file", 300, 530, 300, "FileNode",
+    ["content: byte[]", "lock: ReentrantLock", "version: AtomicLong", "openHandles: int", "state: FileState"],
+    ["read(): byte[]", "setContentLocked(b, now)", "acquire() / release() / unlink()"])
+put("dir", 640, 530, 290, "DirNode", ["children: TreeMap&lt;name, FsNode&gt;"],
+    ["child(n) / put(n) / remove(n)", "names(): List&lt;String&gt;", "sizeBytes(): sum of children"])
+# third column: the enums and the record the rule reads
+put("wmode", 690, 20, 215, "WriteMode", ["OVERWRITE, APPEND"], [], "enum")
+put("ekind", 690, 92, 215, "EventKind", ["CREATED, WRITTEN,", "DELETED, MOVED"], [], "enum")
+put("fstate", 690, 180, 215, "FileState", ["LIVE, UNLINKED, FREED"], [], "enum")
+put("req", 690, 300, 215, "WriteRequest",
+    ["path: String", "mode: WriteMode", "resultingFileBytes", "resultingTotalBytes", "fileCount: long"], [])
+# fourth column: the rules that are handed in
+put("guard", 945, 20, 265, "WriteGuard", [], ["check(r: WriteRequest)", "allOf(g...): WriteGuard", "UNLIMITED"], "interface")
+put("cap", 945, 140, 265, "CapacityGuard", ["maxFileBytes / maxTotalBytes"], ["check(r): throws over either"])
+put("audit", 945, 240, 265, "AuditGuard", ["inner: WriteGuard  (wrapped)"], ["check(r): delegates, records"])
+put("filter", 945, 340, 265, "NodeFilter", [], ["matches(path, node): boolean", "and / or / negate"], "interface")
+put("filters", 945, 444, 265, "Filters", [], ["extension(ext) / largerThan(n)", "modifiedAfter(ms) / filesOnly()"])
+
+EDGES = [
+ # the two shapes of node share one base type
+ ln(B["file"]["t"], (430, 442), "inherit", "", [(450, 490), (430, 490)]),
+ ln(B["dir"]["t"], (520, 442), "inherit", "", [(785, 490), (520, 490)]),
+ # the file system owns the root directory
+ ln((600, 270), (700, 530), "compose", "", [(600, 308), (662, 308), (662, 478), (700, 478)]),
+ _tx(710, 521, "owns the root", "var(--acc)", 10.5, "start"),
+ # a handle holds the node, not the name
+ ln((240, 457), (300, 615), "assoc", "", [(270, 457), (270, 615)]),
+ _tx(262, 532, "holds the node,", "var(--muted)", 10.5, "end"),
+ _tx(262, 546, "not the name", "var(--muted)", 10.5, "end"),
+ # a file's state
+ ln((600, 560), (690, 205), "assoc", "", [(675, 560), (675, 205)]),
+ # the file system parses a path once, is handed a clock, and announces to watchers
+ ln((300, 60), (240, 73), "assoc", "", [(272, 60), (272, 73)]),
+ ln((300, 120), (240, 177), "inject", "", [(280, 120), (280, 177)]),
+ ln((300, 90), (240, 255), "notify", "", [(262, 90), (262, 255)]),
+ ln(B["ev"]["t"], B["watch"]["b"], "assoc"),
+ # the rules are handed in through configure()
+ ln((640, 255), (945, 55), "inject", "", [(932, 255), (932, 55)]),
+ ln((640, 265), (945, 370), "inject", "", [(922, 265), (922, 370)]),
+ _tx(915, 248, "handed in ", "var(--acc)", 10.5, "end"),
+ # the guard reads a request; the implementations implement the interface
+ ln((945, 90), (905, 357), "assoc", "", [(912, 90), (912, 357)]),
+ ln(B["cap"]["t"], B["guard"]["b"], "inherit"),
+ ln((1210, 277), (1210, 67), "inherit", "", [(1228, 277), (1228, 67)]),
+ ln(B["audit"]["t"], B["cap"]["b"], "assoc", "wraps"),
+ ln(B["filters"]["t"], B["filter"]["b"], "assoc", "returns"),
+]
+UMLSVG = uml_svg(1230, 760, EDGES, legend_y=735)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (italic = abstract, never instantiated; dashed border = '
+ 'interface; &laquo;enum&raquo; = a fixed list of values). Middle: its fields, the state it holds. Bottom: its methods. '
+ '<b>The arrows.</b> Hollow triangle = extends or implements: <code>FileNode</code> and <code>DirNode</code> are both '
+ '<code>FsNode</code>, which is why <code>walk</code>, <code>du</code> and every filter can treat them identically '
+ 'without a single downcast. Filled diamond = owns: the file system owns the root, and the root owns everything under '
+ 'it. Plain arrow = references: a handle holds the node rather than the name, which is exactly why a reader survives a '
+ 'delete, and <code>AuditGuard</code> holds the rule it wraps. Dashed lavender = handed in through '
+ '<code>configure()</code> or the constructor. Dotted blue = notifies. <b>Where state lives:</b> a file has its bytes, '
+ 'its version and the lock over them; a directory has its children by name and nothing else; the file system has the '
+ 'root, the two locks, the two counters and the handed-in rules. Notice what is <i>not</i> here: no path string inside '
+ 'a node, no pointer from a node back to the file system, and no <code>Size</code> class &mdash; a size is a question '
+ 'a node answers, and the volume total is a counter the write path moves.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above '
+ 'each class and method says what it is for and what it guarantees; read only those first for the shape, then the '
+ 'bodies for the mechanics. Each copy button copies that whole file for your IDE. Below Main.java: Extensions.java '
+ '(every follow-up\'s reference code, with an <code>ExtDemo</code> main that runs all of it) and FailureTests.java '
+ '(twenty-seven claims proven; <code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> '
+ 'prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (durability and threads first). Then type in the order of '
+ 'Main.java: the three enums and the Clock; the exception family; FsPath with its normalising parse; the abstract FsNode '
+ 'and then FileNode (bytes plus its own lock) and DirNode (a sorted map of children); the WriteRequest record and the '
+ 'WriteGuard interface with one implementation; NodeFilter and the watcher; the Handle; then FileSystem with its two '
+ 'locks, the write path in the order of move 6, and the shape operations; then a main that builds a tree and runs eight '
+ 'threads at one file and fifty at one directory.</div></div>')
+
+FU = [
+("Now no file may be over 64 bytes, and the whole volume caps at 1 KB.", "functional", 8,
+ "One new class and one line. The rule reads numbers the write path has already computed &mdash; the resulting size of "
+ "this file and the resulting size of the volume are both in the WriteRequest before anything mutates &mdash; so the "
+ "rule is a class that reads two fields and throws. Nothing in FileSystem changes, because all three write entry points "
+ "(create, overwrite, append) funnel through one guarded step. Rules stack without knowing about each other: "
+ "<code>WriteGuard.allOf(new CapacityGuard(64, 1024), new ReadOnlySubtreeGuard(\"/etc\"))</code>. The one thing the "
+ "guard may not do is anything slow, because it runs inside the file's lock.",
+ sect(src, "final class CapacityGuard", "final class AuditGuard")),
+("Two threads append to the same file at the same instant. Prove you cannot lose a byte, with a test.", "non-functional", 10,
+ "The race lives between reading the current array and publishing the bigger one. Append does the whole "
+ "read-modify-write inside that file's own lock, so no other writer can run in the gap. The proof is a count, not an "
+ "argument: eight threads released together by a latch each append one byte five hundred times, and the file must be "
+ "exactly four thousand bytes. Run the identical workload through the unsynchronised path in Main and it loses about "
+ "two thousand eight hundred of them, which is the number worth saying out loud. The test also checks that the running "
+ "byte counter still equals a fresh walk of the tree, because a lock that protects the bytes but not the accounting is "
+ "only half a lock.",
+ T("        // 6. eight threads appending to ONE file", "        // 7. fifty threads creating files")),
+("One lock for the whole tree. Have you serialised the file system?", "non-functional", 8,
+ "No, because it is not one lock and it is not always exclusive. There are two: the shape of the tree under a "
+ "read-write lock on the file system, and the bytes of each file under that file's own lock. A byte write only needs "
+ "the name to stay resolved, so it takes the <i>read</i> side of the namespace lock plus its own file's lock, which "
+ "means eight writers to eight files run genuinely in parallel while a concurrent move still cannot move the ground out "
+ "from under them. Only mkdir, mv, rm and create take the exclusive side, and they hold it about three tenths of a "
+ "microsecond, so two thousand of them a second is six hundredths of one per cent busy. The ladder, in order: keep slow "
+ "work out of the locks (already done), then a lock per directory taken parent-first, then an immutable tree with a "
+ "compare-and-set on the root so readers take no lock at all.",
+ sect(src, "private void applyWrite", "// ------------------------------------------------ reads")),
+("The quota refuses a write half way through. What is the state of the file system?", "functional", 8,
+ "Exactly what it was. The order is the answer: resolve, take the locks, work out the resulting sizes, reserve them on "
+ "the volume counter, ask the guard, and only then publish. A reservation is a number moving, not bytes, so a refusal "
+ "releases it and the counter reads what it read before. The bytes are published by a single reference assignment, "
+ "which cannot fail half way, and it happens after the only step that can say no. On a create the guard is asked before "
+ "the node is linked into the tree at all, so there is no empty file left behind and no inflated file count to poison "
+ "later quota decisions &mdash; strictly better than creating it and rolling back. The failure test checks the bytes, "
+ "the counter and the absence of the file, all three.",
+ sect(src, "void putFile(String path, String content)", "void move(String from, String to)")),
+("mv /a into /a/b/c, and rm on a directory that still has children.", "functional", 8,
+ "Both are refused, and both refusals are one line each because the path was parsed once. Moving a directory into its "
+ "own subtree would leave the subtree reachable only from itself, so the check is a prefix comparison on the segment "
+ "lists: is the destination at or under the source? That is only cheap because <code>FsPath</code> is a list of "
+ "segments and not a string. Removing a directory that has children throws unless the caller passed recursive, which is "
+ "the loud behaviour <code>rm</code> has for a reason. A move that does happen is three pointer operations &mdash; "
+ "unlink the old name, rename the node, link the new one &mdash; all inside one exclusive lock, so nobody can observe "
+ "the moment when the node is at neither name, and it costs the same whether the subtree has three descendants or "
+ "thirty thousand.",
+ sect(src, "void move(String from, String to)", "void delete(String path, boolean recursive)")),
+("Find every .txt over 4 KB, and then the ten biggest files under /var.", "non-functional", 5,
+ "The traversal is written once and what changes is a yes/no question about one node, so there is no findByExtension, "
+ "then findBySize, then findByExtensionAndSize. The predicates compose: "
+ "<code>Filters.extension(\"txt\").and(Filters.largerThan(4096))</code>, and the walk runs under the namespace read "
+ "lock so the tree cannot change underneath it. \"The ten biggest\" is the same single walk folded into a heap that "
+ "never holds more than ten entries, which is O(n log 10) and ten slots of memory rather than a sort of everything. "
+ "Two honest caveats for a real tree: find should return a lazy iterator rather than collecting every hit, and a "
+ "listing of two hundred thousand names should be a page and a cursor.",
+ X("millions of files", "one namespace lock is the bottleneck")),
+("Somebody deletes a file while I am reading it.", "twist", 8,
+ "The reader finishes. Delete unlinks the name inside the exclusive lock &mdash; the entry leaves its parent's map and "
+ "the byte accounting drops immediately, because the counters measure what is reachable by name &mdash; and then, "
+ "outside the lock, each file that left the tree is told. A file nobody has open goes straight to FREED and releases "
+ "its array; a file somebody has open goes to UNLINKED and keeps its bytes until that handle closes, at which point it "
+ "goes to FREED. The handle holds the node rather than the path, which is the whole reason this works. Writing the "
+ "three states down is what turns \"what about a reader mid-read?\" from an improvisation into a rule; the other "
+ "defensible choice, refusing the delete while the file is open, is what Windows does, and it is one branch in the same "
+ "place.",
+ sect(src, "void acquire()", "\n}\n\n/**\n * A directory") + "\n    "
+ + sect(src, "void delete(String path, boolean recursive)", "// ------------------------------------------------ content")),
+("Support symlinks. Now make /a point at /b and /b point at /a. And hard links.", "twist", 10,
+ "A symlink is a third kind of node holding a target path, and the only method that changes is the path walk: when a "
+ "segment resolves to a link, the walk restarts from the link's target with whatever segments were left, counting hops, "
+ "and gives up after forty. That hop counter is the whole cycle story &mdash; /a to /b to /a becomes an error rather "
+ "than a hang. Listing, searching, the guards and the watchers never learn that links exist. Hard links are a different "
+ "shape: split the bytes out into an inode with a reference count and let two directory entries point at the same one, "
+ "so deleting a name decrements and only the last one frees the bytes. The catch worth volunteering is the accounting: "
+ "<code>du</code> has to count shared bytes once, which means folding over inode identity rather than over names.",
+ X("symlinks", "hard links") + "\n" + X("hard links", "users and permissions")),
+("Users and permissions.", "twist", 5,
+ "Permissions are a rule that changes, so they go behind a one-method interface exactly like the quota did. Who is "
+ "asking is threaded through the API as a value rather than read from a thread local, so a test can be any user. The "
+ "policy here is owner plus two bits &mdash; may others read, may others write &mdash; and anything more elaborate "
+ "(groups, ACLs, inherited permissions) is a different implementation of the same interface. The check sits in front of "
+ "the call in a thin wrapper, so <code>FileSystem</code> does not change at all and never learns what a user is; a "
+ "write-side permission rule can equally well be dropped into <code>WriteGuard.allOf</code> next to the capacity rule, "
+ "which is the same seam from a different direction.",
+ X("users and permissions", "trash and restore")),
+("Make delete recoverable: trash, restore and purge.", "twist", 5,
+ "\"Recoverable\" means the file has states rather than a boolean, which is move 6 again. Deleting becomes a move into "
+ "a hidden <code>/.trash</code> under a generated id: the name leaves the visible tree, the bytes do not move at all, "
+ "and the visible listing is already correct. Restoring is the same move backwards. Purging &mdash; explicitly, or by a "
+ "sweeper that walks the trash on a timer under the write lock &mdash; is the only step that actually frees memory. "
+ "Every one of those steps reuses a method that already exists, which is the point: a new step in a life costs a state "
+ "and a transition, not new machinery.",
+ X("trash and restore", "random access and big files")),
+("A ten-megabyte log appended a line at a time, and a write at a byte offset.", "non-functional", 8,
+ "One array stops being the right shape at that size, for two reasons: every append copies the whole file, so appending "
+ "a line at a time is quadratic, and a ten-megabyte file needs ten contiguous megabytes. Replace the array with a list "
+ "of fixed chunks and both go away &mdash; appending fills the tail chunk and adds another, which is amortised O(1), "
+ "and a write at an offset touches one chunk instead of rebuilding the file. Read, size and version keep their meaning, "
+ "so nothing above the file notices. The related upgrade is the lock: a file that is read far more often than it is "
+ "written wants a read-write lock, and a file edited by a human wants optimistic concurrency instead, because you "
+ "cannot hold a lock across thirty seconds of typing &mdash; the caller reads a version, edits, and writes back only if "
+ "nobody got there first.",
+ X("random access and big files", "many readers, one writer") + "\n" + X("many readers, one writer", "persistence")),
+("Survive a restart. And where does time come from in your mtimes?", "twist", 8,
+ "A write-ahead journal: every mutation is written as a line &mdash; what was done, to what, with what &mdash; and then "
+ "applied, under one lock so the journal's order is the order things really happened. Replay it into a fresh file "
+ "system at boot and you are exactly where you were. There are only a handful of insertion points because every "
+ "mutation already funnels through a guarded method, which is a payoff from move 6 rather than new work. A crash "
+ "between journalling and applying replays one extra operation, which is harmless because each one is idempotent. Time "
+ "is the smaller half of the same idea: the file system is handed a <code>Clock</code> and stamps every node with it, "
+ "and nothing else in the system reads the wall clock, so a test can pin an instant, write a file, move the instant a "
+ "week forward and assert the exact mtimes.",
+ X("persistence", "a slow watcher must not freeze the namespace") + "\n"
+ "// where time comes from: handed in, defaulted, never read from the wall clock inside a method\n"
+ "interface Clock { long nowMs(); Clock SYSTEM = System::currentTimeMillis; }\n\n"
+ "// in a test: pick the instant, then move it\n"
+ "long[] now = { 1_700_000_000_000L };\n"
+ "FileSystem fs = new FileSystem(() -> now[0]);\n"
+ "fs.putFile(\"/a.txt\", \"one\");\n"
+ "now[0] += 7L * 24 * 3600 * 1000;                        // a week later\n"
+ "fs.append(\"/a.txt\", \" two\");                             // mtime is now exactly a week on\n"),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or a Builder earn its place?", "design", 8,
+ "None was chosen up front; each is what a move produced. Composite is move 1, because a folder's size is the sum of "
+ "its children's and a child may be a folder &mdash; the feature forced the shape. Strategy is move 3: the write rule, "
+ "the search predicate and the clock are the things that change. Decorator is the same move's wrapper, AuditGuard, "
+ "which adds \"remember what you refused\" to any rule without that rule knowing. Observer is move 4's rule that "
+ "nothing slow sits inside a lock. State is move 6, the file's life. Null Object is WriteGuard.UNLIMITED, which is why "
+ "no method contains a null check. For SOLID: S is move 2 (names, bytes, and what a path means, in three different "
+ "classes); O is CapacityGuard, a new file plus one line; L is that walk and du never downcast; I is four interfaces "
+ "with one method each; D is the constructor and configure(), which is why a test can hand in a fixed clock and a rule "
+ "that refuses everything. Factory earns its place the day node kinds arrive from configuration &mdash; which is the "
+ "day symlinks land. Builder earns nothing here: a node is a name and two timestamps, with nothing optional.",
+ "// Composite: one base type, so du and find never ask which kind a node is\n"
+ "abstract class FsNode { abstract boolean isDirectory(); abstract long sizeBytes(); }\n"
+ "final class DirNode extends FsNode {\n"
+ "    @Override long sizeBytes() { long s = 0; for (FsNode c : children.values()) s += c.sizeBytes(); return s; }\n"
+ "}\n\n"
+ "// Strategy: the rule that changes, behind one method, handed in and never built here\n"
+ "interface WriteGuard { void check(WriteRequest r); }\n"
+ "void configure(WriteGuard guard) { this.guard = guard; }\n\n"
+ "// Decorator: add one behaviour to any rule, present or future, without editing it\n"
+ "fs.configure(new AuditGuard(WriteGuard.allOf(new CapacityGuard(64, 1024))));\n\n"
+ "// Observer: the file system announces; it does not know what an indexer is\n"
+ "private void publish(FsEvent e) { /* after every unlock, in a try/catch */ }\n\n"
+ "// Null Object: the default rule allows everything, so nothing anywhere tests for null\n"
+ "WriteGuard UNLIMITED = r -> {};\n\n"
+ "// State: the life of a file, written down instead of improvised\n"
+ "enum FileState { LIVE, UNLINKED, FREED }\n\n"
+ "// Factory: not yet. Two constructors today; it earns the name when node kinds come from config\n"
+ "FsNode made = kind.equals(\"dir\") ? new DirNode(name, now) : new FileNode(name, now);\n\n"
+ "// Builder: never, on this problem. A node is a name and two timestamps, nothing optional\n"
+ "new FileNode(name, clock.nowMs());\n"),
+]
+
+build(dict(
+    slug="file-system", title="In-memory File System",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 27 failure checks and two races pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

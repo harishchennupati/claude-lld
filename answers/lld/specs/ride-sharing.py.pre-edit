@@ -1,0 +1,710 @@
+# Ride Sharing LLD workbench: problem -> twelve moves -> the class diagram -> the whole code -> follow-ups and practice.
+import sys, re
+sys.path.insert(0, "/Users/harishchennupati/answers/lld")
+from lld_engine import *
+
+src   = (H/"ride-sharing/Main.java").read_text()
+ext   = (H/"ride-sharing/Extensions.java").read_text()
+tests = (H/"ride-sharing/FailureTests.java").read_text()
+
+def X(a, b):
+    """slice Extensions.java between two '// ---- ext:' markers (b may name the ExtDemo block)"""
+    marks = [m.start() for m in re.finditer(r"(?m)^// ---- ext:", ext)] + [ext.index("/** Runs every extension")]
+    i = next(m for m in marks if a in ext[m:m+200])
+    j = next(m for m in marks if m > i and b in ext[m:m+200])
+    return ext[i:j].rstrip() + "\n"
+def T(a, b):
+    """slice one numbered block out of FailureTests.java"""
+    return tests[tests.index(a):tests.index(b)].rstrip() + "\n"
+def rail(d):
+    """a plain line with no arrow head, for merging several arrows onto one track"""
+    return '<path d="%s" fill="none" stroke="var(--muted)" stroke-width="1.3"/>' % d
+
+RED = "#ff6b6b"
+
+# ============================================================ page 01: the problem
+# what the code must do: request a ride, finish a ride, and the reads as a line
+pf = _D
+rows = [("request a ride", 30, [("a rider taps for a car", "a place, and a tier"),
+                                ("nine cells say who is near", "never a scan of the fleet"),
+                                ("CLAIM the car with one CAS", "exactly one rider wins"),
+                                ("a trip is born, ASSIGNED", "both phones are told")]),
+        ("finish the ride",  165, [("the car stops", "the meter has the minutes"),
+                                   ("price it: base + km + min", "then x surge, a wrapper"),
+                                   ("record COMPLETED_UNPAID", "and free the car at once"),
+                                   ("charge the card", "then, and only then, COMPLETED")])]
+for lab, y, boxes in rows:
+    pf += _tx(88, y+31, lab, "var(--acc)", 13)
+    for k, b in enumerate(boxes):
+        x = 175 + k*260
+        pf += _bx(x, y, 240, 54, b[0], b[1], acc=(k == 2))
+        if k < 3: pf += _ar("M%s %s H%s" % (x+240, y+27, x+260), True)
+pf += _ar("M815 84 V95", dash=True) + _bx(660, 95, 310, 40, "lost the race: take the next car", "", dash=True)
+pf += _tx(88, 266, "read", "var(--acc)", 13) + _tx(175, 266, "at any moment, without scanning the fleet: who is free near this pickup?  what is trip T7 doing?  what did the ride cost?", "var(--text)", 12, "start")
+pf += _tx(615, 305, "hundreds of riders tap in the same second: one car is never promised to two of them, and no trip is ever left half-ended", "var(--muted)", 11.5)
+P_FLOWS = _mv(1230, 320, pf)
+
+# one evening, replayed
+pe = _D + '<path d="M60 40 H1180" stroke="var(--line)" stroke-width="1.5"/>'
+ev = [("18:42  Meera taps for a GO", ["9 cells hold 3 free cars", "Bilal is 25 m away, Asha 355 m",
+                                      "Chen is a PREMIER: not offered", "CAS AVAILABLE -> RESERVED: Bilal"], True),
+      ("18:42  Ravi taps, same second", ["he reaches for Bilal too", "compare-and-set gives him false",
+                                         "no queue: Asha is next-nearest", "two riders, two cars, one instant"], False),
+      ("19:09  the ride ends, 8.0 km", ["24 minutes by the injected clock", "40 + 12x8 + 1.50x24 = 172.00",
+                                        "x1.5 surge = 258.00", "Bilal is free before the card"], False),
+      ("19:09  the card declines", ["the trip sits at COMPLETED_UNPAID", "Bilal is AVAILABLE regardless",
+                                    "the retry charges exactly once:", "the trip id is the idempotency key"], True)]
+for k, (t, lines, acc) in enumerate(ev):
+    x = 60 + k*290
+    pe += '<circle cx="%s" cy="40" r="5" fill="var(--acc)"/>' % (x+125) + '<path d="M%s 45 V60" stroke="var(--line)"/>' % (x+125)
+    pe += _card(x, 60, 250, 115, t, lines, acc=acc)
+P_EX = _mv(1230, 190, pe)
+
+REQ_HTML = '''<div class="req"><div><b>Functional requirements</b><ul>
+<li>A rider asks for a car of a chosen tier at a place, and gets one or is told there is none.</li>
+<li>The car sent is the nearest free one of that tier, found from a spatial index, never a scan.</li>
+<li>The trip walks a fixed life: requested, assigned, arrived, started, completed &mdash; or cancelled before it starts.</li>
+<li>Drivers stream their location continuously; going online and offline is instant.</li>
+<li>The fare is base + per kilometre + per minute for the tier, multiplied by whatever surge is running.</li>
+<li>Cancelling is free until the driver is really on his way, and costs a fee after that.</li>
+<li>The rider is charged when the ride ends, and the car goes straight back into the pool.</li></ul></div>
+<div><b>Non-functional requirements</b><ul>
+<li>Two riders reaching for the same car at the same instant: exactly one of them gets it, and the other is not made to wait.</li>
+<li>"Who is near this pickup?" touches a handful of grid cells, never the whole fleet.</li>
+<li>A location ping is a field write, not an index rebuild: pings outnumber rides thirty to one.</li>
+<li>An out-of-order call (end a ride that never started) throws before it writes anything.</li>
+<li>Matching, pricing and the cancellation rule swap without opening the service.</li>
+<li>Nothing half-done: a declined card leaves a finished ride recorded and retryable, and never strands a driver.</li>
+<li>In memory, one process, no persistence (say it; a follow-up adds it).</li></ul></div></div>
+'''
+
+PROMPT = ('"Design the back end of Uber. A rider asks for a car, we find a nearby driver and send him, the ride runs, '
+          'and at the end we charge for it. Two riders must never be given the same car. I want working code, not a '
+          'diagram. Go."')
+
+PROBLEM_BODY = (
+ '<div class="move"><div class="prompt">' + PROMPT + '</div></div>'
+ '<div class="move"><h3>The problem, in plain words</h3><p>A rider opens the app at a place and asks for a car of a '
+ 'certain kind. The system has to answer "who is near here" out of tens of thousands of moving cars, pick one of '
+ 'them, and then <i>claim</i> that car so nobody else can be given it. The ride then runs through a fixed sequence '
+ '&mdash; the driver is assigned, he arrives, the rider gets in, the car stops &mdash; and each of those steps is '
+ 'only legal from the step before it. At the end the fare comes from how far and how long the car drove, times '
+ 'whatever surge is running, and the rider is charged. Cancelling is allowed, but only before the meter starts, and '
+ 'after the driver has really set off it costs something. The one thing that must always be true: a car is promised '
+ 'to exactly one rider. Thousands of riders tap at the same instant, and two of them will sometimes reach for the '
+ 'same car in the same microsecond.</p></div>'
+ '<div class="move"><h3>What is expected of you in the hour</h3><p>Not a diagram: classes that compile and run, with '
+ 'a <code>main</code> that sends a car, runs the ride, prints the fare, and then fires many threads at one car to '
+ 'show that only one of them gets it. The interviewer is watching for, in this order: the questions you ask before '
+ 'typing (how big is the fleet, and is straight-line distance good enough, are the first two); which classes exist '
+ 'and which one owns a driver\'s status; one ride end to end; what happens when two requests reach the same car; '
+ 'where the rules that will change &mdash; who to send, what to charge &mdash; live, so a new one is a new class and '
+ 'not an edit; and what the system looks like when the card declines <i>after</i> the ride is over. Then the twists: '
+ 'the driver who ignores the request, starvation, pooling, ratings, a denser city, persistence.</p></div>'
+ '<div class="move"><h3>What the code must do</h3></div>' + P_FLOWS +
+ '<div class="move"><h3>Questions to ask back, and what each answer decides</h3></div>'
+ '<div class="move"><table class="ask"><tr><th>Ask</th><th>Assume this when they say "you decide"</th><th>What the answer decides</th></tr>'
+ '<tr><td>One city or the world, and how many cars online?</td><td>One city, tens of thousands of cars</td><td>A flat grid index rather than a sharded geo-service (moves 5, 8)</td></tr>'
+ '<tr><td>Is straight-line distance good enough, or must it be a real route?</td><td>Straight line for matching, the driven distance for the fare</td><td>Haversine now, a routing service as a named seam (moves 3, 5)</td></tr>'
+ '<tr><td>One rider at a time, greedy, or batched dispatch over a window?</td><td>Greedy, nearest free car</td><td>A one-method matching rule, swappable for a batch solver (move 3)</td></tr>'
+ '<tr><td>Can the driver decline, or does the assignment stick?</td><td>It sticks for now</td><td>Whether the claim is a lease with a deadline (moves 6, 12)</td></tr>'
+ '<tr><td>Are surge, coupons and tolls in scope?</td><td>Surge yes, the rest named</td><td>Pricing as a rule that can be wrapped, not a formula with flags (move 3)</td></tr>'
+ '<tr><td>What happens if the card declines after the ride?</td><td>The ride still happened; retry the money</td><td>A COMPLETED_UNPAID state and the order at the end (move 6)</td></tr>'
+ '<tr><td>Payments, ratings, notifications &mdash; real or stubbed?</td><td>Stubbed behind interfaces</td><td>Observers and an injected gateway, so tests can make them fail (moves 3, 9)</td></tr>'
+ '<tr><td>One process and in memory, or a database and many servers?</td><td>One process, in memory</td><td>No repository yet; the compare-and-set becomes SQL later (move 12)</td></tr></table></div>'
+ '<div class="move"><h3>What it must do, and what it must survive</h3></div>' + REQ_HTML +
+ '<div class="move"><h3>One evening, replayed</h3></div>' + P_EX +
+ '<div class="grade"><b>Say before typing:</b> one city, tens of thousands of cars, one process, in memory; straight-line '
+ 'distance decides who is near, the driven distance decides the fare; money is integer paise; a driver\'s status is the '
+ 'only cell two threads fight over, so it is a compare-and-set and not a lock; a ride cannot be un-driven, so the ride is '
+ 'committed before the card is charged. Named as out of scope: pooling, ratings, batched dispatch, a real routing service, '
+ 'persistence &mdash; each is a follow-up on page 05.</div>')
+
+# ============================================================ page 02: the twelve moves
+MV = {}
+# move 1: nouns with state -> classes
+m1 = _D + '<rect x="20" y="20" width="1190" height="44" rx="6" fill="var(--bg3)" stroke="var(--line)"/>'
+m1 += _tx(615, 47, "a RIDER asks for a CAR at a PLACE; a DRIVER has a STATUS and a LOCATION; a TRIP has a LIFE and a FARE; a RULE picks the car", "var(--text)", 12.5)
+for x, w, t, sub, acc in [(30, 170, "Rider", "an id and a name", 0), (228, 190, "Driver", "status + location, both move", 1),
+                          (446, 180, "Trip", "a life, and a fare", 1), (656, 170, "Location", "two numbers, frozen", 0),
+                          (856, 170, "Matching rule", "no state: an interface", 0), (1056, 150, "ETA", "a question, not state", 0)]:
+    m1 += _bx(x, 110, w, 46, t, sub, acc=bool(acc), dash=not acc) + _ar("M%s 64 V110" % (x + w/2))
+m1 += _tx(615, 190, "solid = it has state of its own, so it becomes a class.   dashed = no state: an id, a frozen value, an interface, or a question", "var(--muted)", 11)
+MV[1] = _mv(1230, 205, m1)
+
+# move 2: verbs -> the class that owns the state they touch
+m2 = _D
+for k, (verb, cls, meth) in enumerate([("say who is near this place", "DriverIndex  (owns the grid)", "index.nearby(pickup)"),
+                                       ("claim one car", "Driver  (owns his own status)", "driver.reserve()   // one CAS"),
+                                       ("run a ride's life", "Trip  (owns status + the table)", "trip.transitionTo(ARRIVED)"),
+                                       ("order the whole thing", "RideService  (owns the flow)", "svc.requestRide(rider, ...)")]):
+    y = 24 + k*56
+    m2 += _bx(30, y, 330, 44, verb, "the verb") + _ar("M360 %s H430" % (y+22), True)
+    m2 += _bx(430, y, 400, 44, cls, "the class whose state it touches", acc=True) + _ar("M830 %s H900" % (y+22), True)
+    m2 += _bx(900, y, 300, 44, meth, "the method")
+m2 += _tx(615, 255, "a verb whose state is spread over two classes goes to the class that sees both: that class becomes the orchestrator", "var(--muted)", 11)
+m2 += _tx(615, 274, "and notice what is NOT a verb on the service: \"set the driver's status\". Only the driver may do that, and only with a compare-and-set", "var(--muted)", 11)
+MV[2] = _mv(1230, 290, m2)
+
+# move 3: rules that change -> one-method interfaces handed in
+m3 = _D + _bx(30, 90, 220, 90, "RideService", "configure(four rules)", acc=True)
+for k, (t, sub, impl) in enumerate([("MatchingStrategy", "which car gets the ride", "NearestDriver / LongestIdle / EtaMatching"),
+                                    ("PricingStrategy", "what the ride costs", "NormalPricing, and Surge WRAPPING it"),
+                                    ("CancellationPolicy", "what calling it off costs", "StandardCancellation, or free always"),
+                                    ("TripObserver", "who hears that a trip moved", "PushNotifier, RatingBook, analytics")]):
+    y = 24 + k*56
+    m3 += _ar("M250 135 H330 V%s H400" % (y+22), True, True) + _bx(400, y, 300, 44, t, sub, dash=True)
+    m3 += _bx(760, y, 420, 44, impl, "the classes that can be handed in") + _ar("M760 %s H700" % (y+22))
+m3 += _tx(615, 262, "dashed lavender = handed in. The service never builds a rule, so a new way of matching is a new class and one changed line", "var(--muted)", 11)
+m3 += _tx(615, 281, "and one rule WRAPS another: SurgePricing(base) multiplies whatever the base charged, so coupons and tolls stack instead of becoming flags", "var(--acc)", 11)
+MV[3] = _mv(1230, 295, m3)
+
+# move 4: the gap, and one owner -- here one CELL, settled by a compare-and-set
+m4 = _D + _bx(30, 30, 190, 44, "Meera's phone", "reads Bilal: AVAILABLE") + _bx(30, 110, 190, 44, "Ravi's phone", "reads Bilal: AVAILABLE")
+m4 += _bx(350, 70, 190, 44, "Bilal.status", "AVAILABLE", acc=True)
+m4 += _ar("M220 52 H350 V70") + _ar("M220 132 H350 V114") + _tx(285, 40, "read", "var(--muted)", 10.5) + _tx(285, 160, "read", "var(--muted)", 10.5)
+m4 += '<rect x="580" y="20" width="290" height="140" rx="6" fill="none" stroke="%s" stroke-dasharray="4 3"/>' % RED
+m4 += _tx(725, 45, "the gap", RED, 12) + _tx(725, 70, "both read AVAILABLE, both write", RED, 11) + _tx(725, 90, "one car, two riders, two trips", RED, 11)
+m4 += _tx(725, 130, "fix: read and write as ONE step", "var(--text)", 11)
+m4 += _bx(900, 40, 300, 100, "AtomicReference&lt;DriverStatus&gt;", "compareAndSet(AVAILABLE, RESERVED)", acc=True)
+m4 += _tx(1050, 165, "one cell, one owner: the driver", "var(--muted)", 10.5)
+m4 += _tx(1050, 185, "no lock: one instruction decides", "var(--muted)", 10.5)
+m4 += _tx(615, 205, "the loser is not queued and does not fail: he drops that car and reaches for the next-nearest one, microseconds later", "var(--muted)", 11)
+MV[4] = _mv(1230, 220, m4)
+
+# move 5: each collection, its question, its O(1) shape
+m5 = _D
+for k, (q, shape, cost) in enumerate([("who is free near this pickup?", "Map&lt;cell, Set&lt;Driver&gt;&gt;, nine cells read", "O(9 + c)"),
+                                      ("where is driver D1 right now?", "a volatile Location field on the Driver", "O(1)"),
+                                      ("what is trip T7 doing?", "Map&lt;tripId, Trip&gt;", "O(1)"),
+                                      ("is this move of the trip legal?", "EnumMap&lt;TripStatus, EnumSet&lt;TripStatus&gt;&gt;", "O(1)"),
+                                      ("what does a GO cost per km?", "EnumMap&lt;VehicleType, long[3]&gt;", "O(1)")]):
+    y = 20 + k*50
+    m5 += _bx(30, y, 360, 40, q, "the question") + _ar("M390 %s H450" % (y+20), True)
+    m5 += _bx(450, y, 520, 40, shape, "the shape", acc=True) + _ar("M970 %s H1030" % (y+20), True) + _bx(1030, y, 170, 40, cost, "")
+m5 += _tx(615, 290, "nothing here scans the fleet and nothing recomputes a state from history: every question above is one hash lookup, or nine of them", "var(--muted)", 11)
+MV[5] = _mv(1230, 305, m5)
+
+# move 6: the state machine and the TWO critical orders
+m6 = _D
+st = [("REQUESTED", "no car yet"), ("ASSIGNED", "a car is held"), ("ARRIVED", "at the kerb"),
+      ("IN_PROGRESS", "the meter runs"), ("COMPLETED_UNPAID", "the ride is a fact"), ("COMPLETED", "the money moved")]
+for k, (t, sub) in enumerate(st):
+    x = 20 + k*200
+    m6 += _bx(x, 20, 175, 44, t, sub, acc=(k in (2, 4)))
+    if k < 5: m6 += _ar("M%s 42 H%s" % (x+175, x+200), True)
+for cx in (107, 307, 507):
+    m6 += rail("M%s 64 V95 H520" % cx)
+m6 += _ar("M520 95 V120", True) + _bx(420, 120, 200, 44, "CANCELLED", "only from the first three", acc=True)
+m6 += _tx(660, 148, "and never once the meter is running: you cannot un-drive a ride", "var(--muted)", 11, "start")
+m6 += _card(20, 190, 590, 130, "the order when a car is claimed",
+            ["1 ask the index: nine cells, no lock at all", "2 the rule picks one: it only proposes",
+             "3 CLAIM it: compareAndSet(AVAILABLE, RESERVED)", "4 only now make the trip and tell the phones",
+             "nothing is written until the claim succeeds"], acc=True)
+m6 += _card(620, 190, 590, 130, "the order when the ride ends -- the other way round",
+            ["1 price it: pure, and it may throw", "2 record COMPLETED_UNPAID: the ride happened",
+             "3 free the car BEFORE the money is touched", "4 charge the card, outside every lock",
+             "a decline leaves the trip unpaid and retryable"], acc=True)
+m6 += _tx(615, 340, "two critical steps, two shapes: claim before you write when the thing can be undone, commit before you charge when it cannot", "var(--muted)", 11)
+MV[6] = _mv(1230, 355, m6)
+
+# move 7: what is actually serialised, and four hundred riders at the same instant
+m7 = _D + _card(30, 20, 540, 150, "the contended part: one CPU instruction",
+                ["compareAndSet on one driver's status: ~20 ns", "no lock is taken and no thread ever blocks",
+                 "the per-trip monitor: a table lookup and", "three field writes, about 0.3 microseconds",
+                 "contended by one rider and one driver"], acc=True)
+m7 += _ar("M570 95 H640", True) + _tx(605, 85, "no lock", "var(--acc)", 10.5)
+m7 += _card(640, 20, 560, 150, "everything else runs fully in parallel",
+            ["the nine-cell read: about 40 cars, ~2 us", "the min-scan for the nearest: 40 distances",
+             "the card payment: about 500 ms, no lock held", "the push notifications: ~50 ms, afterwards",
+             "the person choosing a destination: seconds"])
+m7 += _tx(615, 200, "four hundred riders tap in the same second", "var(--text)", 12)
+for k in range(10):
+    x = 30 + k*118
+    m7 += _bx(x, 215, 106, 40, "rider %d" % (k+1), "0 retries" if k < 9 else "1 retry, 2 us", acc=(k == 9))
+m7 += _tx(615, 283, "nobody queues. The one rider who reached for a car another rider had already won is the only one who does extra work,", "var(--muted)", 11)
+m7 += _tx(615, 301, "and that work is one failed instruction and then the second-nearest car, about two microseconds later", "var(--muted)", 11)
+MV[7] = _mv(1230, 315, m7)
+
+# move 8: the arithmetic, then the ladder
+m8 = _D + '<rect x="20" y="20" width="560" height="185" rx="6" fill="var(--bg3)" stroke="var(--line)"/>' + _tx(300, 42, "one compare-and-set per ride: is it a bottleneck?", "var(--text)", 12)
+for k, l in enumerate(["60,000 cars online, 400 ride requests a second at peak",
+                       "one request: 9 cell lookups + ~40 distances, about 2 us",
+                       "400 x 2 us = 800 us of CPU a second: 0.08% of one core",
+                       "pings: 15,000 a second, but only ~500 cross a cell",
+                       "the contended cell is one driver's status, for ~20 ns"]):
+    m8 += _tx(35, 66 + k*24, l, "var(--muted)", 11, "start")
+m8 += _tx(890, 42, "the upgrade ladder, in the order you would climb it", "var(--text)", 12)
+for k, (t, sub) in enumerate([("1 keep the card and the push outside everything", "already done: the money runs with no lock held"),
+                              ("2 finer cells where the city is dense", "a quadtree or a geohash: the index is an interface"),
+                              ("3 shard by zone, across processes", "UPDATE driver SET status='RESERVED' WHERE status='AVAILABLE'")]):
+    m8 += _bx(600, 58 + k*50, 600, 42, t, sub, acc=(k == 0))
+MV[8] = _mv(1230, 220, m8)
+
+# move 9: what can go wrong, and the test for each
+m9 = _D
+for k, (bad, fix) in enumerate([("two riders, one car", "compare-and-set; test 1: 200 riders, 40 cars, exactly 40 trips"),
+                                ("end a trip that never started", "one legal-edge table; test 3: it throws and writes nothing"),
+                                ("the card declines after the ride", "COMPLETED_UNPAID + retry; test 6: the money moves once"),
+                                ("a cancelled ride strands the car", "every exit frees the driver; test 4: AVAILABLE again"),
+                                ("the push gateway is down", "publish after the move, in a try/catch; test 7: it throws"),
+                                ("the driver drives off, or logs off", "the ping rewrites the grid; test 8: found in the new cell only")]):
+    y = 18 + k*42
+    m9 += _bx(30, y, 300, 38, bad, "") + _ar("M330 %s H380" % (y+19), True) + _bx(380, y, 820, 38, fix, "", acc=True)
+m9 += _tx(615, 292, "every claim this design makes has a failure test: FailureTests.java runs eight blocks and must print ALL PASS", "var(--muted)", 11)
+MV[9] = _mv(1230, 305, m9)
+
+# move 10: the patterns, named after the fact
+cols10 = [("pattern", 12), ("born in", 210), ("the line in the code", 300), ("what it buys", 840)]
+rows10 = [[("Strategy", "var(--text)"), ("move 3", None), ("MatchingStrategy, PricingStrategy, CancellationPolicy: one method each", None), ("a new rule is a new class, not an edit", None)],
+          [("Decorator", "var(--text)"), ("move 3", None), ("new SurgePricing(base, surge)  --  and a coupon wraps that", None), ("surge, coupons and tolls stack, not flags", None)],
+          [("Observer", "var(--text)"), ("move 4", None), ("publish(trip, from, to) after the move, inside a try/catch", None), ("the phones hear; the ride never waits", None)],
+          [("State (as a table)", "var(--text)"), ("move 6", None), ("EnumMap&lt;TripStatus, EnumSet&gt;, checked before any write", None), ("an illegal move cannot happen", None)],
+          [("Facade", "var(--text)"), ("move 2", None), ("RideService: request, arrive, start, end, cancel, and nothing else", None), ("the order of operations lives in one place", None)],
+          [("Singleton", "var(--muted)"), ("not here", None), ("the service is handed to its callers; nothing calls getInstance()", "var(--muted)"), ("a test builds a fresh RideService", "var(--muted)")],
+          [("Factory", "var(--muted)"), ("not yet", None), ("VehicleType is an enum and the rate table is already the registry", "var(--muted)"), ("it earns the name when tiers come from config", "var(--muted)")],
+          [("Builder", "var(--muted)"), ("never", None), ("a Trip has six required fields and not one optional one", "var(--muted)"), ("a pattern without a move is decoration", "var(--muted)")]]
+m10 = _D + _table(20, 20, cols10, rows10, rowh=30, widths=1190)
+m10 += _tx(615, 305, "name a pattern only after the move that produced it; then every name has a one-sentence defence", "var(--muted)", 11)
+MV[10] = _mv(1230, 320, m10)
+
+# move 11: SOLID as a check on the moves
+cols11 = [("", 12), ("the rule, in plain words", 50), ("from", 440), ("the line that shows it", 560)]
+rows11 = [[("S", "var(--acc)"), ("one reason to change per class", None), ("move 2", None), ("Index: where cars are. Trip: the life. Service: the order. A rule: one rule.", None)],
+          [("O", "var(--acc)"), ("new behaviour is a new class, not an edited one", None), ("move 3", None), ("LongestIdleMatching is a new file plus one line at the call site", None)],
+          [("L", "var(--acc)"), ("any implementation drops in; nobody checks which", None), ("move 3", None), ("SurgePricing IS a PricingStrategy and HOLDS one, so it slots in anywhere", None)],
+          [("I", "var(--acc)"), ("small interfaces: one method each", None), ("move 3", None), ("MatchingStrategy, PricingStrategy, CancellationPolicy, TripObserver, Clock", None)],
+          [("D", "var(--acc)"), ("depend on interfaces; implementations are handed in", None), ("moves 3, 6", None), ("svc.configure(matching, pricing, cancellation, payments);  svc.setClock(...)", None)]]
+m11 = _D + _table(20, 20, cols11, rows11, rowh=34, widths=1190)
+m11 += _tx(615, 250, "SOLID is not a list to recite; it is the check that the moves did their job, one line each", "var(--muted)", 11)
+MV[11] = _mv(1230, 265, m11)
+
+# move 12: every twist is one of five moves
+m12 = _D
+for k, (t, sub, fix, sub2, mv) in enumerate([
+        ("a new rule", "shortest ETA, batched dispatch", "a new class behind MatchingStrategy plus one line", "", "move 3"),
+        ("someone new wants to know", "ratings, analytics, receipts", "one more observer; the trip and the CAS do not change", "", "move 4"),
+        ("a new step in a life", "the driver declines, a no-show", "one more edge in the table, and the claim becomes a lease", "", "move 6"),
+        ("a new invariant across things", "one car, several riders: pool", "the same claim, then a fare divided so the shares sum to it", "", "moves 4 + 6"),
+        ("state that must outlive it", "persist it; two servers", "the compare-and-set becomes a conditional UPDATE:", "UPDATE driver SET status='RESERVED' WHERE id=? AND status='AVAILABLE'", "moves 5 + 12")]):
+    y = 24 + k*54
+    m12 += _bx(30, y, 330, 44, t, sub) + _ar("M360 %s H420" % (y+22), True) + _bx(420, y, 660, 44, fix, sub2, acc=True) + _tx(1150, y+27, mv, "var(--muted)", 11)
+m12 += _tx(615, 312, "for all five the service, the trip machine and the tests do not change; that is the test that the derivation was right", "var(--muted)", 11)
+MV[12] = _mv(1230, 325, m12)
+
+MOVES = [
+("Move 1: underline the nouns. Every noun with its own state becomes a class.",
+ "Reading the paragraph again: a <b>rider</b> asks for a <b>car</b> at a <b>place</b>; a <b>driver</b> has a "
+ "<b>status</b> and a <b>location</b>; a <b>trip</b> has a <b>life</b> and a <b>fare</b>; a <b>rule</b> picks the "
+ "car. A driver has two fields that move on their own &mdash; where he is, and whether he is free &mdash; so he is a "
+ "class, and the most interesting one here. A trip has a status, a fare and a set of timestamps: a class. A rider "
+ "has an id and a name and nothing that moves, so it is a record and only the id ever reaches a payment. A location "
+ "is two numbers that never change once taken: a record with one method on it, the distance to another location. A "
+ "matching rule has no state at all &mdash; it is a decision &mdash; so it is an interface. And an ETA is not a "
+ "field to keep up to date: it is a question you answer when somebody asks, from a location that is already there.", 1),
+("Move 2: for every verb, ask which class holds the state it touches. That class gets the method.",
+ "\"Say who is near this place\" touches the grid of cars, so it belongs to the thing that owns the grid: "
+ "<code>index.nearby(pickup)</code>. \"Claim one car\" touches exactly one field on exactly one driver, so it belongs "
+ "to the driver: <code>driver.reserve()</code>. \"Run a ride's life\" touches the trip's status and the table of "
+ "legal moves, so it belongs to the trip: <code>trip.transitionTo(ARRIVED)</code>. \"Order the whole thing\" touches "
+ "all three at once, and only one class sees all three, so <code>RideService</code> is the orchestrator. Notice what "
+ "is deliberately <i>not</i> a method on the service: setting a driver's status. If the service could write that "
+ "field, two service calls could write it in the same microsecond and both think they won. Only the driver may "
+ "change his own status, and only through a compare-and-set.", 2),
+("Move 3: every rule the interviewer can change mid-round goes behind an interface and is handed in.",
+ "Which car to send will change: nearest today, shortest ETA when routing arrives, longest-idle when the ops team "
+ "complains about starvation, a batch solver when somebody reads a paper. What to charge will change every week. "
+ "What a cancellation costs will change the first time a city regulator calls. Who gets told will grow: the rider's "
+ "phone, the driver's app, ratings, analytics. Each becomes a one-method interface the service is <i>given</i> in "
+ "<code>configure()</code> and never builds. This is where the patterns come from, not the other way round: a "
+ "swappable rule behind an interface is <b>Strategy</b>; a rule that wraps another rule and adds to it is "
+ "<b>Decorator</b> &mdash; and here it is the one that matters, because <code>SurgePricing</code> holds a "
+ "<code>PricingStrategy</code> and multiplies whatever it charged, so a coupon wraps the surge and a toll wraps the "
+ "coupon, and nobody ever adds a fifth flag to one fare method. A service that announces \"a trip moved\" without "
+ "knowing what a phone is, is <b>Observer</b>. The spatial index is in the same family but is not a rule: it is a "
+ "collaborator behind an interface, so a grid today and a quadtree next year is one line at the call site.", 3),
+("Move 4: state that many callers change at the same time gets one owner and one atomic step.",
+ "Two riders tap at the same instant and the index hands both of them the same nearest car. Both read his status as "
+ "AVAILABLE, both decide he is theirs, and both write: one car, two riders, two trips, and a very angry driver. So "
+ "reading the status and writing it must be a single step. The usual answer is a lock, and here the usual answer is "
+ "wrong in an interesting way: the shared thing is not a big structure, it is <i>one field on one driver</i>. So the "
+ "field becomes an <code>AtomicReference</code> and the claim becomes "
+ "<code>compareAndSet(AVAILABLE, RESERVED)</code> &mdash; one hardware instruction, about twenty nanoseconds, and "
+ "exactly one thread gets <code>true</code>. A global matching lock would have serialised every rider in the city to "
+ "protect a collision that happens to two of them; this serialises only the two who actually collided. And the loser "
+ "is not punished: he gets <code>false</code>, drops that car from his own list, and takes the next-nearest one. "
+ "Anything that only listens &mdash; the push notification, the rating prompt &mdash; is called after the state has "
+ "already moved, never before.", 4),
+("Move 5: for each collection, ask what question is asked of it, and pick the shape that answers in O(1).",
+ "\"Who is free near this pickup?\" is the one that decides the design. Sixty thousand cars in a list is a scan, so "
+ "location gets an index: round the latitude and longitude to a cell about a kilometre across and keep a set of cars "
+ "per cell. A read is the pickup's cell plus its eight neighbours &mdash; nine bucket lookups, whatever the fleet "
+ "size. \"Where is driver D1?\" is a volatile field on the driver, written by the ping path and read by matching, "
+ "with no lock in either direction. \"What is trip T7 doing?\" is a map from id to trip. \"Is this move legal?\" is "
+ "an <code>EnumMap</code> from status to the set of statuses it may go to, which is the whole lifecycle in six lines. "
+ "\"What does a GO cost per kilometre?\" is an <code>EnumMap</code> from tier to a rate triple, instead of an "
+ "if-chain that grows a branch per tier. The one subtlety: the index is only rewritten when a car actually crosses a "
+ "cell boundary, which at city speed is about once every two minutes, so the fifteen thousand pings a second cost "
+ "one volatile write each and almost nothing else.", 5),
+("Move 6: anything with a life cycle is a state machine, and the ORDER of operations is part of the design.",
+ "A trip is REQUESTED, then ASSIGNED, then ARRIVED, then IN_PROGRESS, then COMPLETED_UNPAID, then COMPLETED; "
+ "CANCELLED is reachable from the first three and never after the meter starts, because you cannot un-drive a ride. "
+ "Every legal move is one row in one table and <code>transitionTo</code> is the only writer, and it checks the table "
+ "<i>before</i> it touches a field, so ending a ride that never started throws and leaves the trip exactly as it "
+ "was. Writing the states down forces the two order questions, and they have opposite answers. Claiming a car: ask "
+ "the index, let the rule pick, and <i>claim</i> before anything is written, because a claim that fails must leave no "
+ "trace. Ending a ride: the ride is already a fact, so record it first, free the car second, and only then call the "
+ "card &mdash; outside every lock, with the trip id as the idempotency key. A declined card leaves the trip at "
+ "COMPLETED_UNPAID with the driver already back in the pool, and <code>retryPayment</code> finishes it later. That "
+ "state is not a fudge: it is the honest name for \"the ride happened and the money has not\".", 6),
+("Move 7: yes, two riders reaching for one car are serialised. Ask for how long, and what else is.",
+ "The question you will be asked, and should ask yourself: have you now made dispatch one-at-a-time? No, and this is "
+ "the part worth being precise about. There is no lock anywhere in the matching path. The nine-cell read, the "
+ "distance scan over about forty cars, the choice, the trip object, the notifications &mdash; all of it runs fully in "
+ "parallel across every rider in the city. The only mutual exclusion is one compare-and-set on one driver's status, "
+ "about twenty nanoseconds, and it only ever involves the two riders who reached for the same car. The one lock in "
+ "the system is the per-trip monitor on <code>transitionTo</code>, held for a table lookup and three field writes, "
+ "about a third of a microsecond, and contended by exactly two people: that trip's rider and that trip's driver. "
+ "Everything slow is outside all of it: the card payment at around five hundred milliseconds, the push notification "
+ "at fifty. So when four hundred riders tap in the same second, none of them waits for another, and the one who "
+ "was a microsecond late pays for it with a failed instruction and a second-nearest car.", 7),
+("Move 8: say the arithmetic, then name the ladder.",
+ "Sixty thousand cars online and four hundred ride requests a second at peak. A request is nine cell lookups and "
+ "about forty haversine calculations: roughly two microseconds of CPU. Four hundred of those is eight hundred "
+ "microseconds a second, which is eight hundredths of one per cent of a single core. The write path is the bigger "
+ "number and the cheaper one: sixty thousand cars pinging every four seconds is fifteen thousand pings a second, but "
+ "a car at city speed crosses a one-kilometre cell about every two minutes, so only about five hundred of those "
+ "fifteen thousand touch the grid at all. Then the ladder, in the order you would climb it: keep the payment and the "
+ "notification outside everything, which this code already does; when one downtown cell holds four thousand cars, go "
+ "finer there &mdash; a quadtree, a geohash prefix or S2 cells &mdash; which is a new class because the index is an "
+ "interface; and beyond one process, shard by zone and let the driver's status become a database row, where the "
+ "claim is <code>UPDATE driver SET status='RESERVED' WHERE id=? AND status='AVAILABLE'</code> and \"one row updated\" "
+ "means you won. That conditional UPDATE is the same compare-and-set, done by the database.", 8),
+("Move 9: list what can go wrong, and write the test for each before the interview is over.",
+ "Two riders reaching for one car (exactly one trip, and the loser gets another car). An out-of-order call, such as "
+ "ending a ride that never started (it throws, and the trip is untouched afterwards). The card declining after the "
+ "ride is over (the trip is recorded, the driver is free, and the retry moves the money exactly once). A cancelled "
+ "ride that forgets to give the car back (every exit path releases the driver, or the fleet quietly drains over a "
+ "day). The push gateway down (publish after the state has moved, inside a try/catch). A driver who drives across "
+ "the city or logs off (the ping rewrites the grid on a cell crossing, and going offline removes him entirely, so a "
+ "rider at the old place is told there is no car rather than being sent one). Each of these is a few lines in "
+ "FailureTests.java; a design that cannot show its tests is a claim.", 9),
+("Move 10: now, and only now, name the patterns. Each one is the result of a move.",
+ "Every pattern on this page came out of a move, which is why each can be defended in one sentence. Strategy is move "
+ "3: who to send, what to charge and what a cancellation costs are rules that will change, so each sits behind a "
+ "one-method interface the service is handed. Decorator is the same move's wrapper: <code>SurgePricing</code> is a "
+ "<code>PricingStrategy</code> that holds a <code>PricingStrategy</code>, so surge, a coupon and a toll are three "
+ "independent wrappers instead of three flags inside one method. Observer is move 4's rule that a phone must never be "
+ "in front of the state change. State is move 6, but as a <i>table</i> rather than a class per state: the whole "
+ "lifecycle is six lines you can read at once, and a class per state would buy nothing here because a trip's states "
+ "carry no behaviour of their own &mdash; when they do, that is when you split them. Facade is move 2: the service "
+ "is the one door, and the order of operations lives behind it. Singleton earned nothing: the service is handed to "
+ "its callers, so a test builds a fresh one. Factory is \"not yet\" &mdash; the tier is an enum and the rate table is "
+ "already the registry, and it earns the name the day tiers arrive as strings from configuration. Builder is never, "
+ "on this problem: a trip has six required fields and no optional ones. A pattern without a move behind it is "
+ "decoration.", 10),
+("Move 11: run SOLID as a check on the moves, one line each.",
+ "SOLID is not a list to recite; it is the check that the moves did their job. S: one reason to change per class, "
+ "which move 2 gave you &mdash; the index changes when the spatial shape changes, the trip when the lifecycle "
+ "changes, a rule when that rule changes, and the service only when the order of operations changes. O: new "
+ "behaviour is a new class and one changed line, never an opened one (<code>LongestIdleMatching</code> is a new "
+ "file). L: any implementation drops in and nothing asks which one it got &mdash; and the sharpest case is "
+ "<code>SurgePricing</code>, which is a pricing rule <i>and</i> holds one, so it can wrap the base, or a coupon, or "
+ "another surge. I: five interfaces with one method each, so a fake for a test is a lambda &mdash; the failure tests "
+ "hand in a payment processor that is three lines long. D: the service depends on interfaces and is handed the "
+ "implementations, which is exactly why a test can give it a card that always declines and a clock that says the "
+ "ride took twenty-four minutes.", 11),
+("Move 12: every twist the interviewer adds is one of five moves. Say which before you type.",
+ "A new rule (shortest ETA, longest-idle, batched dispatch over a five-second window) is a new class behind "
+ "<code>MatchingStrategy</code> plus one line at the composition root. Someone new who wants to know (ratings, "
+ "analytics, receipts, a fraud check) is one more observer; the trip machine and the compare-and-set do not change. "
+ "A new step in a life (the driver declines, the rider never shows up) is one more edge in the table plus turning "
+ "the claim into a lease with a deadline: hold the car for fifteen seconds, release it if nobody taps accept, and "
+ "offer it to the next candidate. A new invariant across things (a pooled ride: one car, three riders) is the same "
+ "claim followed by a fare divided so the shares add up to the fare to the paise. State that must outlive the "
+ "process (persist it; two servers) is the trip behind a repository and the claim as "
+ "<code>UPDATE driver SET status='RESERVED' WHERE id=? AND status='AVAILABLE'</code>, which is the database doing "
+ "the identical atomic step. For all five the service, the trip machine and the tests do not change; that is the "
+ "test that the derivation was right. Page 05 has the code for each.", 12),
+]
+DERIVATION_LEAD = ("Run these on any LLD (parking lot, elevator, BookMyShow) and the class diagram, the concurrency, the "
+ "tests, the patterns, SOLID and the answer to every twist fall out in that order; nothing is chosen up front, and nothing "
+ "is named before the move that produced it. On this problem move 4 is the one that pays: the shared thing is a single "
+ "field on a single driver, so the honest answer is a compare-and-set and not a lock, and the whole of dispatch stays parallel.")
+
+# ============================================================ page 03: the class diagram
+uml_reset()
+# column 1: the things handed in from the outside, and the plain values
+put("obs",   10,  20, 230, "TripObserver", [], ["onTrip(trip, from, to)"], "interface")
+put("push",  10,  90, 230, "PushNotifier", [], ["onTrip(...) &rarr; a phone"])
+put("clock", 10, 160, 230, "Clock", [], ["nowMs(): long"], "interface")
+put("pay",   10, 230, 230, "PaymentProcessor", [], ["charge(rider, paise, key)", "  : String,  or declines"], "interface")
+put("card",  10, 316, 230, "CardPayment", ["byKey: Map&lt;key, ref&gt;"], ["charge(...): idempotent"])
+put("rider", 10, 406, 230, "Rider", ["id: String", "name: String"], [])
+put("money", 10, 488, 230, "Money", [], ["rupees(\"172.00\"): long", "fmt(paise): String"])
+# column 2: the aggregate root and the two classes that own the state that moves
+put("svc", 300, 20, 330, "RideService",
+    ["index: DriverIndex", "riders / drivers / trips: Map", "matching: MatchingStrategy",
+     "pricing: PricingStrategy", "cancellation: CancellationPolicy", "payments: PaymentProcessor",
+     "clock: Clock,  observers", "seq: AtomicLong"],
+    ["configure(m, p, c, pay)", "goOnline(d, at) / goOffline(id)", "ping(driverId, where)",
+     "requestRide(rider, src, dst, type)", "driverArrived(id) / startTrip(id)", "endTrip(id, km) / retryPayment(id)",
+     "cancelTrip(id)", "trip(id) / driver(id) / rider(id)"])
+put("trip", 300, 350, 330, "Trip",
+    ["LEGAL: EnumMap&lt;status, Set&gt;", "id / rider / driver", "pickup / drop: Location",
+     "status: volatile TripStatus", "distanceKm / minutes", "farePaise / feePaise: long", "paymentRef: String"],
+    ["transitionTo(to)  &larr; the guard", "assigned / arrived / started", "ended(km, mins, fare, at)",
+     "paid(ref) / cancelled(fee)"])
+put("driver", 300, 590, 330, "Driver",
+    ["id / name / vehicle", "location: volatile Location", "status: AtomicReference&lt;...&gt;"],
+    ["reserve(): CAS AVAILABLE&rarr;RESERVED", "board() / release()", "goOnline() / goOffline()", "moveTo(where)"])
+# column 3: the enums, the frozen values, and the index
+put("vtype",   700,  20, 230, "VehicleType", ["AUTO, GO, PREMIER, XL"], [], "enum")
+put("dstatus", 700,  86, 230, "DriverStatus", ["OFFLINE, AVAILABLE,", "RESERVED, ON_TRIP"], [], "enum")
+put("tstatus", 700, 168, 230, "TripStatus", ["REQUESTED, ASSIGNED,", "ARRIVED, IN_PROGRESS,", "COMPLETED_UNPAID,", "COMPLETED, CANCELLED"], [], "enum")
+put("loc",     700, 282, 230, "Location", ["lat, lng: double"], ["distanceKm(o): double"])
+put("veh",     700, 372, 230, "Vehicle", ["plate: String", "type: VehicleType"], [])
+put("basis",   700, 454, 230, "FareBasis", ["type, distanceKm,", "minutes, pickup, atMs"], [])
+put("index",   700, 536, 230, "DriverIndex", [], ["update(d, where)", "remove(d)", "nearby(pickup): List"], "interface")
+put("grid",    700, 638, 230, "GridIndex", ["cells: Map&lt;cell, Set&gt;"], ["nine buckets, never a scan"])
+# column 4: the rules that are handed in
+put("match",   960,  20, 250, "MatchingStrategy", [], ["select(pickup, type,", "  candidates): Driver?"], "interface")
+put("nearest", 960, 106, 250, "NearestDriver", [], ["the closest AVAILABLE", "car of the right tier"])
+put("price",   960, 192, 250, "PricingStrategy", [], ["price(FareBasis): long"], "interface")
+put("normal",  960, 262, 250, "NormalPricing", ["RATE: EnumMap by tier"], ["base + perKm + perMin"])
+put("surge",   960, 352, 250, "SurgePricing", ["base: PricingStrategy", "surge: SurgeSource"], ["price = base x bp / 10000"])
+put("cancel",  960, 470, 250, "CancellationPolicy", [], ["feePaise(status, waited)"], "interface")
+put("std",     960, 540, 250, "StandardCancellation", [], ["free for 2 min, then 30"])
+put("ssrc",    960, 610, 250, "SurgeSource", [], ["basisPoints(basis): int"], "interface")
+
+EDGES = [
+ # implementations
+ ln(B["push"]["t"], B["obs"]["b"], "inherit"),
+ ln(B["card"]["t"], B["pay"]["b"], "inherit"),
+ ln(B["nearest"]["t"], B["match"]["b"], "inherit"),
+ ln(B["normal"]["t"], B["price"]["b"], "inherit"),
+ ln(B["std"]["t"], B["cancel"]["b"], "inherit"),
+ ln(B["grid"]["t"], B["index"]["b"], "inherit"),
+ # surge IS a pricing rule and HOLDS one: the two edges that make the decorator readable
+ ln((960, 380), (960, 210), "inherit", "", [(944, 380), (944, 210)]),
+ ln((960, 410), (960, 228), "assoc", "", [(930, 410), (930, 228)]),
+ _tx(1085, 456, "IS a pricing rule and HOLDS one", "var(--acc)", 10.5),
+ ln(B["ssrc"]["r"], B["surge"]["r"], "inject", "", [(1226, 637), (1226, 397)]),
+ # the service owns the trips, the drivers and the index
+ ln(B["svc"]["b"], B["trip"]["t"], "compose", "every trip"),
+ ln((300, 200), (300, 667), "compose", "", [(284, 200), (284, 667)]),
+ ln(B["trip"]["b"], B["driver"]["t"], "assoc", "rides with"),
+ ln((630, 250), (700, 579), "compose", "owns", [(694, 250), (694, 579)]),
+ # the trip and the driver point at their enums and their frozen values
+ ln((630, 380), (700, 217), "assoc", "", [(652, 380), (652, 217)]),
+ ln((630, 420), (700, 319), "assoc", "", [(664, 420), (664, 319)]),
+ ln((630, 620), (700, 119), "assoc", "", [(680, 620), (680, 119)]),
+ ln((630, 650), (700, 405), "assoc", "", [(672, 650), (672, 405)]),
+ # the rules, handed in through configure()
+ ln((630, 60), (960, 55), "inject", "", [(944, 60), (944, 55)]),
+ ln((630, 95), (960, 219), "inject", "", [(950, 95), (950, 219)]),
+ ln((630, 130), (960, 497), "inject", "", [(956, 130), (956, 497)]),
+ _tx(945, 12, "the rules, handed in", "var(--acc)", 10.5),
+ # the gateway, the clock, the listeners and the values
+ ln(B["pay"]["r"], (300, 150), "inject", "", [(270, 265), (270, 150)]),
+ ln(B["clock"]["r"], (300, 175), "inject", "", [(262, 187), (262, 175)]),
+ ln((300, 80), (240, 47), "notify", "", [(254, 80), (254, 47)]),
+ ln((300, 430), (240, 439), "assoc", "", [(266, 430), (266, 439)]),
+ ln((300, 520), (240, 523), "assoc", "", [(252, 520), (252, 523)]),
+]
+UMLSVG = uml_svg(1230, 790, EDGES, legend_y=765)
+
+HOW_TO_READ = ('<b>How to read a box.</b> Top: the class name (dashed border = interface; &laquo;enum&raquo; = a fixed '
+ 'list of values). Middle: its fields, the state it holds. Bottom: its methods. <b>The arrows.</b> Hollow triangle = '
+ 'implements. Filled diamond = owns: the service owns every trip, every driver and the index. Plain arrow = references: '
+ 'a trip points at its status, its two locations and the driver it is riding with. Dashed lavender = handed in through '
+ '<code>configure()</code> or <code>setClock()</code>. Dotted blue = notifies. <b>Where state lives:</b> the driver has '
+ 'the two fields that move on their own &mdash; a volatile location written by the ping path and an '
+ '<code>AtomicReference</code> status that is the one contended cell in the system; the trip has its own status plus the '
+ 'table of legal moves, and is the only class allowed to write it; the index has the grid and nothing else; the service '
+ 'has the maps, the handed-in rules and the order of operations, and deliberately no lock. Notice what is <i>not</i> '
+ 'here: no Dispatcher class, because dispatch is four lines inside <code>requestRide</code>; no state classes, because '
+ 'a trip\'s states carry no behaviour; and no ETA field anywhere, because an ETA is a question, not a thing to keep up '
+ 'to date.')
+
+# ============================================================ page 04: the code
+CODE_INTRO = ('Read it with page 03 open in a second tab if you want the diagram beside it. The green comment above each '
+ 'class and method says what it does; read only those first for the shape, then the bodies for the mechanics. Each copy '
+ 'button copies that whole file for your IDE. Below Main.java: Extensions.java (every follow-up\'s reference code, with '
+ 'an <code>ExtDemo</code> main that runs all of it) and FailureTests.java (eight blocks of claims proven; '
+ '<code>javac Main.java Extensions.java FailureTests.java &amp;&amp; java FailureTests</code> prints ALL PASS).')
+
+# ============================================================ page 05: follow-ups and practice
+IMPLEMENT_CARD = ('<div class="card"><div class="ch"><h3>0 &middot; Implement the system</h3>'
+ '<button class="timer" data-min="60">start 60:00</button></div><div class="cb"><div class="prompt">' + PROMPT + '</div>'
+ 'Before typing, write your six to eight clarifying questions (fleet size and straight-line-versus-routed distance '
+ 'first); then type in the order of Main.java: the three enums, the Money helpers, the Clock, the Location record with '
+ 'haversine, Rider and Vehicle, then Driver with its AtomicReference and <code>reserve()</code>, then DriverIndex and the '
+ 'GridIndex, then the matching and pricing interfaces with one implementation each plus the surge wrapper, then the '
+ 'cancellation rule, the payment gateway and the observer, then Trip with its legal-edge table, then RideService with '
+ 'the two orders (claim-then-write, and commit-then-charge), then a main with the race.</div></div>')
+
+FU = [
+("Two riders tap for the same car in the same millisecond. Prove that only one of them gets it.", "non-functional", 10,
+ "The race lives between reading a driver's status and writing it back. There is no lock: the status is an "
+ "<code>AtomicReference</code> and the claim is <code>compareAndSet(AVAILABLE, RESERVED)</code>, so exactly one thread "
+ "can get <code>true</code> for a given car, whatever the hardware does with the others. The proof is a count, not a "
+ "log: fifty threads wait on one latch and all fifty request a ride against a fleet of one car, and the test asserts "
+ "that exactly one trip exists. Then the same test runs with two hundred riders and forty cars and asserts forty trips "
+ "and forty <i>distinct</i> drivers, which is the property that actually matters: no car was handed to two people, and "
+ "no car was left idle while somebody was refused.",
+ T("        // 1. the race", "        // 2. matching:")),
+("The airport is busy: charge 1.8x there between six and nine. Do it without opening the fare formula.", "twist", 8,
+ "Surge is not a flag inside <code>NormalPricing</code>; it is a second pricing rule that holds the first one and "
+ "multiplies whatever it charged. So a time-and-place surge is a <code>SurgeSource</code> &mdash; one method that "
+ "returns basis points, reading the pickup and the timestamp it was handed &mdash; and the fare rule itself is not "
+ "touched. The multiplier is integer basis points, not a double, so 1.8x is 18000 and the arithmetic stays exact. "
+ "Because the wrapper is itself a <code>PricingStrategy</code>, a coupon wraps the surge and a toll wraps the coupon, "
+ "and the order of the stack is visible at the call site instead of hidden in an if-chain. The zone version in "
+ "Extensions.java computes the multiplier from the demand and supply the index already knows about.",
+ sect(src, "class SurgePricing", "// \"do we charge for a cancellation") + "\n" + X("real surge", "pooling")),
+("You used a compare-and-set rather than a lock. Does dispatch actually run in parallel, or have you fooled yourself?", "non-functional", 5,
+ "It runs in parallel, and the arithmetic says why. Nothing in the matching path takes a lock: the nine-cell read, the "
+ "distance scan over about forty cars, the choice and the trip object all run concurrently for every rider in the city. "
+ "The only mutual exclusion is one compare-and-set on one driver's status, about twenty nanoseconds, and it involves "
+ "only the two riders who reached for the same car. A global matching lock would have serialised four hundred requests "
+ "a second to protect a collision between two of them. The one real lock is the per-trip monitor on "
+ "<code>transitionTo</code>, held for a table lookup and three field writes, contended by exactly that trip's rider and "
+ "that trip's driver. The ladder from here: the payment and the push are already outside everything; a dense downtown "
+ "cell wants a finer index; and beyond one process the status becomes a row and the claim becomes a conditional "
+ "UPDATE.",
+ sect(src, "Optional<Trip> requestRide", "/** The car is at the kerb")),
+("The card declines after the ride is over. What is the state of the system?", "functional", 10,
+ "Recorded, consistent, and retryable. A ride cannot be un-driven, so the order at the end is the opposite of the order "
+ "at the start: price it (pure, and it may throw), record that the ride ended, put the car back in the pool, and only "
+ "then call the gateway &mdash; outside every lock, with the trip id as the idempotency key. A decline leaves the trip "
+ "at COMPLETED_UNPAID with its distance and fare already stored and the driver already AVAILABLE, because a card "
+ "problem must never strand a driver. <code>retryPayment</code> finishes it later and the state machine refuses a "
+ "second attempt on an already-paid trip. The failure test proves the money moved exactly once even when the retry is "
+ "called twice, which is the gateway's key doing its job rather than the state machine's.",
+ sect(src, "Trip endTrip(", "Trip cancelTrip(")),
+("Two hundred thousand drivers are online, and four thousand of them are in one downtown cell.", "non-functional", 8,
+ "The first half is already answered: location lives in a grid, so \"who is near here\" is nine bucket lookups and "
+ "never a scan, and a ping is a volatile field write that only touches the grid when the car crosses a cell boundary "
+ "&mdash; about once every two minutes at city speed, so fifteen thousand pings a second produce about five hundred "
+ "index writes. The second half is the known weakness of a uniform grid, density skew, and the fix is resolution "
+ "rather than a different idea: smaller cells and a wider ring where the city is dense. Because <code>DriverIndex</code> "
+ "is an interface, that is a new class and one line at the composition root; a production system uses a quadtree, a "
+ "geohash prefix or S2 cells, which is the same trick with the resolution chosen per region.",
+ sect(src, "class GridIndex", "// \"which driver?\" is a business rule") + "\n" + X("a denser city", "persistence")),
+("The driver ignores the request for fifteen seconds. Now what?", "twist", 10,
+ "The claim becomes a lease. Today <code>reserve()</code> holds a car forever; with an acceptance window the car is "
+ "held while his phone rings, and if he declines or says nothing the hold is released and the ride is offered to the "
+ "next-nearest car. The loop is the one already inside <code>requestRide</code> with two extra lines &mdash; a "
+ "deadline, and a <code>release()</code> on the way out &mdash; and the driver who was just offered it is dropped from "
+ "the candidate list so he is not asked twice. In the state machine it is one extra edge: ASSIGNED back to REQUESTED. "
+ "A real system replaces the phone stand-in with a scheduled task that releases the lease when the deadline passes, "
+ "which is the same code with a timer in front of it.",
+ X("the driver declines", "fairness")),
+("Ops says nearest-first starves the driver parked at the edge of the hotspot. And there is a river in the way.", "twist", 8,
+ "Both are new matching rules, and neither touches anything else. For starvation: among the cars that are close "
+ "enough, send the one who has been idle longest &mdash; distance stays the first filter, because fairness inside five "
+ "kilometres is fair and fairness across a city is a rider waiting twenty minutes. For the river: a straight line is a "
+ "lie, so the rule asks an injected <code>RouteProvider</code> for the ETA and sends the car that will <i>arrive</i> "
+ "first, which is often not the nearest one. Each is a new class plus one changed line at the composition root; the "
+ "service, the trip machine, the compare-and-set and the index are untouched, which is the whole point of having put "
+ "the rule behind an interface in move 3.",
+ X("fairness", "minutes, not kilometres") + "\n" + X("minutes, not kilometres", "coupons and tolls")),
+("Cancellation. Who pays, and how do you know the fleet is not quietly draining?", "functional", 8,
+ "The fee is a rule, not an if-chain: the policy is handed what state the trip is being cancelled in and how long the "
+ "rider has waited, and returns paise. Free while nobody has been sent, free for two minutes after that because the "
+ "driver has only just set off, thirty rupees once he is really coming. The order is the same as everywhere else: "
+ "compute the fee, run the guarded transition (which throws, changing nothing, if the meter is already running), then "
+ "free the car, then charge the fee outside any lock. Draining is the failure nobody tests for: every path that takes "
+ "a car out of the pool &mdash; completion, cancellation, a declined card &mdash; has a matching <code>release()</code> "
+ "in the same method, and the failure tests assert the driver is AVAILABLE again after each one.",
+ sect(src, "class StandardCancellation", "/** Thrown when the gateway") + "\n" + sect(src, "Trip cancelTrip(", "/** One trip by id")),
+("UberPool: one car, three riders, picked up and dropped along the way.", "twist", 8,
+ "Not a new state machine. A pooled ride is a trip with several riders and one fare to divide, so two things change "
+ "and nothing else. Matching scores the <i>detour</i> a new rider would add to the live route instead of the distance "
+ "to the pickup, which is another <code>MatchingStrategy</code>. The fare is divided in proportion to the kilometres "
+ "each rider was actually in the car, and it has the exact problem a Splitwise split has: the shares must add up to "
+ "the fare to the paise, so the last leg absorbs the rounding. The trip's status, the claim, the cancellation rule and "
+ "the payment path are all unchanged, which is why this is an eight-minute answer rather than a redesign.",
+ X("pooling", "ratings")),
+("Ratings, analytics and receipts all want to hear about a completed trip. And one of them throws.", "twist", 5,
+ "They are observers, and they hear about it <i>after</i> the state has already moved. The rating book listens for a "
+ "trip reaching COMPLETED, remembers that this trip is unrated, and accepts exactly one star rating for it later; the "
+ "service never learns that ratings exist, and a rating average can later feed a matching rule without anybody "
+ "touching the trip. The throwing listener is the part worth proving: <code>publish</code> calls each observer inside "
+ "a try/catch, so a push gateway that is down cannot stop a ride from completing or a driver from being freed. The "
+ "failure test registers a listener that throws on every single call and then checks the trip completed with the right "
+ "fare and the car went back into the pool.",
+ X("ratings", "a denser city") + "\n" + T("        // 7. a listener that throws", "        // 8. the ping path:")),
+("Persist it. And now there are two servers.", "twist", 8,
+ "The trip becomes rows behind a repository and the service's code does not change, only what it was handed. The "
+ "interesting half is the claim: a JVM's <code>AtomicReference</code> cannot arbitrate between two processes, so the "
+ "driver's status becomes a column and the claim becomes <code>UPDATE driver SET status='RESERVED' WHERE id=? AND "
+ "status='AVAILABLE'</code> &mdash; one row updated means you won, zero rows means somebody else did. That conditional "
+ "UPDATE <i>is</i> compare-and-set, performed by the database for the whole fleet. The trip insert carries ON CONFLICT "
+ "DO NOTHING on the trip id so a retried request creates one trip, and the guarded transition becomes an UPDATE with "
+ "the old status in the WHERE clause so two settlement workers cannot both complete the same ride.",
+ X("persistence", "Runs every extension")),
+("Where does time come from, and how do you test a twenty-four-minute ride?", "design", 3,
+ "The service has a <code>Clock</code> it was handed, and nothing else in the system reads the wall clock: the trip's "
+ "timestamps, the duration the fare is built from and the wait a cancellation fee depends on all come through it. A "
+ "test hands in a clock backed by a single variable, starts a ride, moves the variable forward by twenty-four minutes "
+ "and ends it, and can then assert the fare to the paise rather than asserting that it is roughly right. The same seam "
+ "makes the cancellation grace period and the acceptance lease testable, because both are deadlines measured against "
+ "an injected now rather than a found one.",
+ "/** Where time comes from. Injected, so a test can decide that a ride took exactly twenty-four minutes. */\n"
+ "interface Clock { long nowMs(); }\n\n"
+ "// on the service: handed in, defaulted, never read from the wall clock inside a method\n"
+ "private Clock clock = System::currentTimeMillis;\n"
+ "void setClock(Clock c) { clock = c; }\n\n"
+ "// in a test: pick the instant, then move it\n"
+ "long[] now = { 1_700_000_000_000L };\n"
+ "svc.setClock(() -> now[0]);\n\n" + T("        // 5. the fare comes from", "        // 6. the card declines AFTER")),
+("Which pattern is where, which SOLID letter is where, and where would a Factory or the State pattern earn its place?", "design", 8,
+ "None of the patterns was chosen up front; each is what a move produced. Strategy is move 3: who to send, what to "
+ "charge and what a cancellation costs are the three rules that change, so each is a one-method interface the service "
+ "is handed. Decorator is the same move's wrapper, <code>SurgePricing</code>, which is a pricing rule that holds a "
+ "pricing rule, so surge, coupons and tolls stack instead of becoming flags. Observer is move 4's rule that a phone "
+ "must never be in front of a state change. State is move 6 &mdash; but as a table, not a class per state, and that is "
+ "a deliberate answer rather than laziness: the whole lifecycle is six lines you can read at once, and a class per "
+ "state earns its place only when the states carry real behaviour of their own, which a trip's do not. Facade is move "
+ "2. Singleton earned nothing: the service is handed to its callers, so a test builds a fresh one. For SOLID: S is "
+ "move 2 (the index, the trip, a rule and the service each have one reason to change); O is "
+ "<code>LongestIdleMatching</code>, a new file and one line; L is that the service calls <code>select</code> and never "
+ "asks which rule it got; I is five interfaces with one method each, so a test's fake payment gateway is three lines; "
+ "D is <code>configure()</code> and <code>setClock()</code>. Factory earns its place the day vehicle tiers arrive as "
+ "strings from configuration, because the tier-to-rate map is already the registry. Builder never does here: a trip "
+ "has six required fields and no optional ones.",
+ "// Strategy: three rules behind three one-method interfaces, handed in, never built by the service\n"
+ "interface MatchingStrategy   { Optional<Driver> select(Location pickup, VehicleType type, List<Driver> candidates); }\n"
+ "interface PricingStrategy    { long price(FareBasis basis); }\n"
+ "interface CancellationPolicy { long feePaise(TripStatus cancelledIn, long waitedMs); }\n"
+ "void configure(MatchingStrategy m, PricingStrategy p, CancellationPolicy c, PaymentProcessor pay) { ... }\n\n"
+ "// Decorator: a pricing rule that HOLDS a pricing rule, so wrappers stack in the order the call site declares\n"
+ "PricingStrategy fare = new SurchargePricing(new CouponPricing(new SurgePricing(new NormalPricing(), zone), 2000, cap), toll);\n\n"
+ "// Observer: the service announces; it does not know what a phone or a rating is\n"
+ "private void publish(Trip t, TripStatus from, TripStatus to) {\n"
+ "    for (TripObserver o : observers) try { o.onTrip(t, from, to); } catch (RuntimeException e) { /* log */ }\n"
+ "}\n\n"
+ "// State, as a TABLE: the whole lifecycle in six lines, checked before any field is written\n"
+ "m.put(TripStatus.IN_PROGRESS, EnumSet.of(TripStatus.COMPLETED_UNPAID));   // and never CANCELLED\n"
+ "if (!LEGAL.get(status).contains(to)) throw new IllegalStateException(id + \": \" + status + \" -> \" + to);\n\n"
+ "// Factory: not yet. The registry is already here; it earns the name when tiers come from config strings\n"
+ "Map<String, long[]> byName = Map.of(\"GO\", new long[]{4000, 1200, 150}, \"XL\", new long[]{8000, 2000, 250});\n\n"
+ "// Builder: never, here. Six required fields is a constructor; a trip has no optional ones\n"
+ "new Trip(id, rider, driver, pickup, drop, type, clock.nowMs());\n"),
+]
+
+build(dict(
+    slug="ride-sharing", title="Ride Sharing",
+    subtitle="LLD &middot; Java &middot; OpenJDK 21: demo, 8 failure-test blocks and a 200-rider race pass",
+    problem_body=PROBLEM_BODY,
+    derivation_lead=DERIVATION_LEAD,
+    moves=[(t, MV[k], txt) for (t, txt, k) in MOVES],
+    uml_svg=UMLSVG, how_to_read=HOW_TO_READ,
+    code_intro=CODE_INTRO,
+    files=[("Main.java", src), ("Extensions.java", ext), ("FailureTests.java", tests)],
+    test_class="FailureTests",
+    implement_card_html=IMPLEMENT_CARD,
+    followups=FU,
+))

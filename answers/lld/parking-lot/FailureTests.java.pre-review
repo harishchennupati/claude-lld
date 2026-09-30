@@ -1,0 +1,259 @@
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.time.*;
+
+/**
+ * Every claim this design makes, proved. Each block is one row of move 9: a way the parking lot can go
+ * wrong, and the few lines that show it does not. Run: javac Main.java Extensions.java FailureTests.java
+ * && java FailureTests
+ */
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+    static final long SAT_10AM = Instant.parse("2026-09-05T10:00:00Z").toEpochMilli();   // a Saturday
+    static final long TUE_10AM = Instant.parse("2026-09-08T10:00:00Z").toEpochMilli();   // a Tuesday
+
+    /** A lot with one floor of the given spots, a fixed clock, flat pricing and smallest fit. */
+    static ParkingLot lot(long[] now, ParkingFloor floor) {
+        ParkingLot lot = new ParkingLot();
+        lot.configure(new FlatHourlyPricing(), new SmallestFitStrategy());
+        lot.setClock(() -> now[0]);
+        lot.addFloor(floor);
+        return lot;
+    }
+    static ParkingFloor floor(String id, Object... idsAndTypes) {
+        ParkingFloor f = new ParkingFloor(id);
+        for (int i = 0; i < idsAndTypes.length; i += 2) f.addSpot(new ParkingSpot((String) idsAndTypes[i], (SpotType) idsAndTypes[i + 1]));
+        return f;
+    }
+
+    public static void main(String[] args) throws Exception {
+        long[] now = { SAT_10AM };
+
+        // 1. the fit table: smallest fitting size first, so large spots stay free for trucks
+        ParkingLot fit = lot(now, floor("F1", "S1", SpotType.SMALL, "C1", SpotType.COMPACT, "L1", SpotType.LARGE));
+        check(fit.park(new Motorcycle("M1")).spot.id.equals("S1"), "a motorcycle takes the SMALL spot, not the compact one");
+        check(fit.park(new Car("C-1")).spot.id.equals("C1"), "a car takes the COMPACT spot, not the large one");
+        check(fit.park(new Truck("T-1")).spot.id.equals("L1"), "a truck takes the LARGE spot, the only size that fits it");
+        check(fit.isFullFor(VehicleType.TRUCK) && fit.isFullFor(VehicleType.CAR), "now full for trucks and cars");
+        try { fit.park(new Truck("T-2")); check(false, "a second truck must be rejected"); }
+        catch (IllegalStateException e) { check(true, "a second truck is rejected: " + e.getMessage()); }
+
+        // 2. payment fails at exit: nothing changes, the driver retries and succeeds
+        ParkingLot pay = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        pay.park(new Car("AAA"));
+        check(pay.isFullFor(VehicleType.CAR), "spot taken after park");
+        try { pay.unpark("AAA", a -> false); check(false, "failed payment must throw"); }
+        catch (IllegalStateException e) { check(true, "failed payment throws: " + e.getMessage()); }
+        check(pay.isFullFor(VehicleType.CAR), "after a failed payment the spot is still held");
+        check(pay.unpark("AAA", new CashPayment()) == 20.0, "the driver retries with cash and pays 20");
+        check(!pay.isFullFor(VehicleType.CAR), "spot recovered after the successful retry");
+
+        // 3. an observer that throws must not corrupt parking
+        ParkingFloor noisy = floor("F1", "C1", SpotType.COMPACT);
+        ParkingLot obs = lot(now, noisy);
+        noisy.addObserver((id, free) -> { throw new RuntimeException("board is down"); });
+        check(obs.park(new Car("BBB")) != null && obs.isFullFor(VehicleType.CAR), "park succeeds although the board threw");
+        obs.unpark("BBB", new CashPayment());
+        check(!obs.isFullFor(VehicleType.CAR), "unpark succeeds although the board threw; the spot is back");
+
+        // 4. lost ticket: the cap is charged, and a failed payment changes nothing
+        ParkingLot lost = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        ExitGate exit = new ExitGate(lost);
+        lost.park(new Car("CCC"));
+        try { exit.lostTicket("CCC", a -> false, 200); check(false, "failed cap payment must throw"); }
+        catch (IllegalStateException e) { check(true, "a failed cap payment throws"); }
+        check(lost.isFullFor(VehicleType.CAR), "after the failed cap payment the spot is still held");
+        check(exit.lostTicket("CCC", new CashPayment(), 200) == 200.0, "the retry pays the daily cap through the exit gate");
+        check(lost.availability().get(SpotType.COMPACT) == 1, "the spot is freed exactly once");
+
+        // 5. a second checkout must be rejected, not free the spot twice
+        ParkingLot twice = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        twice.park(new Car("DDD"));
+        twice.unpark("DDD", new CashPayment());
+        try { twice.unpark("DDD", new CashPayment()); check(false, "a second checkout must throw"); }
+        catch (NoSuchElementException e) { check(true, "a second checkout is rejected"); }
+        check(twice.availability().get(SpotType.COMPACT) == 1, "one physical spot, one free entry (not two)");
+
+        // 6. the same plate at two gates: the second is refused, one spot is used
+        ParkingLot dup = lot(now, floor("F1", "C1", SpotType.COMPACT, "C2", SpotType.COMPACT));
+        dup.park(new Car("SAME"));
+        try { dup.park(new Car("SAME")); check(false, "a duplicate plate must be refused"); }
+        catch (IllegalStateException e) { check(true, "the same plate at a second gate is refused"); }
+        check(dup.availability().get(SpotType.COMPACT) == 1, "the duplicate consumed no second spot");
+
+        // 7. billing: any started hour is billed, and a minute is never free
+        ParkingLot bill = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        bill.park(new Car("E1")); now[0] += 3_600_000L;
+        check(bill.unpark("E1", new CashPayment()) == 20.0, "exactly 60 minutes on compact bills 1 hour = 20");
+        bill.park(new Car("E2")); now[0] += 3_600_000L + 1;
+        check(bill.unpark("E2", new CashPayment()) == 40.0, "60 minutes and 1 millisecond bills 2 hours = 40");
+        bill.park(new Car("E3")); now[0] += 1;
+        check(bill.unpark("E3", new CashPayment()) == 20.0, "1 millisecond still bills the first hour = 20");
+
+        // 8. the weekend rule reads the injected clock, not the wall clock
+        now[0] = SAT_10AM;
+        ParkingLot sat = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        sat.configure(new WeekendSurgePricing(new FlatHourlyPricing(), ZoneId.of("UTC")), new SmallestFitStrategy());
+        sat.park(new Car("FFF"));
+        check(sat.unpark("FFF", new CashPayment()) == 30.0, "Saturday by the injected clock: 20 x 1.5 = 30");
+        now[0] = TUE_10AM;
+        sat.park(new Car("GGG"));
+        check(sat.unpark("GGG", new CashPayment()) == 20.0, "the same code on a Tuesday: no surge, 20");
+        now[0] = SAT_10AM;
+
+        // 9. taking a spot that is not free is a programming error, not a slow path
+        ParkingFloor guard = floor("F1", "C1", SpotType.COMPACT);
+        try { guard.take(new ParkingSpot("ghost", SpotType.COMPACT)); check(false, "must throw"); }
+        catch (IllegalStateException e) { check(true, "take() refuses a spot that is not in the free queue"); }
+
+        // 10. the count the board asks for, per floor, O(1) and under the lock
+        ParkingLot counts = lot(now, floor("F1", "C1", SpotType.COMPACT, "C2", SpotType.COMPACT));
+        counts.addFloor(floor("F2", "C3", SpotType.COMPACT, "L2", SpotType.LARGE));
+        check(counts.freeCount("F2", SpotType.COMPACT) == 1, "F2 has one free compact, counted without scanning spots");
+        counts.park(new Car("H1"));                                        // goes to F1: the first floor that fits
+        check(counts.freeCount("F1", SpotType.COMPACT) == 1 && counts.freeCount("F2", SpotType.COMPACT) == 1, "the park moved only F1's count");
+        check(counts.availability().get(SpotType.COMPACT) == 2, "lot-wide availability is the sum of the floors");
+        try { counts.freeCount("F9", SpotType.COMPACT); check(false, "an unknown floor must throw"); }
+        catch (NoSuchElementException e) { check(true, "an unknown floor is an error, not a zero"); }
+
+        // 11. the race: fifty gates, one compact spot, one latch, exactly one winner
+        ParkingLot race = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        EntryGate gate = new EntryGate(race);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Ticket>> tries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) { String plate = "R" + i; tries.add(pool.submit(() -> { go.await(); return gate.admit(new Car(plate)); })); }
+        go.countDown();
+        int wins = 0;
+        for (Future<Ticket> f : tries) { try { f.get(); wins++; } catch (ExecutionException e) { /* "Lot full for CAR" */ } }
+        pool.shutdown();
+        check(wins == 1, "50 gates raced for the last spot; winners = " + wins);
+        check(race.isFullFor(VehicleType.CAR), "the lot is full afterwards: one spot, one car");
+        check(race.availability().get(SpotType.COMPACT) == 0, "no spot was handed out twice and none was lost");
+
+        // 12. nearest to the exit: the floor's queue order decides, and vacating puts it back in order
+        Map<String, Integer> metres = Map.of("C1", 50, "C2", 10, "C3", 30);
+        ParkingFloor near = new ParkingFloor("F1", Nearest.nearestFirst(metres));
+        for (String id : List.of("C1", "C2", "C3")) near.addSpot(new ParkingSpot(id, SpotType.COMPACT));
+        ParkingLot nearLot = new ParkingLot();
+        nearLot.setClock(() -> now[0]);
+        nearLot.configure(new FlatHourlyPricing(), new NearestToExit(metres));
+        nearLot.addFloor(near);
+        check(nearLot.park(new Car("N1")).spot.id.equals("C2"), "the first car gets C2, ten metres from the exit");
+        check(nearLot.park(new Car("N2")).spot.id.equals("C3"), "the second gets C3 at thirty metres, not C1 at fifty");
+        nearLot.unpark("N1", new CashPayment());                            // C2 goes back into the heap
+        check(nearLot.park(new Car("N3")).spot.id.equals("C2"), "a vacated spot re-enters in distance order, so C2 is handed out again");
+
+        // 13. pricing rules stack, and the order of wrapping is the answer
+        ParkingLot stackLot = lot(now, floor("F1", "C1", SpotType.COMPACT));
+        PricingStrategy stack = new MonthlyPassPricing(
+            new DailyCapPricing(new WeekendSurgePricing(new FreeGracePricing(new FlatHourlyPricing(), 15), ZoneId.of("UTC")), 100),
+            Set.of("PASS-1"));
+        stackLot.configure(stack, new SmallestFitStrategy());
+        stackLot.park(new Car("S1")); now[0] += 10 * 60_000L;
+        check(stackLot.unpark("S1", new CashPayment()) == 0.0, "ten minutes is inside the fifteen-minute grace: free");
+        stackLot.park(new Car("S2")); now[0] += 90 * 60_000L;
+        check(stackLot.unpark("S2", new CashPayment()) == 60.0, "ninety minutes on a Saturday: 2h x 20 x 1.5 = 60");
+        stackLot.park(new Car("S3")); now[0] += 20 * 3_600_000L;
+        check(stackLot.unpark("S3", new CashPayment()) == 100.0, "twenty hours hits the cap of 100, because the cap wraps the surge");
+        stackLot.park(new Car("PASS-1")); now[0] += 5 * 3_600_000L;
+        check(stackLot.unpark("PASS-1", new CashPayment()) == 0.0, "a monthly pass holder pays nothing and still frees the spot");
+        check(stackLot.availability().get(SpotType.COMPACT) == 1, "every one of those exits freed its spot");
+
+        // 14. electric spots: a charger is behaviour, so it is a subclass, and the meter is on the bill
+        now[0] = SAT_10AM;
+        ParkingFloor evFloor = new ParkingFloor("F1");
+        evFloor.addSpot(new ParkingSpot("C1", SpotType.COMPACT));
+        evFloor.addSpot(new EvSpot("EV1", SpotType.COMPACT, 7.0, () -> now[0]));
+        ParkingLot evLot = new ParkingLot();
+        evLot.setClock(() -> now[0]);
+        evLot.configure(new ChargingPricing(new FlatHourlyPricing(), 12), new EvAwareAssignment(new SmallestFitStrategy()));
+        evLot.addFloor(evFloor);
+        check(evLot.park(new Car("PETROL")).spot.id.equals("C1"), "a petrol car does not take the charger while an ordinary spot is free");
+        check(evLot.park(new ElectricCar("TESLA")).spot.id.equals("EV1"), "the electric car gets the charging spot");
+        now[0] += 2 * 3_600_000L;
+        check(evLot.unpark("TESLA", new CardPayment()) == 208.0, "the bill is 2h x 20 parking + 14 kWh x 12 = 208");
+        check(evLot.unpark("PETROL", new CardPayment()) == 40.0, "the petrol car's bill has no charge on it");
+        check(evLot.park(new Car("LATE1")).spot.id.equals("C1"), "with both free again, the petrol car still avoids the charger");
+        check(evLot.park(new Car("LATE2")).spot.id.equals("EV1"), "but it does take the charger when that is the last spot left");
+
+        // 15. reservations: a booked spot is held, expires, and comes back
+        now[0] = SAT_10AM;
+        ParkingFloor resFloor = floor("F1", "C1", SpotType.COMPACT, "C2", SpotType.COMPACT);
+        ParkingLot resLot = lot(now, resFloor);
+        ReservationDesk desk = new ReservationDesk(List.of(resFloor), new SmallestFitStrategy(), () -> now[0]);
+        check(desk.reserve("BOOK", VehicleType.CAR, now[0] + 30 * 60_000L) != null, "the booking holds a fitting spot");
+        check(resFloor.freeCount(SpotType.COMPACT) == 1, "the held spot has left the free queue: one is left for walk-ins");
+        desk.reserve("LATE", VehicleType.CAR, now[0] + 10 * 60_000L);
+        check(resFloor.freeCount(SpotType.COMPACT) == 0, "two bookings hold two spots");
+        try { resLot.park(new Car("WALKIN")); check(false, "a walk-in must be rejected while both spots are held"); }
+        catch (IllegalStateException e) { check(true, "the walk-in is rejected: both spots are booked"); }
+        check(desk.claim(new Car("BOOK")) != null, "the car that turns up in time gets its ticket");
+        now[0] += 11 * 60_000L;
+        check(desk.sweep() == 1, "the booking nobody claimed is swept back once its deadline passes");
+        check(resFloor.freeCount(SpotType.COMPACT) == 1, "and its spot is free again for whoever turns up");
+        try { desk.claim(new Car("LATE")); check(false, "a swept reservation must not be claimable"); }
+        catch (NoSuchElementException e) { check(true, "the late car finds no reservation and must park as a walk-in"); }
+        check(resLot.park(new Car("WALKIN")) != null, "the walk-in turned away a minute ago now parks in the swept spot");
+
+        // 16. the display board at a thousand updates a second: coalesce, never queue
+        CoalescingBoard board = new CoalescingBoard();
+        ParkingFloor boardFloor = floor("F1", "C1", SpotType.COMPACT);
+        boardFloor.addObserver(board);
+        ParkingLot boardLot = lot(now, boardFloor);
+        for (int i = 0; i < 1000; i++) board.onChange("F1", Map.of(SpotType.COMPACT, i));
+        board.render();
+        check(board.renderCount() == 1, "1000 updates became 1 render: intermediate snapshots are dropped, not queued");
+        check(board.lastRendered().get(SpotType.COMPACT) == 999, "and what it shows is the newest count, not the oldest");
+        check(boardLot.park(new Car("BRD")) != null, "a gate is never slowed by the board: onChange is one map write");
+
+        // 17. the same claim in a database: a conditional UPDATE, fifty callers, one row
+        SpotTable table = new SpotTable();
+        table.insert("C1");
+        ExecutorService dbPool = Executors.newFixedThreadPool(8);
+        CountDownLatch dbGo = new CountDownLatch(1);
+        AtomicInteger rows = new AtomicInteger();
+        List<Future<?>> dbTries = new ArrayList<>();
+        for (int i = 0; i < 50; i++) { String plate = "D" + i; dbTries.add(dbPool.submit(() -> { dbGo.await(); rows.addAndGet(table.claim("C1", plate)); return null; })); }
+        dbGo.countDown();
+        for (Future<?> f : dbTries) f.get();
+        dbPool.shutdown();
+        check(rows.get() == 1, "UPDATE ... WHERE plate IS NULL: 50 callers, 1 row updated");
+        check(table.release("C1", "nobody") == 0, "releasing someone else's spot updates no rows");
+        check(table.release("C1", table.plateOf("C1")) == 1, "the owner's release updates exactly one row");
+
+        // 18. a truck needs two adjacent spots: both, or nothing at all
+        ParkingFloor truckFloor = floor("F1", "L1", SpotType.LARGE, "L2", SpotType.LARGE, "L3", SpotType.LARGE);
+        TruckParking trucks = new TruckParking(new AdjacentAssignment(Map.of("L1", "L2", "L2", "L3")));
+        MultiSpotTicket first = trucks.park(new Truck("TR1"), truckFloor);
+        check(first != null && first.spots.size() == 2, "the first truck gets a pair of neighbours");
+        check(trucks.park(new Truck("TR2"), truckFloor) == null, "the second truck gets nothing: one lone spot is not a pair");
+        check(truckFloor.freeCount(SpotType.LARGE) == 1, "and nothing was half-taken: exactly one large spot is still free");
+        trucks.release(first, truckFloor);
+        check(truckFloor.freeCount(SpotType.LARGE) == 3, "releasing gives both spots back together");
+
+        // 19. the ticket's life as a table: an illegal move throws instead of quietly passing
+        try { TicketState.ISSUED.to(TicketState.CLOSED); check(false, "closing before paying must throw"); }
+        catch (IllegalStateException e) { check(true, "ISSUED -> CLOSED is refused by the transition table"); }
+        check(TicketState.ISSUED.to(TicketState.PAID).to(TicketState.CLOSED) == TicketState.CLOSED, "ISSUED -> PAID -> CLOSED is the legal path");
+
+        // 20. the ladder rungs still hold the invariant
+        CasFloor cas = new CasFloor();
+        cas.add(new CasSpot("C1", SpotType.COMPACT));
+        ExecutorService casPool = Executors.newFixedThreadPool(8);
+        CountDownLatch casGo = new CountDownLatch(1);
+        AtomicInteger casWins = new AtomicInteger();
+        for (int i = 0; i < 50; i++) { String plate = "X" + i; casPool.submit(() -> { casGo.await(); if (cas.claim(new Car(plate)) != null) casWins.incrementAndGet(); return null; }); }
+        casGo.countDown(); casPool.shutdown(); casPool.awaitTermination(5, TimeUnit.SECONDS);
+        check(casWins.get() == 1, "rung 3, no lock at all: 50 compare-and-set claims, 1 winner");
+        ParkingFloor fa = floor("F1", "C1", SpotType.COMPACT), fb = floor("F2", "C2", SpotType.COMPACT);
+        FloorLocked perFloor = new FloorLocked(List.of(fa, fb), new SmallestFitStrategy());
+        perFloor.park(new Car("P1"));
+        check(perFloor.park(new Car("P2")).floor.id.equals("F2"), "rung 2, a lock per floor: the second car spills onto F2");
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

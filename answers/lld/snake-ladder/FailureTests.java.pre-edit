@@ -1,0 +1,184 @@
+import java.util.*;
+import java.util.concurrent.*;
+
+// Targeted failure tests: each one proves a claim the design makes on page 02, move 9.
+public class FailureTests {
+    static int failures = 0;
+    static void check(boolean ok, String what) { System.out.println((ok ? "PASS " : "FAIL ") + what); if (!ok) failures++; }
+
+    /** The classic hundred-cell layout, so several tests can share one board. */
+    static GameBuilder classic(String id) {
+        return new GameBuilder().id(id).boardSize(100)
+            .jump(2, 38).jump(7, 14).jump(28, 84).jump(51, 67).jump(78, 98)
+            .jump(16, 6).jump(46, 25).jump(62, 19).jump(95, 75).jump(99, 80);
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. four phones press roll over and over at the same instant. Only the player on turn may move,
+        //    the log must have no gap and no double, and a refused request must not even cost a die roll.
+        ScriptedDice shared = new ScriptedDice(true, 3, 5, 2, 6, 1, 4);
+        Game race = new GameBuilder().id("race").boardSize(400).dice(shared)
+            .jump(12, 40).jump(60, 22).jump(120, 180).jump(200, 90)
+            .player("p0", "P0").player("p1", "P1").player("p2", "P2").player("p3", "P3").build();
+        race.start();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<int[]>> fs = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            final int seed = i;
+            fs.add(pool.submit(() -> {
+                go.await();
+                int ok = 0, refused = 0;
+                Random r = new Random(seed);
+                for (int k = 0; k < 50; k++) {
+                    try { race.roll("p" + r.nextInt(4)); ok++; }
+                    catch (OutOfTurnException e) { refused++; }
+                }
+                return new int[] { ok, refused };
+            }));
+        }
+        go.countDown();
+        int accepted = 0, refused = 0;
+        for (Future<int[]> f : fs) { int[] r = f.get(); accepted += r[0]; refused += r[1]; }
+        pool.shutdown();
+        List<Turn> log = race.history();
+        check(accepted + refused == 400, "all 400 attempts finished: " + accepted + " accepted, " + refused + " refused");
+        check(log.size() == accepted, "the log has exactly one row per accepted roll: " + log.size());
+        check(shared.used() == accepted, "a refused roll consumed no dice: " + shared.used() + " rolls for " + accepted + " turns");
+        Map<String, Integer> replay = new LinkedHashMap<>();
+        for (Player p : race.roster()) replay.put(p.id(), 0);
+        boolean noGap = true, continuous = true;
+        for (int i = 0; i < log.size(); i++) {
+            Turn t = log.get(i);
+            if (t.number() != i + 1) noGap = false;
+            if (replay.get(t.playerId()) != t.from()) continuous = false;
+            replay.put(t.playerId(), t.to());
+        }
+        check(noGap, "the turn numbers run 1.." + log.size() + " with no gap and no repeat");
+        check(continuous, "every token starts each turn where its previous turn left it: no lost move");
+        check(replay.equals(race.positions()), "replaying the log gives exactly the live board");
+        check(race.status() == GameStatus.IN_PROGRESS, "the race did not accidentally finish the game");
+
+        // 2. eight threads roll for the SAME, correct player at the same instant: exactly one turn happens
+        Game one = classic("one").dice(new ScriptedDice(true, 4)).player("a", "A").player("b", "B").build();
+        one.start();
+        String due = one.whoseTurn();
+        ExecutorService p2 = Executors.newFixedThreadPool(8);
+        CountDownLatch go2 = new CountDownLatch(1);
+        List<Future<Boolean>> gs = new ArrayList<>();
+        for (int i = 0; i < 8; i++)
+            gs.add(p2.submit(() -> { go2.await(); try { one.roll(due); return true; } catch (OutOfTurnException e) { return false; } }));
+        go2.countDown();
+        int moved = 0;
+        for (Future<Boolean> f : gs) if (f.get()) moved++;
+        p2.shutdown();
+        check(moved == 1, "exactly one of eight simultaneous rolls for the same player was accepted");
+        check(one.positionOf("a") == 4 && one.turnNumber() == 1, "the token moved exactly once, to cell 4");
+        check("b".equals(one.whoseTurn()), "and the turn passed to b exactly once");
+
+        // 3. a ladder lifts, a snake drags, and only ONE jump is applied per landing
+        Game j = new GameBuilder().id("jump").boardSize(50).dice(new ScriptedDice(4, 9, 16))
+            .jump(4, 20).jump(20, 3).jump(9, 2)
+            .player("a", "A").player("b", "B").build();
+        j.start();
+        Turn up = j.roll("a");
+        check(up.to() == 20 && up.jump().kind() == JumpKind.LADDER, "the ladder 4->20 lifted the token to 20");
+        check(j.board().jumpAt(20) != null, "cell 20 is itself a snake head, and the token still rests on 20: no chaining");
+        Turn down = j.roll("b");
+        check(down.to() == 2 && down.jump().kind() == JumpKind.SNAKE, "the snake 9->2 dragged the token back to 2");
+        Turn plain = j.roll("a");
+        check(plain.to() == 36 && plain.jump() == null, "a plain cell is left alone: 20 + 16 = 36");
+
+        // 4. the overshoot rule: the classic one wastes the roll, bounce-back bounces, and you must rest exactly
+        MoveStrategy stays = new OvershootStays(), bounce = new BounceBack();
+        check(stays.landingCell(98, 5, 100) == 98, "at 98 a roll of 5 is wasted under the classic rule");
+        check(stays.landingCell(98, 2, 100) == 100, "at 98 a roll of 2 lands exactly on 100");
+        check(bounce.landingCell(98, 5, 100) == 97, "at 98 a roll of 5 bounces back to 97");
+        Game over = new GameBuilder().id("over").boardSize(20).dice(new ScriptedDice(6, 6, 6, 6, 6, 6, 5))
+            .player("a", "A").player("b", "B").build();
+        over.start();
+        over.roll("a"); over.roll("b"); over.roll("a"); over.roll("b"); over.roll("a"); over.roll("b");
+        check(over.positionOf("a") == 18, "a is on 18 after three sixes");
+        Turn wasted = over.roll("a");
+        check(wasted.to() == 18 && over.status() == GameStatus.IN_PROGRESS, "18 + 5 overshoots 20: the token stays and nobody wins");
+
+        // 5. the win ends the game: it is checked on the RESTING cell, and every later roll is refused
+        Game win = new GameBuilder().id("win").boardSize(30).dice(new ScriptedDice(6, 6, 6, 6, 6, 6, 6, 6, 6))
+            .jump(24, 30).player("a", "A").player("b", "B").build();
+        win.start();
+        Turn t = null;
+        for (int i = 0; i < 9 && win.status() != GameStatus.FINISHED; i++) t = win.roll(win.whoseTurn());
+        check(win.status() == GameStatus.FINISHED, "the game is FINISHED");
+        check(t != null && t.won() && t.jump() != null, "it was won by a ladder onto the last cell, not by landing on it");
+        check(win.winner().id().equals("a") && win.positionOf("a") == 30, "the winner is a, resting on 30");
+        check(win.whoseTurn() == null, "nobody is on turn any more");
+        int turnsAtWin = win.turnNumber();
+        try { win.roll("b"); check(false, "a roll after the win must be refused"); }
+        catch (IllegalStateException e) { check(true, "a roll after the win is refused: " + e.getMessage()); }
+        check(win.turnNumber() == turnsAtWin, "and the refused roll added nothing to the log");
+
+        // 6. the turn rotates fairly, a six rolls again, and three sixes in a row give the turn away
+        Game six = new GameBuilder().id("six").boardSize(100).dice(new ScriptedDice(6, 6, 6, 2, 1))
+            .extraTurn(new CappedExtraTurn(new ExtraTurnOnMax(6), 3))
+            .player("a", "A").player("b", "B").player("c", "C").build();
+        six.start();
+        check(six.turnOrder().equals(List.of("a", "b", "c")), "the queue starts in join order");
+        check(six.roll("a").extraTurn(), "a threw a six and rolls again");
+        check("a".equals(six.whoseTurn()), "so it is still a's turn");
+        check(six.roll("a").extraTurn(), "a threw a second six and rolls again");
+        check(!six.roll("a").extraTurn(), "the third six is capped: the turn passes");
+        check("b".equals(six.whoseTurn()) && six.positionOf("a") == 18, "b is up, and a sits on 18");
+        six.roll("b");
+        check("c".equals(six.whoseTurn()), "after b, the queue rotates to c");
+
+        // 7. a board that would make the game wrong is refused at build time, before a Game exists
+        try { new Jump(5, 5); check(false, "a jump to its own cell must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "start == end refused: " + e.getMessage()); }
+        try { new GameBuilder().boardSize(100).jump(30, 80).jump(30, 12).player("a", "A").player("b", "B").build();
+              check(false, "a cell with two jumps must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "a snake head cannot also be a ladder foot: " + e.getMessage()); }
+        try { new GameBuilder().boardSize(100).jump(100, 40).player("a", "A").player("b", "B").build();
+              check(false, "a snake on the winning cell must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "nothing may start on cell 100: " + e.getMessage()); }
+        try { new GameBuilder().boardSize(100).jump(40, 140).player("a", "A").player("b", "B").build();
+              check(false, "a jump off the board must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "an endpoint off the board is refused: " + e.getMessage()); }
+        try { new GameBuilder().boardSize(100).player("a", "A").build(); check(false, "one player is not a game"); }
+        catch (IllegalArgumentException e) { check(true, "fewer than two players refused: " + e.getMessage()); }
+        try { new GameBuilder().boardSize(100).player("a", "A").player("a", "Again").build();
+              check(false, "two players with the same id must be refused"); }
+        catch (IllegalArgumentException e) { check(true, "duplicate player id refused: " + e.getMessage()); }
+
+        // 8. a rule that misbehaves must leave the game exactly as it was, with the same player still to move
+        Game bad = new GameBuilder().id("bad").boardSize(50).dice(new ScriptedDice(true, 3))
+            .moveRule((from, roll, size) -> size + 99)                       // deliberately off the board
+            .player("a", "A").player("b", "B").build();
+        bad.start();
+        try { bad.roll("a"); check(false, "an off-board landing must be refused"); }
+        catch (IllegalStateException e) { check(true, "the off-board move rule was caught: " + e.getMessage()); }
+        check(bad.positionOf("a") == 0, "the token did not move");
+        check(bad.turnNumber() == 0 && bad.history().isEmpty(), "nothing was written to the log");
+        check("a".equals(bad.whoseTurn()), "and it is still a's turn, so the client can retry");
+
+        // 9. a broken screen must not break the game, and the same seed must replay the same game
+        Game noisy = classic("noisy").seed(5).player("a", "A").player("b", "B").build();
+        noisy.addObserver((gid, turn) -> { throw new RuntimeException("the display is down"); });
+        noisy.start();
+        Turn landed = noisy.roll("a");
+        check(landed != null && noisy.turnNumber() == 1, "the turn was played although the observer threw");
+        check(noisy.positionOf("a") == landed.to(), "and the board matches what the turn said");
+        Game r1 = classic("r1").seed(42).player("a", "A").player("b", "B").player("c", "C").build();
+        Game r2 = classic("r2").seed(42).player("a", "A").player("b", "B").player("c", "C").build();
+        r1.start(); r2.start();
+        r1.playOut(2000); r2.playOut(2000);
+        List<Integer> rolls1 = new ArrayList<>(), rolls2 = new ArrayList<>();
+        for (Turn x : r1.history()) rolls1.add(x.roll());
+        for (Turn x : r2.history()) rolls2.add(x.roll());
+        check(rolls1.equals(rolls2) && !rolls1.isEmpty(), "the same seed threw the same " + rolls1.size() + " rolls");
+        check(r1.positions().equals(r2.positions()), "and finished on exactly the same board");
+        check(r1.winner().equals(r2.winner()), "with the same winner: " + r1.winner().name());
+
+        System.out.println(failures == 0 ? "ALL PASS" : failures + " FAILED");
+        if (failures != 0) System.exit(1);
+    }
+}

@@ -1,0 +1,827 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Java primer for LLD rounds</title>
+<style>
+:root{--bg:#0f1419;--bg2:#161b22;--bg3:#1c2330;--line:#2a3441;--text:#d6dde6;--muted:#7d8896;--acc:#3ddbb0;--acc2:#7cc4ff;--warn:#f0a35e;--err:#ff6b6b;--mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;--ui:-apple-system,"Segoe UI",Inter,Roboto,sans-serif}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:var(--ui);font-size:14.5px;line-height:1.55}
+.top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;padding:10px 20px;background:var(--bg2);border-bottom:1px solid var(--line)}
+.top h1{font-size:15px;margin:0;font-weight:600} .top .sub{color:var(--muted);font-size:12px}
+.top input{margin-left:auto;background:var(--bg3);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:6px 10px;font:inherit;width:240px}
+.top button{background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit} .top button.pri{background:var(--acc);color:#04211a;border-color:var(--acc);font-weight:600}
+.wrap{max-width:1080px;margin:0 auto;padding:20px}
+.how{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin-bottom:26px} .how h2{margin:0 0 8px;font-size:16px} .how ol{margin:8px 0 0;padding-left:20px} .how li{margin:6px 0} .how b{color:var(--acc)}
+.map{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:12px} .map div{background:var(--bg3);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:13px} .map b{display:block;color:var(--acc2);margin-bottom:4px}
+.sec h2{display:flex;align-items:baseline;gap:12px;font-size:20px;margin:30px 0 4px} .sec h2 span{font-family:var(--mono);font-size:12px;color:var(--acc);border:1px solid var(--acc);border-radius:4px;padding:1px 7px}
+.lede{color:var(--muted);margin:0 0 14px}
+.card{border:1px solid var(--line);border-radius:8px;background:var(--bg2);margin:10px 0} .card[open]{border-color:var(--acc2)}
+.card summary{display:grid;grid-template-columns:230px 1fr auto;gap:14px;align-items:baseline;padding:12px 16px;cursor:pointer;list-style:none} .card summary::-webkit-details-marker{display:none}
+.nm{font-weight:600} .one{color:var(--muted);font-size:13.5px} .miss{font-size:11px;color:var(--muted);white-space:nowrap} .card.missed{border-left:3px solid var(--err)}
+.body{padding:4px 16px 16px;border-top:1px solid var(--line)} .tell{margin:12px 0}
+.ed{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--bg)} .ed .tab{padding:5px 12px;background:var(--bg3);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+pre{margin:0;padding:12px 0;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6} pre .ln{display:inline-block;width:40px;text-align:right;padding-right:12px;color:#3d4756;user-select:none}
+.k{color:#c792ea} .s{color:#c3e88d} .c{color:#5c6773;font-style:italic} .n{color:#f78c6c} .t{color:#82aaff}
+.mistake{margin:12px 0 6px;padding:10px 12px;background:#2a1b1b;border-left:3px solid var(--err);border-radius:0 6px 6px 0} .mistake b{color:var(--err)}
+.say{margin:0;padding:10px 12px;background:#132a24;border-left:3px solid var(--acc);border-radius:0 6px 6px 0} .say b{color:var(--acc)}
+.card.hide{display:none}
+#drill{display:none;position:fixed;inset:0;background:rgba(6,9,12,.92);z-index:10;overflow:auto;padding:40px 20px} #drill.on{display:block}
+.dcard{max-width:900px;margin:0 auto 18px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:18px 22px} .dcard h3{margin:0 0 4px;font-size:17px} .dcard .one{display:block;margin-bottom:10px}
+.dcard .task{color:var(--warn);font-weight:600;margin-bottom:10px} .dcard .ans{display:none} .dcard.rev .ans{display:block} .dcard button{background:var(--bg3);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit;margin-right:8px} .dcard button.ok{border-color:var(--acc);color:var(--acc)} .dcard button.bad{border-color:var(--err);color:var(--err)}
+.dclose{max-width:900px;margin:0 auto;text-align:right} .dclose button{background:var(--acc);color:#04211a;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer}
+@media (max-width:700px){.card summary{grid-template-columns:1fr}}
+</style></head><body>
+<div class="top"><h1>Java primer for LLD rounds</h1><span class="sub">43 cards &middot; SDE-2 to SDE-3 &middot; every idiom compiled</span><input id="q" placeholder="filter cards..."><button id="expand">expand all</button><button id="collapse">collapse</button><button id="drillBtn" class="pri">Drill 3</button></div>
+<div class="wrap">
+<div class="how"><h2>How to learn this -- so it comes out of your fingers, not your memory</h2>
+<ol>
+<li><b>Pass 1, once, about 60 minutes.</b> Go A to E in order. At each card, read only the title line and <i>guess what the code looks like</i> before you open it. Open, read the tell, look at the idiom, read the mistake, and say the "Say" line out loud. If your guess was wrong or blank, tick <i>missed</i>. Do not type anything on this pass.</li>
+<li><b>Pass 2, daily, 10 minutes, for two weeks.</b> Press <b>Drill 3</b>. It picks three cards, missed ones first, and shows only the task. In a scratch <code>Main.java</code>, type the idiom from memory and run <code>javac</code>. Then reveal and diff. Mark got-it or missed. This is your lost Java touch coming back -- and it is retrieval, so it sticks.</li>
+<li><b>Pass 3, inside every LLD.</b> When a workbench step uses a primitive, say its "Say" sentence as you type it. The sentence is the interview answer; the code is the proof.</li>
+<li><b>Weekly:</b> drill only missed cards until the list is empty. An empty missed list is the finish line for this page.</li>
+</ol>
+<div class="map"><div><b>Machine-coding round (90 min)</b>A collections + enums, B locks/CHM/atomics, D strategy/state/factory, E repository split, E testing sentence</div><div><b>Multithreading round (30-45 min)</b>B all of it: condition/wait loop, blocking queue, semaphore, CAS loop, deadlock order, memory model</div><div><b>Design discussion (45 min)</b>C SOLID mapped to your classes, D patterns named when earned, E composition/YAGNI</div><div><b>SDE-3 extras</b>B CompletableFuture, memory model, striping; E idempotency; D chain/facade/proxy in one sentence</div></div>
+</div>
+<section class="sec" id="secA"><h2><span>A</span>Java for LLD rounds</h2><p class="lede">The language features every machine-coding solution is made of. Enums, interfaces, records, equals/hashCode, collections. If these are slow under your fingers, the 60 minutes are gone before the design starts.</p><details class="card" id="enum" data-sec="A" data-name="enum with fields and behaviour">
+<summary><span class="nm">enum with fields and behaviour</span><span class="one">A fixed set of named constants that can carry data and methods -- your sizes, states, order types.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="enum"> missed</label></summary>
+<div class="body">
+<p class="tell">An enum is a class with a fixed, named set of instances. Give it fields and a constructor and it replaces magic strings and if-chains; give it an abstract method and each constant can behave differently (a tiny State/Strategy without extra classes). Use EnumMap/EnumSet with it: array-backed, faster than HashMap.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">enum SpotType {
+    SMALL(10), COMPACT(20), LARGE(40);          // each constant carries its hourly rate
+    final int rate;
+    SpotType(int rate) { this.rate = rate; }
+}
+enum Op {                                       // constants with behaviour
+    ADD { int apply(int a, int b) { return a + b; } },
+    MUL { int apply(int a, int b) { return a * b; } };
+    abstract int apply(int a, int b);
+}
+int price(SpotType t, int hours) { return t.rate * hours; }
+java.util.EnumMap&lt;SpotType, Integer&gt; free = new java.util.EnumMap&lt;&gt;(SpotType.class);</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Comparing enums with equals() when == is correct and null-safe; storing enum state as a String column of the model.</p>
+<p class="say"><b>Say:</b> &quot;Sizes are an enum, not strings -- the compiler catches a typo and EnumMap gives me O(1) per-size counts.&quot;</p>
+</div></details><details class="card" id="interface" data-sec="A" data-name="interface vs abstract class">
+<summary><span class="nm">interface vs abstract class</span><span class="one">Interface = a contract (what you can do). Abstract class = a partial implementation (what you are).</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="interface"> missed</label></summary>
+<div class="body">
+<p class="tell">Program to the interface: services depend on PricingStrategy, never on FlatHourlyPricing. A class can implement many interfaces but extend one class -- so interfaces are for capabilities (Payable, Observer), abstract classes for a shared skeleton with state (Vehicle with a plate). Default methods let an interface ship a fallback without breaking implementers.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface PricingStrategy {
+    double price(long minutes);
+    default double priceHours(long h) { return price(h * 60); }   // shared fallback, no state
+}
+abstract class Vehicle {                        // shared state + a hook
+    final String plate;
+    Vehicle(String plate) { this.plate = plate; }
+    abstract int wheels();
+}
+class Car extends Vehicle { Car(String p) { super(p); } int wheels() { return 4; } }</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Making an abstract class where an interface would do (locks the implementer into your hierarchy); putting state in interfaces via static mutable fields.</p>
+<p class="say"><b>Say:</b> &quot;Anything that will be swapped is an interface I inject; anything sharing fields is an abstract base.&quot;</p>
+</div></details><details class="card" id="record" data-sec="A" data-name="record and immutability">
+<summary><span class="nm">record and immutability</span><span class="one">A record is an immutable data carrier with equals/hashCode/toString for free -- ideal for ids, events, DTOs.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="record"> missed</label></summary>
+<div class="body">
+<p class="tell">Final fields set in the constructor, no setters. Immutable objects are thread-safe by construction and safe as map keys. Records give you that in one line and generate equals, hashCode and toString from the components. Mutation returns a new object (withX methods).</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">record Money(long paise) {                     // integer minor units, never double
+    Money { if (paise &lt; 0) throw new IllegalArgumentException(&quot;negative&quot;); }   // compact validator
+    Money plus(Money o) { return new Money(paise + o.paise); }
+}
+record OrderPlaced(String orderId, Money total, long ts) {}    // an event: immutable, comparable by value
+final class Ticket {                            // pre-record style: final fields, no setters
+    private final String id; private final long entryMs;
+    Ticket(String id, long entryMs) { this.id = id; this.entryMs = entryMs; }
+    String id() { return id; }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> A record holding a mutable List and handing it out (callers mutate your &#x27;immutable&#x27; object); money as double.</p>
+<p class="say"><b>Say:</b> &quot;Events and ids are records -- immutable, value-equal, safe to share across threads.&quot;</p>
+</div></details><details class="card" id="equals" data-sec="A" data-name="equals and hashcode contract">
+<summary><span class="nm">equals and hashCode contract</span><span class="one">If two objects are equal they must have the same hashCode -- or your HashMap silently loses them.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="equals"> missed</label></summary>
+<div class="body">
+<p class="tell">HashMap and HashSet find a bucket by hashCode, then confirm with equals. Override one without the other and lookups fail randomly. Use the fields that define identity, keep them immutable (a key that changes hash after insertion is lost forever). Records and Objects.hash make this mechanical.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">final class SpotId {
+    private final String floor; private final int number;
+    SpotId(String floor, int number) { this.floor = floor; this.number = number; }
+    @Override public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof SpotId s)) return false;         // pattern-match instanceof
+        return number == s.number &amp;&amp; floor.equals(s.floor);
+    }
+    @Override public int hashCode() { return java.util.Objects.hash(floor, number); }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Using a mutable object as a HashMap key; implementing equals with getClass() when instanceof was intended (or vice versa) without knowing why.</p>
+<p class="say"><b>Say:</b> &quot;Keys are immutable value objects with equals and hashCode over the identity fields.&quot;</p>
+</div></details><details class="card" id="generics" data-sec="A" data-name="generics you actually need">
+<summary><span class="nm">generics you actually need</span><span class="one">Type parameters on your own classes and methods; bounded types for &#x27;anything comparable&#x27;; wildcards only when reading.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="generics"> missed</label></summary>
+<div class="body">
+<p class="tell">Write a generic class when the container does not care what it holds (Cache<K,V>, Repository<T,ID>). Bound it when you need a capability: <T extends Comparable<T>>. For parameters that are only read, accept List<? extends T>; you rarely need more than that in a round.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface Repository&lt;T, ID&gt; {
+    java.util.Optional&lt;T&gt; findById(ID id);
+    void save(T entity);
+}
+class InMemoryRepo&lt;T, ID&gt; implements Repository&lt;T, ID&gt; {
+    private final java.util.Map&lt;ID, T&gt; store = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+    private final java.util.function.Function&lt;T, ID&gt; idOf;
+    InMemoryRepo(java.util.function.Function&lt;T, ID&gt; idOf) { this.idOf = idOf; }
+    public java.util.Optional&lt;T&gt; findById(ID id) { return java.util.Optional.ofNullable(store.get(id)); }
+    public void save(T e) { store.put(idOf.apply(e), e); }
+}
+static &lt;T extends Comparable&lt;T&gt;&gt; T max(java.util.List&lt;? extends T&gt; xs) {
+    T best = xs.get(0);
+    for (T x : xs) if (x.compareTo(best) &gt; 0) best = x;
+    return best;
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Raw types (List instead of List&lt;Ticket&gt;); trying to new T() or T[] (erasure forbids it -- pass a factory).</p>
+<p class="say"><b>Say:</b> &quot;The repository is generic over entity and id, so every service gets the same in-memory store.&quot;</p>
+</div></details><details class="card" id="collections" data-sec="A" data-name="the collections cheat-sheet">
+<summary><span class="nm">the collections cheat-sheet</span><span class="one">Pick by operation you need: O(1) lookup, ordered, sorted, FIFO, priority.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="collections"> missed</label></summary>
+<div class="body">
+<p class="tell">ArrayList for indexed lists. ArrayDeque for stack and queue (never LinkedList, never Stack). HashMap for O(1) lookup; LinkedHashMap keeps insertion order -- and with accessOrder=true plus removeEldestEntry it is an LRU in ten lines. TreeMap when you need floor/ceiling/range (price ladders, time windows). PriorityQueue for 'smallest next' (min-heap by default; pass a comparator for max). EnumMap for enum keys.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.Deque&lt;Integer&gt; stack = new java.util.ArrayDeque&lt;&gt;();     // push/pop/peek; also offer/poll for FIFO
+java.util.TreeMap&lt;Integer, Integer&gt; book = new java.util.TreeMap&lt;&gt;();  // book.floorKey(x), book.firstEntry(), headMap(x)
+java.util.PriorityQueue&lt;int[]&gt; byDist = new java.util.PriorityQueue&lt;&gt;((a, b) -&gt; Integer.compare(a[1], b[1]));
+class LruCache&lt;K, V&gt; extends java.util.LinkedHashMap&lt;K, V&gt; {
+    private final int cap;
+    LruCache(int cap) { super(16, 0.75f, true); this.cap = cap; }        // accessOrder = true
+    @Override protected boolean removeEldestEntry(java.util.Map.Entry&lt;K, V&gt; e) { return size() &gt; cap; }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Iterating a HashMap and expecting order; removing from a list while iterating it (ConcurrentModificationException -- use an Iterator or removeIf).</p>
+<p class="say"><b>Say:</b> &quot;LinkedHashMap in access order with removeEldestEntry is the LRU; I only hand-roll the doubly linked list if they ask for it.&quot;</p>
+</div></details><details class="card" id="streams" data-sec="A" data-name="lambdas, streams and comparators -- the 20% you use">
+<summary><span class="nm">lambdas, streams and comparators -- the 20% you use</span><span class="one">Sort with Comparator.comparing, group with Collectors.groupingBy, and stop there in a round.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="streams"> missed</label></summary>
+<div class="body">
+<p class="tell">Lambdas implement single-method interfaces (Runnable, Comparator, Function). Comparator.comparing(...).thenComparing(...).reversed() reads like the requirement. Streams are fine for a one-line filter/map/collect; a for-loop is clearer for anything with state or early exit. Never stream inside a hot lock.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">record Order(String id, int price, long ts) {}
+java.util.List&lt;Order&gt; sorted(java.util.List&lt;Order&gt; os) {
+    return os.stream()
+             .sorted(java.util.Comparator.comparingInt(Order::price).reversed().thenComparingLong(Order::ts))
+             .toList();
+}
+java.util.Map&lt;Integer, java.util.List&lt;Order&gt;&gt; byPrice(java.util.List&lt;Order&gt; os) {
+    return os.stream().collect(java.util.stream.Collectors.groupingBy(Order::price));
+}
+int total(java.util.List&lt;Order&gt; os) { return os.stream().mapToInt(Order::price).sum(); }</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Comparator subtraction (a.price - b.price) overflows; using streams for side effects; forgetting that toList() is unmodifiable.</p>
+<p class="say"><b>Say:</b> &quot;Price-time priority is one comparator: highest price, then earliest timestamp.&quot;</p>
+</div></details><details class="card" id="exceptions" data-sec="A" data-name="exceptions: checked, unchecked, custom">
+<summary><span class="nm">exceptions: checked, unchecked, custom</span><span class="one">Throw unchecked for programming and state errors; make a small domain hierarchy; never swallow.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="exceptions"> missed</label></summary>
+<div class="body">
+<p class="tell">RuntimeException subclasses (IllegalArgumentException, IllegalStateException) need no throws clause and are what you want in a round. Checked exceptions (IOException, InterruptedException) force handling -- when catching InterruptedException, re-set the interrupt flag. Custom exceptions carry a reason code; one base class per domain lets callers catch broadly.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class DomainException extends RuntimeException { DomainException(String m) { super(m); } }
+class InsufficientFundsException extends DomainException {
+    final long shortBy;
+    InsufficientFundsException(long shortBy) { super(&quot;short by &quot; + shortBy); this.shortBy = shortBy; }
+}
+void withdraw(long balance, long amt) {
+    if (amt &lt;= 0) throw new IllegalArgumentException(&quot;amount must be positive&quot;);
+    if (amt &gt; balance) throw new InsufficientFundsException(amt - balance);
+}
+void sleepQuietly(long ms) {
+    try { Thread.sleep(ms); }
+    catch (InterruptedException e) { Thread.currentThread().interrupt(); }   // never swallow the interrupt
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> catch (Exception e) {} with an empty body; throwing generic RuntimeException with a string nobody can switch on.</p>
+<p class="say"><b>Say:</b> &quot;Domain errors are unchecked with a small hierarchy, so the API layer can map them to responses in one place.&quot;</p>
+</div></details></section><section class="sec" id="secB"><h2><span>B</span>Concurrency</h2><p class="lede">The ten primitives that answer &#x27;is this thread-safe?&#x27;. Every LLD has one invariant that breaks under two threads; these are the tools, and the sentence to say when you pick one.</p><details class="card" id="threads" data-sec="B" data-name="threads, runnable, callable, executorservice">
+<summary><span class="nm">threads, Runnable, Callable, ExecutorService</span><span class="one">Never new Thread() in a round: submit tasks to an executor, get Futures back, shut it down.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="threads"> missed</label></summary>
+<div class="body">
+<p class="tell">An ExecutorService owns a pool of threads. submit(Runnable) returns Future<?>; submit(Callable<T>) returns Future<T> whose get() blocks and rethrows the task's exception wrapped in ExecutionException. Always shutdown() and awaitTermination -- a live pool keeps the JVM alive. Size: CPU-bound = cores; IO-bound = more.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(4);
+int runAll(java.util.List&lt;java.util.concurrent.Callable&lt;Integer&gt;&gt; tasks) throws Exception {
+    java.util.List&lt;java.util.concurrent.Future&lt;Integer&gt;&gt; fs = new java.util.ArrayList&lt;&gt;();
+    for (var t : tasks) fs.add(pool.submit(t));
+    int sum = 0;
+    for (var f : fs) {
+        try { sum += f.get(2, java.util.concurrent.TimeUnit.SECONDS); }
+        catch (java.util.concurrent.ExecutionException e) { throw (Exception) e.getCause(); }
+    }
+    return sum;
+}
+void stop() throws InterruptedException {
+    pool.shutdown();
+    if (!pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) pool.shutdownNow();
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Calling future.get() inside the loop that submits (serialises everything); forgetting shutdown; swallowing ExecutionException.</p>
+<p class="say"><b>Say:</b> &quot;I submit to a fixed pool and collect Futures; the pool size is the concurrency limit, not the thread count in my code.&quot;</p>
+</div></details><details class="card" id="synchronized" data-sec="B" data-name="synchronized and the intrinsic lock">
+<summary><span class="nm">synchronized and the intrinsic lock</span><span class="one">Every object has one lock; synchronized takes it for the block or method. Simple, reentrant, no timeout.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="synchronized"> missed</label></summary>
+<div class="body">
+<p class="tell">synchronized(obj) makes a block mutually exclusive on obj's monitor and publishes writes to the next thread that takes the same lock (visibility comes with the lock). A synchronized method locks this -- fine for small classes, dangerous when this is visible to callers who might lock it too. It is reentrant: a thread holding the lock can re-enter. No tryLock, no fairness, no interruptibility -- that is when you move to ReentrantLock.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class Counter {
+    private int n;                                   // guarded by this
+    synchronized void inc() { n++; }                 // read-modify-write is 3 ops; the lock makes it one
+    synchronized int get() { return n; }             // reads need the lock too, for visibility
+}
+class Account {
+    private final Object lock = new Object();        // private lock: callers cannot deadlock you
+    private long balance;
+    void deposit(long amt) { synchronized (lock) { balance += amt; } }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Synchronizing the write but not the read; synchronizing on a String literal or a boxed Integer (shared JVM-wide); check-then-act outside the lock.</p>
+<p class="say"><b>Say:</b> &quot;Counter is guarded by its own lock; both the increment and the read take it, because visibility needs the lock too.&quot;</p>
+</div></details><details class="card" id="volatile" data-sec="B" data-name="volatile: visibility, not atomicity">
+<summary><span class="nm">volatile: visibility, not atomicity</span><span class="one">volatile guarantees every thread sees the latest write. It does not make ++ atomic.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="volatile"> missed</label></summary>
+<div class="body">
+<p class="tell">Without volatile or a lock, a thread may cache a field forever and never see another thread's write. volatile forces reads and writes to main memory and forbids reordering around them. It is the right tool for a flag (running = false) and for the double-checked-locking singleton. It is the wrong tool for counters: n++ is read-modify-write and two threads still lose updates.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class Worker implements Runnable {
+    private volatile boolean running = true;         // flag: one writer, many readers
+    public void run() { while (running) { /* work */ } }
+    void stop() { running = false; }                 // seen by run() promptly
+}
+class BrokenCounter {
+    private volatile int n;
+    void inc() { n++; }                              // WRONG under contention: lost updates
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Believing volatile int fixes a counter; using a non-volatile boolean as a stop flag (the loop may never exit).</p>
+<p class="say"><b>Say:</b> &quot;The stop flag is volatile -- I need visibility, not atomicity. The counter is an AtomicInteger.&quot;</p>
+</div></details><details class="card" id="reentrantlock" data-sec="B" data-name="reentrantlock: trylock, fairness, finally">
+<summary><span class="nm">ReentrantLock: tryLock, fairness, finally</span><span class="one">An explicit lock you can try with a timeout, make fair, and pair with Conditions. Always unlock in finally.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="reentrantlock"> missed</label></summary>
+<div class="body">
+<p class="tell">lock() then the critical section then unlock() in a finally block -- an exception without the finally leaves the lock held forever. tryLock(timeout) lets you fail instead of block (deadlock avoidance, back-pressure). new ReentrantLock(true) is fair: FIFO handoff at a throughput cost. It is reentrant like synchronized. Use it when you need any of these; otherwise synchronized is less code.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class ParkingLot {
+    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+    String park(String plate) {
+        lock.lock();
+        try { return &quot;spot for &quot; + plate; }          // find + occupy + assign, atomic
+        finally { lock.unlock(); }
+    }
+    boolean tryPark(String plate) throws InterruptedException {
+        if (!lock.tryLock(200, java.util.concurrent.TimeUnit.MILLISECONDS)) return false;   // give up, do not queue
+        try { return true; } finally { lock.unlock(); }
+    }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> unlock() outside finally; locking in one method and unlocking in another; holding the lock while doing IO or calling observers that might lock too.</p>
+<p class="say"><b>Say:</b> &quot;Explicit lock with unlock in finally; I&#x27;d use tryLock with a timeout at the gate so a stuck lot fails fast instead of piling threads.&quot;</p>
+</div></details><details class="card" id="rwlock" data-sec="B" data-name="readwritelock: many readers, one writer">
+<summary><span class="nm">ReadWriteLock: many readers, one writer</span><span class="one">Readers share, writers exclude. Wins when reads dominate; costs more than a plain lock otherwise.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="rwlock"> missed</label></summary>
+<div class="body">
+<p class="tell">ReentrantReadWriteLock hands out a read lock (shared) and a write lock (exclusive). A config cache read a million times and updated hourly is the textbook case. Upgrading read to write is not allowed (deadlock) -- release the read lock, take the write lock, re-check. For very read-heavy data consider a volatile reference to an immutable snapshot instead: zero lock on read.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class ConfigCache {
+    private final java.util.concurrent.locks.ReadWriteLock rw = new java.util.concurrent.locks.ReentrantReadWriteLock();
+    private final java.util.Map&lt;String, String&gt; map = new java.util.HashMap&lt;&gt;();
+    String get(String k) {
+        rw.readLock().lock();
+        try { return map.get(k); } finally { rw.readLock().unlock(); }
+    }
+    void put(String k, String v) {
+        rw.writeLock().lock();
+        try { map.put(k, v); } finally { rw.writeLock().unlock(); }
+    }
+}
+class SnapshotCache {                                // lock-free reads: swap an immutable map
+    private volatile java.util.Map&lt;String, String&gt; snap = java.util.Map.of();
+    String get(String k) { return snap.get(k); }
+    void replaceAll(java.util.Map&lt;String, String&gt; m) { snap = java.util.Map.copyOf(m); }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Trying to upgrade a read lock to a write lock; using RW lock when writes are frequent (readers starve or it is slower than a mutex).</p>
+<p class="say"><b>Say:</b> &quot;Reads dominate, so a read-write lock -- or better, readers hit a volatile immutable snapshot and never lock at all.&quot;</p>
+</div></details><details class="card" id="condition" data-sec="B" data-name="condition / wait-notify: waiting for a state">
+<summary><span class="nm">Condition / wait-notify: waiting for a state</span><span class="one">Block until something becomes true, without spinning. Always wait in a while loop.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="condition"> missed</label></summary>
+<div class="body">
+<p class="tell">A Condition is tied to a lock: await() releases the lock and sleeps; signal()/signalAll() wakes waiters, who re-acquire the lock and must re-check the predicate -- spurious wake-ups and lost races are real, so the check is a while, never an if. wait/notify on an Object is the same idea with synchronized. Bounded buffer, blocking queue, H2O, print-in-order: all of them are this pattern.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class BoundedBuffer&lt;T&gt; {
+    private final java.util.Deque&lt;T&gt; q = new java.util.ArrayDeque&lt;&gt;();
+    private final int cap;
+    private final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition notFull = lock.newCondition(), notEmpty = lock.newCondition();
+    BoundedBuffer(int cap) { this.cap = cap; }
+    void put(T x) throws InterruptedException {
+        lock.lock();
+        try { while (q.size() == cap) notFull.await(); q.addLast(x); notEmpty.signal(); }
+        finally { lock.unlock(); }
+    }
+    T take() throws InterruptedException {
+        lock.lock();
+        try { while (q.isEmpty()) notEmpty.await(); T x = q.pollFirst(); notFull.signal(); return x; }
+        finally { lock.unlock(); }
+    }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> if instead of while around await; signal() when several waiters wait on different predicates share one condition (use signalAll or two conditions); calling await without holding the lock.</p>
+<p class="say"><b>Say:</b> &quot;Two conditions, notFull and notEmpty, each awaited in a while loop -- that is the whole producer-consumer.&quot;</p>
+</div></details><details class="card" id="atomic" data-sec="B" data-name="atomic* and the cas loop">
+<summary><span class="nm">Atomic* and the CAS loop</span><span class="one">compareAndSet(expected, new) succeeds only if nobody changed it -- lock-free updates for counters, flags, references.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="atomic"> missed</label></summary>
+<div class="body">
+<p class="tell">AtomicInteger.incrementAndGet is an atomic read-modify-write with no lock. For anything more complex, loop: read old, compute new, CAS; retry on failure. AtomicReference lets you CAS a whole immutable state object -- the lock-free way to claim a parking spot or flip a state machine. LongAdder beats AtomicLong under heavy contention for counters you only read occasionally.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.atomic.AtomicInteger seq = new java.util.concurrent.atomic.AtomicInteger();
+int nextId() { return seq.incrementAndGet(); }
+java.util.concurrent.atomic.AtomicReference&lt;String&gt; occupant = new java.util.concurrent.atomic.AtomicReference&lt;&gt;();
+boolean claimSpot(String plate) { return occupant.compareAndSet(null, plate); }   // wins or loses, no lock
+java.util.concurrent.atomic.AtomicLong balance = new java.util.concurrent.atomic.AtomicLong(100);
+boolean withdraw(long amt) {
+    while (true) {                                   // the CAS loop
+        long cur = balance.get();
+        if (cur &lt; amt) return false;
+        if (balance.compareAndSet(cur, cur - amt)) return true;   // someone else moved it: retry
+    }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> get() then set() as two steps (that is the race you were avoiding); CAS on a mutable object&#x27;s field instead of swapping an immutable value.</p>
+<p class="say"><b>Say:</b> &quot;The spot&#x27;s occupant is an AtomicReference; claiming it is one compareAndSet from null -- no lock, and a loser just tries the next spot.&quot;</p>
+</div></details><details class="card" id="chm" data-sec="B" data-name="concurrenthashmap: computeifabsent, merge, putifabsent">
+<summary><span class="nm">ConcurrentHashMap: computeIfAbsent, merge, putIfAbsent</span><span class="one">A thread-safe map whose compound operations are atomic per key -- your get-or-create and counter in one call.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="chm"> missed</label></summary>
+<div class="body">
+<p class="tell">HashMap corrupts under concurrent writes; Collections.synchronizedMap locks the whole map. ConcurrentHashMap locks per bin, and its compute methods make read-modify-write atomic for that key: computeIfAbsent for get-or-create (one lock per key, built lazily), merge for counters, putIfAbsent for claim-once. Iteration is weakly consistent: no exception, may miss concurrent updates. Do not block inside a compute function.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.ConcurrentHashMap&lt;String, java.util.concurrent.locks.ReentrantLock&gt; locks = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+java.util.concurrent.locks.ReentrantLock lockFor(String key) {
+    return locks.computeIfAbsent(key, k -&gt; new java.util.concurrent.locks.ReentrantLock());   // per-key lock, striped by key
+}
+java.util.concurrent.ConcurrentHashMap&lt;String, Integer&gt; hits = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+void hit(String url) { hits.merge(url, 1, Integer::sum); }                      // atomic counter per key
+java.util.concurrent.ConcurrentHashMap&lt;String, String&gt; claims = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+boolean claim(String seat, String user) { return claims.putIfAbsent(seat, user) == null; }   // first writer wins</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> if (!map.containsKey(k)) map.put(k, v) -- two steps, racy; holding a lock inside computeIfAbsent; assuming size() is exact under load.</p>
+<p class="say"><b>Say:</b> &quot;putIfAbsent is my claim-once: the first thread to write the seat wins, the second sees a non-null and is rejected.&quot;</p>
+</div></details><details class="card" id="blockingqueue" data-sec="B" data-name="blockingqueue: producer-consumer without writing a lock">
+<summary><span class="nm">BlockingQueue: producer-consumer without writing a lock</span><span class="one">put blocks when full, take blocks when empty. The bounded queue is your back-pressure.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="blockingqueue"> missed</label></summary>
+<div class="body">
+<p class="tell">ArrayBlockingQueue(cap) is the bounded buffer from the Condition card, already written and tested. Producers put, consumers take; the capacity limits memory and slows producers when consumers fall behind. offer(x, timeout) and poll(timeout) give up instead of blocking. Shut down with a poison pill or by interrupting consumers. LinkedBlockingQueue is unbounded by default -- say why you bounded it.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.BlockingQueue&lt;String&gt; q = new java.util.concurrent.ArrayBlockingQueue&lt;&gt;(1000);
+static final String POISON = &quot;__stop__&quot;;
+void producer(java.util.List&lt;String&gt; jobs) throws InterruptedException {
+    for (String j : jobs) q.put(j);                  // blocks when 1000 are waiting: back-pressure
+    q.put(POISON);
+}
+void consumer() throws InterruptedException {
+    while (true) {
+        String j = q.take();                          // blocks when empty, no spinning
+        if (j.equals(POISON)) return;
+        process(j);
+    }
+}
+void process(String j) {}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> An unbounded queue with a slow consumer (OOM); busy-polling with poll() in a loop; forgetting how consumers stop.</p>
+<p class="say"><b>Say:</b> &quot;A bounded ArrayBlockingQueue: put blocks producers when consumers lag, which is the back-pressure -- no lock code of my own.&quot;</p>
+</div></details><details class="card" id="semaphore" data-sec="B" data-name="semaphore, countdownlatch, cyclicbarrier">
+<summary><span class="nm">Semaphore, CountDownLatch, CyclicBarrier</span><span class="one">Permits for &#x27;at most N at once&#x27;; a latch for &#x27;wait until N things are done&#x27;; a barrier for &#x27;all meet here, then continue&#x27;.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="semaphore"> missed</label></summary>
+<div class="body">
+<p class="tell">Semaphore(N): acquire before the limited resource, release in finally -- a connection pool, a rate cap, H2O's two hydrogens. CountDownLatch(N): workers countDown, the waiter awaits once; it cannot be reset. CyclicBarrier(N): N threads await each other and then all proceed; reusable, with an optional action at the trip -- the H2O 'three atoms bond' pattern.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.Semaphore permits = new java.util.concurrent.Semaphore(3);   // max 3 concurrent downloads
+void download(String url) throws InterruptedException {
+    permits.acquire();
+    try { /* fetch */ } finally { permits.release(); }
+}
+int parallelSum(java.util.List&lt;Integer&gt; xs, java.util.concurrent.ExecutorService pool) throws InterruptedException {
+    java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(xs.size());
+    java.util.concurrent.atomic.AtomicInteger sum = new java.util.concurrent.atomic.AtomicInteger();
+    for (int x : xs) pool.submit(() -&gt; { sum.addAndGet(x); done.countDown(); });
+    done.await();                                     // wait until every task counted down
+    return sum.get();
+}
+java.util.concurrent.CyclicBarrier bond = new java.util.concurrent.CyclicBarrier(3, () -&gt; System.out.println(&quot;H2O&quot;));</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> release() outside finally (a leaked permit shrinks your pool forever); reusing a CountDownLatch; a barrier with the wrong party count hangs forever.</p>
+<p class="say"><b>Say:</b> &quot;Semaphore of N permits caps concurrency; release is in finally so an exception can never leak a permit.&quot;</p>
+</div></details><details class="card" id="deadlock" data-sec="B" data-name="deadlock, lock ordering, and lock striping">
+<summary><span class="nm">deadlock, lock ordering, and lock striping</span><span class="one">Two locks taken in opposite orders deadlock. Fix by a global order, a single lock, or tryLock with timeout.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="deadlock"> missed</label></summary>
+<div class="body">
+<p class="tell">Transfer(a, b) locking a then b while another thread does transfer(b, a) is the classic. Always acquire multiple locks in a canonical order (by id), or take one coarser lock, or tryLock both with a timeout and back off. Striping: instead of one global lock, an array of N locks indexed by hash(key) % N -- keys on different stripes proceed in parallel, the same key always serialises. That is the 'lock per floor / per size bucket' upgrade.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class Bank {
+    void transfer(Account from, Account to, long amt) {
+        Account first = from.id &lt; to.id ? from : to, second = first == from ? to : from;   // canonical order
+        synchronized (first) { synchronized (second) { from.balance -= amt; to.balance += amt; } }
+    }
+    static class Account { final int id; long balance; Account(int id) { this.id = id; } }
+}
+class Striped {
+    private final java.util.concurrent.locks.ReentrantLock[] stripes = new java.util.concurrent.locks.ReentrantLock[16];
+    Striped() { for (int i = 0; i &lt; 16; i++) stripes[i] = new java.util.concurrent.locks.ReentrantLock(); }
+    java.util.concurrent.locks.ReentrantLock forKey(Object k) { return stripes[(k.hashCode() &amp; 0x7fffffff) % 16]; }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Locking on the objects in argument order; a global lock &#x27;to be safe&#x27; that serialises every gate; forgetting that hashCode can be negative when picking a stripe.</p>
+<p class="say"><b>Say:</b> &quot;Two accounts, one order: lower id first, always. Under many gates I stripe the lock by floor so different floors park in parallel.&quot;</p>
+</div></details><details class="card" id="immutability" data-sec="B" data-name="immutability and confinement: the sync you do not write">
+<summary><span class="nm">immutability and confinement: the sync you do not write</span><span class="one">If it never changes, or only one thread ever sees it, it needs no lock. Design for that first.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="immutability"> missed</label></summary>
+<div class="body">
+<p class="tell">The best concurrency answer is often 'this object is immutable' or 'this state is owned by one thread'. Events, ids, config snapshots: immutable, share freely. Per-request state: confined to the thread, no sharing. ThreadLocal gives each thread its own copy (a formatter, a request context) -- clear it in a pool or it leaks between requests. Copy-on-write (CopyOnWriteArrayList, volatile snapshot swap) for listener lists that change rarely and are read constantly.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">final class Snapshot { final java.util.Map&lt;String, Integer&gt; free; Snapshot(java.util.Map&lt;String, Integer&gt; f) { free = java.util.Map.copyOf(f); } }
+class Board {
+    private volatile Snapshot latest = new Snapshot(java.util.Map.of());    // readers: one volatile read, no lock
+    void publish(java.util.Map&lt;String, Integer&gt; free) { latest = new Snapshot(free); }
+    int free(String size) { return latest.free.getOrDefault(size, 0); }
+}
+java.util.concurrent.CopyOnWriteArrayList&lt;Runnable&gt; listeners = new java.util.concurrent.CopyOnWriteArrayList&lt;&gt;();   // iterate freely, add rarely
+static final ThreadLocal&lt;StringBuilder&gt; BUF = ThreadLocal.withInitial(StringBuilder::new);</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Sharing a mutable collection through a &#x27;final&#x27; field and thinking final made it safe; CopyOnWrite for a list that changes on every request.</p>
+<p class="say"><b>Say:</b> &quot;The board reads a volatile immutable snapshot; the writer swaps it. No lock on the read path at all.&quot;</p>
+</div></details><details class="card" id="completable" data-sec="B" data-name="completablefuture: composing async work (sde-3)">
+<summary><span class="nm">CompletableFuture: composing async work (SDE-3)</span><span class="one">Chain async steps with thenApply/thenCompose, join fan-outs with allOf, add timeouts and fallbacks.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="completable"> missed</label></summary>
+<div class="body">
+<p class="tell">supplyAsync runs a task on a pool and returns a future you can compose without blocking. thenApply transforms, thenCompose chains another async call, thenCombine joins two, allOf waits for many, exceptionally supplies a fallback, orTimeout fails after a deadline. This is how you fan out to three services and join -- the pattern behind a feed that calls counters, media and profile in parallel.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">java.util.concurrent.ExecutorService io = java.util.concurrent.Executors.newFixedThreadPool(8);
+java.util.concurrent.CompletableFuture&lt;String&gt; fetchUser(String id) { return java.util.concurrent.CompletableFuture.supplyAsync(() -&gt; &quot;user:&quot; + id, io); }
+java.util.concurrent.CompletableFuture&lt;Integer&gt; fetchLikes(String id) { return java.util.concurrent.CompletableFuture.supplyAsync(() -&gt; 42, io); }
+String page(String id) {
+    var user = fetchUser(id).orTimeout(300, java.util.concurrent.TimeUnit.MILLISECONDS);
+    var likes = fetchLikes(id).exceptionally(e -&gt; 0);                                    // degrade, do not fail the page
+    return user.thenCombine(likes, (u, l) -&gt; u + &quot; likes=&quot; + l).join();               // join = get() without checked exception
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Calling join() inside a thenApply (blocks the pool thread); running IO on the common ForkJoinPool; no timeout on a remote call.</p>
+<p class="say"><b>Say:</b> &quot;Three independent fetches fan out as CompletableFutures on an IO pool and join with thenCombine; the non-critical one degrades with exceptionally.&quot;</p>
+</div></details><details class="card" id="memorymodel" data-sec="B" data-name="the memory model in three sentences (sde-3)">
+<summary><span class="nm">the memory model in three sentences (SDE-3)</span><span class="one">Without a happens-before edge, a thread may never see another&#x27;s write. Locks, volatile, and thread start/join create edges.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="memorymodel"> missed</label></summary>
+<div class="body">
+<p class="tell">Java lets the compiler and CPU reorder and cache. A write is guaranteed visible to a read only if there is a happens-before chain between them: unlock happens-before the next lock of the same monitor; a volatile write happens-before a subsequent volatile read; Thread.start happens-before the thread's actions; a thread's actions happen-before join() returns; executor submit happens-before the task; future.get sees the task's writes. Every 'is this safe?' question reduces to 'where is the edge?'</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class Config {
+    private static volatile Config INSTANCE;             // volatile: the write of the fully built object is published
+    static Config get() {
+        Config c = INSTANCE;
+        if (c == null) {
+            synchronized (Config.class) {                 // double-checked locking, correct only with volatile
+                c = INSTANCE;
+                if (c == null) INSTANCE = c = new Config();
+            }
+        }
+        return c;
+    }
+}
+enum Registry { INSTANCE; }                                // the singleton with no such problem at all</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Double-checked locking without volatile (a thread can see a non-null, half-constructed object); &#x27;it works on my machine&#x27; as a visibility argument.</p>
+<p class="say"><b>Say:</b> &quot;The write is published by the unlock; the reader takes the same lock, so there is a happens-before edge and it sees it.&quot;</p>
+</div></details></section><section class="sec" id="secC"><h2><span>C</span>SOLID, as before/after code</h2><p class="lede">Five principles, each shown as the violation and the fix. You will be asked to map them to your design -- the answer is a class name, not a definition.</p><details class="card" id="srp" data-sec="C" data-name="s -- single responsibility">
+<summary><span class="nm">S -- single responsibility</span><span class="one">One class, one reason to change. The tell: a class whose name needs &#x27;and&#x27;.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="srp"> missed</label></summary>
+<div class="body">
+<p class="tell">OrderService that validates, prices, persists and emails changes for four different reasons and is tested four ways at once. Split by reason-to-change: a validator, a pricer, a repository, a notifier -- the service orchestrates. In a round, the smell is one class over ~150 lines or a method that reads like a checklist.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// BEFORE: one class, four reasons to change
+class OrderServiceBefore {
+    void place(String order) { /* validate */ /* price */ /* save to db */ /* send email */ }
+}
+// AFTER: each concern is its own class; the service only orchestrates
+interface Validator { void validate(String o); }
+interface Pricer { long price(String o); }
+interface OrderRepo { void save(String o, long price); }
+interface Notifier { void placed(String o); }
+class OrderService {
+    private final Validator v; private final Pricer p; private final OrderRepo r; private final Notifier n;
+    OrderService(Validator v, Pricer p, OrderRepo r, Notifier n) { this.v = v; this.p = p; this.r = r; this.n = n; }
+    void place(String o) { v.validate(o); long price = p.price(o); r.save(o, price); n.placed(o); }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Splitting by noun instead of by reason-to-change (a &#x27;Utils&#x27; class is not SRP); splitting so far that a feature touches ten files.</p>
+<p class="say"><b>Say:</b> &quot;Pricing changes for business reasons, persistence for infra reasons -- different classes, so a pricing change never risks the save.&quot;</p>
+</div></details><details class="card" id="ocp" data-sec="C" data-name="o -- open for extension, closed for modification">
+<summary><span class="nm">O -- open for extension, closed for modification</span><span class="one">Add a new case by adding a class, not by editing a switch that already works.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="ocp"> missed</label></summary>
+<div class="body">
+<p class="tell">A switch over payment types grows a case every quarter and every case re-tests the others. Put the varying behaviour behind an interface and register implementations; the caller never changes. Strategy, State and the Factory registry are all OCP in practice. The honest limit: some switches over a closed enum are fine -- OCP is for the axis that actually varies.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// BEFORE: every new method edits this switch
+double feeBefore(String type, double amt) {
+    switch (type) { case &quot;CARD&quot;: return amt * 0.02; case &quot;UPI&quot;: return 0; default: throw new IllegalArgumentException(); }
+}
+// AFTER: a new method is a new class registered once
+interface FeePolicy { double fee(double amt); }
+class CardFee implements FeePolicy { public double fee(double a) { return a * 0.02; } }
+class UpiFee implements FeePolicy { public double fee(double a) { return 0; } }
+java.util.Map&lt;String, FeePolicy&gt; policies = new java.util.HashMap&lt;&gt;(java.util.Map.of(&quot;CARD&quot;, new CardFee(), &quot;UPI&quot;, new UpiFee()));
+double fee(String type, double amt) { return policies.get(type).fee(amt); }</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> instanceof chains over a hierarchy (the hierarchy is telling you to add a method); over-abstracting an axis that never varies.</p>
+<p class="say"><b>Say:</b> &quot;Adding weekend pricing was a new class and one line at the call site -- the lot did not change. That is open-closed doing its job.&quot;</p>
+</div></details><details class="card" id="lsp" data-sec="C" data-name="l -- liskov substitution">
+<summary><span class="nm">L -- Liskov substitution</span><span class="one">A subtype must be usable anywhere the parent is, without surprises: no stricter preconditions, no weaker guarantees, no thrown &#x27;not supported&#x27;.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="lsp"> missed</label></summary>
+<div class="body">
+<p class="tell">Square extends Rectangle breaks setWidth. A ReadOnlyList that throws on add breaks every caller of List. The fix is usually composition or a different interface split: model what the thing can actually do. In a round: if an override throws UnsupportedOperationException, or a caller checks the concrete type before calling, LSP is broken.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// BEFORE: subtype weakens the contract
+class Bird { void fly() {} }
+class Penguin extends Bird { @Override void fly() { throw new UnsupportedOperationException(); } }   // callers of Bird now crash
+// AFTER: model the capability, not the taxonomy
+interface Flyer { void fly(); }
+class Sparrow implements Flyer { public void fly() {} }
+class Emperor { void swim() {} }                       // a penguin is simply not a Flyer
+void migrate(java.util.List&lt;Flyer&gt; flock) { for (Flyer f : flock) f.fly(); }   // never checks types</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> &#x27;is-a&#x27; chosen from real-world taxonomy instead of behaviour; overriding to no-op or throw.</p>
+<p class="say"><b>Say:</b> &quot;Any PricingStrategy drops in for another; the lot never downcasts or checks which one it got. That is substitutability.&quot;</p>
+</div></details><details class="card" id="isp" data-sec="C" data-name="i -- interface segregation">
+<summary><span class="nm">I -- interface segregation</span><span class="one">Small, role-specific interfaces. Nobody should implement methods they do not need.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="isp"> missed</label></summary>
+<div class="body">
+<p class="tell">A fat Worker interface with work(), eat(), sleep() forces a RobotWorker to implement eat(). Split by client need: Workable, Feedable. In LLD this is why PricingStrategy has one method and PaymentProcessor is separate -- a cash payment is never asked to price a ticket. Rule of thumb: an interface is named for a capability and has one to three methods.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// BEFORE: one fat interface
+interface Machine { void print(); void scan(); void fax(); }
+class BasicPrinter implements Machine { public void print() {} public void scan() { throw new UnsupportedOperationException(); } public void fax() { throw new UnsupportedOperationException(); } }
+// AFTER: roles
+interface Printer { void print(); }
+interface Scanner { void scan(); }
+class Simple implements Printer { public void print() {} }
+class AllInOne implements Printer, Scanner { public void print() {} public void scan() {} }</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> One &#x27;Service&#x27; interface with twelve methods that every implementation half-stubs; splitting into one-method interfaces for things always used together.</p>
+<p class="say"><b>Say:</b> &quot;One-method interfaces: a payment processor is never forced to know about pricing.&quot;</p>
+</div></details><details class="card" id="dip" data-sec="C" data-name="d -- dependency inversion (and injection)">
+<summary><span class="nm">D -- dependency inversion (and injection)</span><span class="one">Depend on abstractions; hand dependencies in through the constructor. The class never news its collaborators.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="dip"> missed</label></summary>
+<div class="body">
+<p class="tell">OrderService that does new MySqlRepo() inside is welded to MySQL and untestable. Depend on the Repo interface and receive it in the constructor; the composition root (main, or a DI framework) decides the concrete class. Constructor injection over setters: the object is valid the moment it exists. This is also the answer to 'how do you unit-test a singleton': you do not call getInstance inside -- you inject.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// BEFORE: welded to a concrete class, cannot be tested without a database
+class ReportBefore { private final MySqlRepo repo = new MySqlRepo(); }
+class MySqlRepo { java.util.List&lt;String&gt; all() { return java.util.List.of(); } }
+// AFTER: depend on the interface, inject the implementation
+interface Repo { java.util.List&lt;String&gt; all(); }
+class Report {
+    private final Repo repo;
+    Report(Repo repo) { this.repo = repo; }             // constructor injection: valid on construction
+    int count() { return repo.all().size(); }
+}
+class InMemoryRepo implements Repo { public java.util.List&lt;String&gt; all() { return java.util.List.of(&quot;a&quot;, &quot;b&quot;); } }
+// composition root: new Report(new InMemoryRepo()) in tests, new Report(new SqlRepo()) in prod</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Service locators and static getInstance() calls buried in business code; setter injection that leaves the object half-configured.</p>
+<p class="say"><b>Say:</b> &quot;The lot is handed its strategies through configure; in tests I hand it fakes. It never constructs a collaborator itself.&quot;</p>
+</div></details></section><section class="sec" id="secD"><h2><span>D</span>Design patterns, as pain then shape</h2><p class="lede">Twelve patterns you will actually use. Each opens with the sentence that triggers it, because a pattern named before its pain is a red flag.</p><details class="card" id="strategy" data-sec="D" data-name="strategy -- a swappable algorithm">
+<summary><span class="nm">Strategy -- a swappable algorithm</span><span class="one">Pain: &#x27;they will want to change this rule&#x27;. Shape: an interface for the rule, injected.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="strategy"> missed</label></summary>
+<div class="body">
+<p class="tell">Pricing, spot assignment, eviction policy, matching rule, rate-limit algorithm, payment method. The context holds a reference to the interface and calls it; a new rule is a new class. Name it only when the swap is real -- the moment the interviewer changes the rule mid-round is the moment it earns its name.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface EvictionPolicy&lt;K&gt; { K victim(java.util.Collection&lt;K&gt; keys); }
+class EvictLru&lt;K&gt; implements EvictionPolicy&lt;K&gt; { public K victim(java.util.Collection&lt;K&gt; keys) { return keys.iterator().next(); } }
+class Cache&lt;K, V&gt; {
+    private final java.util.Map&lt;K, V&gt; map = new java.util.LinkedHashMap&lt;&gt;();
+    private final EvictionPolicy&lt;K&gt; policy; private final int cap;
+    Cache(int cap, EvictionPolicy&lt;K&gt; policy) { this.cap = cap; this.policy = policy; }   // injected
+    void put(K k, V v) { if (map.size() &gt;= cap &amp;&amp; !map.containsKey(k)) map.remove(policy.victim(map.keySet())); map.put(k, v); }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> A strategy that needs six context fields passed in (it is not one algorithm, it is the whole class); announcing Strategy before any rule has varied.</p>
+<p class="say"><b>Say:</b> &quot;Eviction is a policy I inject; LRU today, LFU tomorrow, cache untouched.&quot;</p>
+</div></details><details class="card" id="factory" data-sec="D" data-name="factory -- creation logic in one place">
+<summary><span class="nm">Factory -- creation logic in one place</span><span class="one">Pain: creation needs a decision (type string, config, environment). Shape: one method that returns the interface.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="factory"> missed</label></summary>
+<div class="body">
+<p class="tell">When new Car(...) versus new Truck(...) depends on input, put the decision in a factory so callers get a Vehicle and never a switch. A static factory method is enough in a round; a registry map from key to supplier is the extensible version (open-closed). Abstract Factory is a family of related products (a UI kit) -- name it only if asked.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface Vehicle { int wheels(); }
+class Bike implements Vehicle { public int wheels() { return 2; } }
+class Car implements Vehicle { public int wheels() { return 4; } }
+class VehicleFactory {
+    private static final java.util.Map&lt;String, java.util.function.Supplier&lt;Vehicle&gt;&gt; REG =
+        new java.util.HashMap&lt;&gt;(java.util.Map.of(&quot;bike&quot;, Bike::new, &quot;car&quot;, Car::new));
+    static Vehicle create(String type) {
+        var s = REG.get(type.toLowerCase());
+        if (s == null) throw new IllegalArgumentException(&quot;unknown vehicle: &quot; + type);
+        return s.get();
+    }
+    static void register(String type, java.util.function.Supplier&lt;Vehicle&gt; s) { REG.put(type, s); }   // new type, no edit
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> A factory for a class with one implementation; a switch inside the factory that grows forever when a registry map would not.</p>
+<p class="say"><b>Say:</b> &quot;Creation from a type string goes through a registry factory, so a new vehicle type is a registration, not an edit.&quot;</p>
+</div></details><details class="card" id="observer" data-sec="D" data-name="observer -- publish a change, do not call the listeners by name">
+<summary><span class="nm">Observer -- publish a change, do not call the listeners by name</span><span class="one">Pain: &#x27;the board / email / audit log must update, but the core must not know about them&#x27;. Shape: subject keeps listeners, notifies on change.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="observer"> missed</label></summary>
+<div class="body">
+<p class="tell">The parking floor publishes 'occupancy changed'; the display board, the metrics and the audit log subscribe. The floor never imports any of them. Keep the listener list copy-on-write so notifying while someone subscribes is safe, and never call listeners while holding your own lock -- publish after unlock, or hand the event to a queue.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface Listener&lt;E&gt; { void on(E event); }
+class EventBus&lt;E&gt; {
+    private final java.util.List&lt;Listener&lt;E&gt;&gt; ls = new java.util.concurrent.CopyOnWriteArrayList&lt;&gt;();
+    void subscribe(Listener&lt;E&gt; l) { ls.add(l); }
+    void publish(E e) { for (Listener&lt;E&gt; l : ls) l.on(e); }   // iterate a snapshot; safe against concurrent subscribe
+}
+record Occupancy(String floor, int free) {}
+class Floor {
+    final EventBus&lt;Occupancy&gt; bus = new EventBus&lt;&gt;();
+    private int free = 10;
+    void occupy() { int f; synchronized (this) { f = --free; } bus.publish(new Occupancy(&quot;F1&quot;, f)); }   // publish outside the lock
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Notifying inside the critical section (a slow listener blocks every gate; a listener that locks back deadlocks you); a listener that throws and stops the others.</p>
+<p class="say"><b>Say:</b> &quot;The floor publishes an occupancy event after it releases its lock; the board is a subscriber the floor never names.&quot;</p>
+</div></details><details class="card" id="state" data-sec="D" data-name="state -- behaviour depends on which state you are in">
+<summary><span class="nm">State -- behaviour depends on which state you are in</span><span class="one">Pain: methods full of &#x27;if (status == X)&#x27;. Shape: one class per state, the context delegates, transitions return the next state.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="state"> missed</label></summary>
+<div class="body">
+<p class="tell">Vending machine, elevator, order lifecycle, ticket lifecycle, connection. Each state implements the same interface; illegal operations in a state are explicit (throw or no-op) instead of buried in a switch. Transitions are the only place state changes. For simple lifecycles an enum with a transition table is enough -- say so.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface VmState { VmState insertCoin(Vm vm); VmState select(Vm vm); }
+class Idle implements VmState {
+    public VmState insertCoin(Vm vm) { vm.credit++; return new HasCoin(); }
+    public VmState select(Vm vm) { throw new IllegalStateException(&quot;insert a coin first&quot;); }
+}
+class HasCoin implements VmState {
+    public VmState insertCoin(Vm vm) { vm.credit++; return this; }
+    public VmState select(Vm vm) { vm.credit--; vm.dispensed++; return vm.credit &gt; 0 ? this : new Idle(); }
+}
+class Vm {
+    int credit, dispensed; private VmState state = new Idle();
+    void insertCoin() { state = state.insertCoin(this); }
+    void select() { state = state.select(this); }
+}
+enum OrderStatus { CREATED, PAID, SHIPPED, DELIVERED, CANCELLED }       // simple lifecycles: enum + a transition check</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> A giant switch on status in every method; states that reach into the context&#x27;s private fields; allowing any transition.</p>
+<p class="say"><b>Say:</b> &quot;Ticket status is a small state machine: lost is one transition that bills the cap, not an if scattered through unpark.&quot;</p>
+</div></details><details class="card" id="command" data-sec="D" data-name="command -- an action as an object (undo, queue, replay)">
+<summary><span class="nm">Command -- an action as an object (undo, queue, replay)</span><span class="one">Pain: undo/redo, scheduling, audit of operations. Shape: execute() and undo() on an object that captures its arguments.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="command"> missed</label></summary>
+<div class="body">
+<p class="tell">Text editor, spreadsheet, task scheduler, transaction log. Each user action becomes a Command with enough captured state to reverse itself; a history stack gives undo, a second stack gives redo. Commands can be queued, retried, logged, replayed -- which is why an append-only log of commands is also event sourcing's cousin.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface Command { void execute(); void undo(); }
+class Editor { final StringBuilder text = new StringBuilder(); }
+class Insert implements Command {
+    private final Editor ed; private final int at; private final String s;
+    Insert(Editor ed, int at, String s) { this.ed = ed; this.at = at; this.s = s; }
+    public void execute() { ed.text.insert(at, s); }
+    public void undo() { ed.text.delete(at, at + s.length()); }
+}
+class History {
+    private final java.util.Deque&lt;Command&gt; done = new java.util.ArrayDeque&lt;&gt;(), undone = new java.util.ArrayDeque&lt;&gt;();
+    void run(Command c) { c.execute(); done.push(c); undone.clear(); }
+    void undo() { if (!done.isEmpty()) { Command c = done.pop(); c.undo(); undone.push(c); } }
+    void redo() { if (!undone.isEmpty()) { Command c = undone.pop(); c.execute(); done.push(c); } }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Undo implemented by snapshotting the whole document per keystroke (Memento is for that, and it is heavy); clearing redo forgotten after a new command.</p>
+<p class="say"><b>Say:</b> &quot;Every edit is a Command with its own undo; two stacks give undo and redo, and the same objects can be logged and replayed.&quot;</p>
+</div></details><details class="card" id="decorator" data-sec="D" data-name="decorator -- wrap to add behaviour, keep the interface">
+<summary><span class="nm">Decorator -- wrap to add behaviour, keep the interface</span><span class="one">Pain: &#x27;add surge / logging / caching / retry to X without touching X&#x27;. Shape: implement the same interface, hold the wrapped one.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="decorator"> missed</label></summary>
+<div class="body">
+<p class="tell">WeekendSurge wraps FlatHourly; a CachingRepo wraps a Repo; a RetryingClient wraps a Client. Each decorator implements the interface and delegates, adding its behaviour before or after. They stack in any order. The tell that it is Decorator and not Strategy: it keeps the original and calls it.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface Pricing { double price(long minutes); }
+class Flat implements Pricing { public double price(long m) { return Math.ceil(m / 60.0) * 20; } }
+class Surge implements Pricing {                       // wraps, does not replace
+    private final Pricing base; private final double factor;
+    Surge(Pricing base, double factor) { this.base = base; this.factor = factor; }
+    public double price(long m) { return base.price(m) * factor; }
+}
+class Capped implements Pricing {
+    private final Pricing base; private final double cap;
+    Capped(Pricing base, double cap) { this.base = base; this.cap = cap; }
+    public double price(long m) { return Math.min(cap, base.price(m)); }
+}
+Pricing weekend = new Capped(new Surge(new Flat(), 1.5), 500);   // stacks: cap(surge(flat))</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Subclassing Flat to make Surge (one subclass per combination explodes); a decorator that changes the interface (that is Adapter).</p>
+<p class="say"><b>Say:</b> &quot;Surge wraps the base rule and multiplies -- a Decorator, so surge-plus-cap is just two wraps.&quot;</p>
+</div></details><details class="card" id="builder" data-sec="D" data-name="builder -- constructing an object with many optional parts">
+<summary><span class="nm">Builder -- constructing an object with many optional parts</span><span class="one">Pain: a constructor with eight parameters, four of them nullable. Shape: a fluent builder that validates in build().</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="builder"> missed</label></summary>
+<div class="body">
+<p class="tell">Search queries, HTTP requests, configuration, an Order with optional coupon, address, notes. The builder collects parts by name, applies defaults, validates once in build(), and returns an immutable object. In a round, mention it when a constructor call would need comments to read.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">final class Request {
+    final String url, method; final java.util.Map&lt;String, String&gt; headers; final int timeoutMs;
+    private Request(Builder b) { url = b.url; method = b.method; headers = java.util.Map.copyOf(b.headers); timeoutMs = b.timeoutMs; }
+    static Builder to(String url) { return new Builder(url); }
+    static final class Builder {
+        private final String url; private String method = &quot;GET&quot;; private int timeoutMs = 1000;
+        private final java.util.Map&lt;String, String&gt; headers = new java.util.HashMap&lt;&gt;();
+        Builder(String url) { this.url = url; }
+        Builder method(String m) { method = m; return this; }
+        Builder header(String k, String v) { headers.put(k, v); return this; }
+        Builder timeout(int ms) { timeoutMs = ms; return this; }
+        Request build() { if (timeoutMs &lt;= 0) throw new IllegalStateException(&quot;timeout&quot;); return new Request(this); }
+    }
+}
+Request r = Request.to(&quot;/x&quot;).method(&quot;POST&quot;).header(&quot;a&quot;, &quot;b&quot;).timeout(500).build();</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> A builder for a two-field class; a builder that returns a mutable object; validation spread over setters instead of build().</p>
+<p class="say"><b>Say:</b> &quot;Eight optional fields: a builder with defaults and one validation in build, returning an immutable request.&quot;</p>
+</div></details><details class="card" id="singleton" data-sec="D" data-name="singleton -- exactly one, and why you avoid it">
+<summary><span class="nm">Singleton -- exactly one, and why you avoid it</span><span class="one">Pain: one registry, one connection pool, one lot. Shape: enum singleton or a static holder; then inject it anyway.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="singleton"> missed</label></summary>
+<div class="body">
+<p class="tell">The enum singleton is thread-safe, serialisation-safe and one line. The holder idiom (nested static class) is lazy and safe without volatile. Double-checked locking needs volatile. Then the senior sentence: the singleton is a composition-root convenience -- business classes receive it through the constructor, never call getInstance, or they cannot be tested.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">enum Registry { INSTANCE; final java.util.Map&lt;String, String&gt; m = new java.util.concurrent.ConcurrentHashMap&lt;&gt;(); }
+class Pool {
+    private Pool() {}
+    private static class Holder { static final Pool INSTANCE = new Pool(); }   // lazy, thread-safe by class-init rules
+    static Pool get() { return Holder.INSTANCE; }
+}
+class Service {
+    private final Pool pool;
+    Service(Pool pool) { this.pool = pool; }              // injected -- tests pass a fake
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> getInstance() calls sprinkled through services; mutable global state disguised as a singleton; DCL without volatile.</p>
+<p class="say"><b>Say:</b> &quot;One lot instance via a holder, but every service gets it injected -- so tests never touch the static.&quot;</p>
+</div></details><details class="card" id="template" data-sec="D" data-name="template method and chain of responsibility">
+<summary><span class="nm">Template Method and Chain of Responsibility</span><span class="one">Template: a fixed skeleton with overridable steps. Chain: a request passes handlers until one takes it.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="template"> missed</label></summary>
+<div class="body">
+<p class="tell">Template Method: an abstract class defines the algorithm's steps in order (validate, execute, record) and subclasses fill hooks -- payment flows, report generation. Chain of Responsibility: handlers linked in sequence, each decides to handle or pass -- request filters, approval levels, ATM dispensing by denomination, logging levels. Prefer composition (a list of handlers) over a linked chain in a round.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">abstract class PaymentFlow {
+    final boolean pay(long amt) { if (!validate(amt)) return false; boolean ok = charge(amt); record(amt, ok); return ok; }   // the template
+    protected boolean validate(long amt) { return amt &gt; 0; }
+    protected abstract boolean charge(long amt);
+    protected void record(long amt, boolean ok) {}
+}
+class CardFlow extends PaymentFlow { protected boolean charge(long amt) { return true; } }
+interface Handler { boolean handle(String req); }          // chain: first handler that returns true stops it
+class Pipeline {
+    private final java.util.List&lt;Handler&gt; hs = new java.util.ArrayList&lt;&gt;();
+    Pipeline add(Handler h) { hs.add(h); return this; }
+    boolean run(String req) { for (Handler h : hs) if (h.handle(req)) return true; return false; }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Template Method hierarchies three levels deep (prefer Strategy composition); a chain where every handler must be called (that is a pipeline, not CoR).</p>
+<p class="say"><b>Say:</b> &quot;Approval is a chain: manager, director, VP -- each handles or passes; adding a level is a new handler.&quot;</p>
+</div></details><details class="card" id="adapter" data-sec="D" data-name="adapter, facade, proxy -- the wrapping trio">
+<summary><span class="nm">Adapter, Facade, Proxy -- the wrapping trio</span><span class="one">Adapter converts an interface; Facade simplifies a subsystem; Proxy controls access to the same interface.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="adapter"> missed</label></summary>
+<div class="body">
+<p class="tell">Adapter: your PaymentProcessor interface over a third-party SDK with a different shape. Facade: one BookingFacade over inventory, payment and notification so the controller makes one call. Proxy: same interface as the real object, adds lazy loading, access control, caching or rate limiting in front. In a round, name them in one sentence and move on.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">interface PaymentProcessor { boolean pay(long paise); }
+class StripeSdk { String charge(double dollars) { return &quot;ok&quot;; } }                 // foreign shape
+class StripeAdapter implements PaymentProcessor {
+    private final StripeSdk sdk = new StripeSdk();
+    public boolean pay(long paise) { return sdk.charge(paise / 100.0).equals(&quot;ok&quot;); }
+}
+class BookingFacade {                                                              // one call for the controller
+    boolean book(String seat, String user, long paise) { return true; /* inventory, payment, notify */ }
+}
+class RateLimitedProcessor implements PaymentProcessor {                          // proxy: same interface, gate in front
+    private final PaymentProcessor real; private final java.util.concurrent.Semaphore permits = new java.util.concurrent.Semaphore(10);
+    RateLimitedProcessor(PaymentProcessor real) { this.real = real; }
+    public boolean pay(long p) { if (!permits.tryAcquire()) return false; try { return real.pay(p); } finally { permits.release(); } }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Calling the SDK directly from services (no seam to test or swap); a facade that becomes the new god class.</p>
+<p class="say"><b>Say:</b> &quot;The SDK sits behind an adapter that implements my PaymentProcessor, so the service never sees Stripe.&quot;</p>
+</div></details><details class="card" id="repository" data-sec="D" data-name="repository and the models / services / repositories split">
+<summary><span class="nm">Repository and the models / services / repositories split</span><span class="one">Models hold data and invariants. Services hold use cases. Repositories hold storage. Nothing else.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="repository"> missed</label></summary>
+<div class="body">
+<p class="tell">The three-layer split is what interviewers expect in a machine-coding round. Models: entities and value objects with their own invariants (a Ticket cannot close twice). Services: one per use case cluster, orchestrating models and repositories, owning the locks. Repositories: Map-backed today, a database tomorrow, behind an interface. Controllers or gates are thin. Ids are generated in one place.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">record Seat(String id) {}
+final class Booking { final String id, seatId, userId; Booking(String id, String s, String u) { this.id = id; seatId = s; userId = u; } }
+interface BookingRepo { java.util.Optional&lt;Booking&gt; bySeat(String seatId); void save(Booking b); }
+class InMemoryBookingRepo implements BookingRepo {
+    private final java.util.Map&lt;String, Booking&gt; bySeat = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+    public java.util.Optional&lt;Booking&gt; bySeat(String s) { return java.util.Optional.ofNullable(bySeat.get(s)); }
+    public void save(Booking b) { if (bySeat.putIfAbsent(b.seatId, b) != null) throw new IllegalStateException(&quot;seat taken&quot;); }
+}
+class BookingService {
+    private final BookingRepo repo; private final java.util.concurrent.atomic.AtomicLong ids = new java.util.concurrent.atomic.AtomicLong();
+    BookingService(BookingRepo repo) { this.repo = repo; }
+    Booking book(Seat seat, String user) { Booking b = new Booking(&quot;b&quot; + ids.incrementAndGet(), seat.id(), user); repo.save(b); return b; }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Business rules inside the repository; services reaching into other services&#x27; maps; models with public mutable fields.</p>
+<p class="say"><b>Say:</b> &quot;Models, services, repositories. The service owns the use case and the lock; the repository is a map behind an interface.&quot;</p>
+</div></details></section><section class="sec" id="secE"><h2><span>E</span>Principles beyond SOLID</h2><p class="lede">Composition, encapsulation, idempotency, YAGNI, and how to end a round: &#x27;here is how I would test it&#x27;.</p><details class="card" id="composition" data-sec="E" data-name="composition over inheritance">
+<summary><span class="nm">composition over inheritance</span><span class="one">Has-a beats is-a unless the subtype is truly a kind-of and shares the base&#x27;s contract.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="composition"> missed</label></summary>
+<div class="body">
+<p class="tell">Inheritance couples you to the parent's implementation and gives one axis of variation. Composition lets you combine behaviours (a Vehicle has an Engine and a Pricing) and swap them at runtime. Use inheritance for Car is-a Vehicle where the whole contract holds; use composition for everything that is a capability or a policy. Decorator and Strategy are composition.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// inheritance explosion: SportsCarWithSunroofAndTurbo ...
+// composition: one class, capabilities plugged in
+interface Engine { int hp(); }
+interface Roof { boolean opens(); }
+class Turbo implements Engine { public int hp() { return 300; } }
+class Sunroof implements Roof { public boolean opens() { return true; } }
+final class Car {
+    private final Engine engine; private final Roof roof;
+    Car(Engine e, Roof r) { engine = e; roof = r; }
+    int hp() { return engine.hp(); }
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Deep hierarchies for feature combinations; protected fields as a sharing mechanism.</p>
+<p class="say"><b>Say:</b> &quot;Car has-an Engine; I compose rather than subclass so options combine without a class per combination.&quot;</p>
+</div></details><details class="card" id="encapsulate" data-sec="E" data-name="encapsulate what varies, program to interfaces, law of demeter">
+<summary><span class="nm">encapsulate what varies, program to interfaces, law of Demeter</span><span class="one">Find the axis that changes, hide it behind an interface, and stop reaching through objects.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="encapsulate"> missed</label></summary>
+<div class="body">
+<p class="tell">Every pattern is 'encapsulate what varies' applied somewhere. Program to interfaces so callers never depend on a concrete class. Law of Demeter: talk to your friends, not your friends' friends -- order.getCustomer().getAddress().getCity() means Order should expose what you need, or the chain will break when any link changes. Tell, don't ask: ask the object to do the thing instead of pulling its data out and deciding for it.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// asking (train wreck) vs telling
+class City { final String name; City(String n) { name = n; } }
+class Address { final City city; Address(City c) { city = c; } }
+class Customer { final Address address; Customer(Address a) { address = a; } }
+class Order {
+    private final Customer customer; Order(Customer c) { customer = c; }
+    String shipCity() { return customer.address.city.name; }        // Order knows its own shape; callers ask Order
+    boolean shipsTo(String city) { return shipCity().equals(city); } // tell, don&#x27;t ask
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Getters for every field then logic outside the object; chains three dots deep in service code.</p>
+<p class="say"><b>Say:</b> &quot;The order answers shipsTo; nobody outside walks customer-address-city.&quot;</p>
+</div></details><details class="card" id="idempotency" data-sec="E" data-name="idempotency, fail-fast, and invariants in the model">
+<summary><span class="nm">idempotency, fail-fast, and invariants in the model</span><span class="one">Any operation a client may retry must be safe to repeat; validate at the boundary; keep invariants inside the object.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="idempotency"> missed</label></summary>
+<div class="body">
+<p class="tell">Payments, bookings, likes: the client retries on timeout, so the service must dedupe by an idempotency key (client-generated id) -- putIfAbsent on the key, return the original result. Fail fast: validate arguments at the entry point and throw; never let a bad state travel. Invariants live in the model's methods (Ticket.close throws if already closed), not in every caller.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">class PaymentService {
+    private final java.util.concurrent.ConcurrentHashMap&lt;String, String&gt; results = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+    String pay(String idempotencyKey, long paise) {
+        if (paise &lt;= 0) throw new IllegalArgumentException(&quot;amount&quot;);            // fail fast
+        String prior = results.putIfAbsent(idempotencyKey, &quot;PENDING&quot;);
+        if (prior != null) return prior;                                       // retry: return the first outcome
+        String result = &quot;PAID:&quot; + paise;                                       // charge once
+        results.put(idempotencyKey, result);
+        return result;
+    }
+}
+final class Ticket {
+    private boolean closed;
+    synchronized void close() { if (closed) throw new IllegalStateException(&quot;already closed&quot;); closed = true; }   // invariant lives here
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Dedupe by amount-and-user (two legitimate identical payments collide); invariants checked in some callers and not others.</p>
+<p class="say"><b>Say:</b> &quot;The client sends an idempotency key; putIfAbsent makes the retry return the original result instead of charging twice.&quot;</p>
+</div></details><details class="card" id="kiss" data-sec="E" data-name="kiss, yagni, dry -- and when to stop">
+<summary><span class="nm">KISS, YAGNI, DRY -- and when to stop</span><span class="one">Build the simplest thing that meets the stated requirement; say what you would add if asked.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="kiss"> missed</label></summary>
+<div class="body">
+<p class="tell">In a round, over-engineering loses as many points as under-engineering. Two implementations of an interface justify the interface; one does not, unless the interviewer has hinted at the swap. Duplication of two lines is cheaper than a wrong abstraction. The senior move is to name the extension and not build it: 'if you need nearest-spot I would add a second assignment strategy here.'</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">// YAGNI: one pricing rule today -&gt; a method, not a Strategy hierarchy
+class Lot1 { double price(long minutes) { return Math.ceil(minutes / 60.0) * 20; } }
+// the moment a second rule is asked for -&gt; now the interface earns its place
+interface Pricing { double price(long minutes); }
+class Lot2 { private final Pricing p; Lot2(Pricing p) { this.p = p; } double price(long m) { return p.price(m); } }</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> Six interfaces before any behaviour; a generic event bus for one listener; abstract base classes &#x27;for the future&#x27;.</p>
+<p class="say"><b>Say:</b> &quot;One rule today, so a method. If you want surge I will extract an interface right here -- it is a two-minute change.&quot;</p>
+</div></details><details class="card" id="testing" data-sec="E" data-name="how you would test it -- the sentence that ends the round well">
+<summary><span class="nm">how you would test it -- the sentence that ends the round well</span><span class="one">Unit tests on the model invariants and the service with fake repos; a concurrency test that races the invariant.</span><label class="miss" title="mark as missed"><input type="checkbox" data-miss="testing"> missed</label></summary>
+<div class="body">
+<p class="tell">Name three: (1) model tests -- Ticket.close twice throws; (2) service tests with an in-memory repo injected -- book a taken seat is rejected; (3) a race test -- N threads on one seat, exactly one wins, run on an executor with a latch so they start together. Mention property-style tests for a matching engine (no crossed book after any sequence). This is why you injected everything.</p>
+<div class="ed"><div class="tab">the idiom -- compiled on OpenJDK 26</div><pre><code class="java">void raceTest(java.util.concurrent.ExecutorService pool) throws Exception {
+    java.util.concurrent.ConcurrentHashMap&lt;String, String&gt; seat = new java.util.concurrent.ConcurrentHashMap&lt;&gt;();
+    java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+    java.util.concurrent.atomic.AtomicInteger wins = new java.util.concurrent.atomic.AtomicInteger();
+    java.util.List&lt;java.util.concurrent.Future&lt;?&gt;&gt; fs = new java.util.ArrayList&lt;&gt;();
+    for (int i = 0; i &lt; 50; i++) { String u = &quot;u&quot; + i; fs.add(pool.submit(() -&gt; { go.await(); if (seat.putIfAbsent(&quot;A1&quot;, u) == null) wins.incrementAndGet(); return null; })); }
+    go.countDown();                                     // all 50 start together
+    for (var f : fs) f.get();
+    if (wins.get() != 1) throw new AssertionError(&quot;expected 1 winner, got &quot; + wins.get());
+}</code></pre></div>
+<p class="mistake"><b>The mistake they catch:</b> &#x27;I would write unit tests&#x27; with no example; a race test where threads start sequentially and never actually race.</p>
+<p class="say"><b>Say:</b> &quot;Fifty threads released by one latch on one seat; the assertion is exactly one winner. That test is why the lock is a claim and not a hope.&quot;</p>
+</div></details></section>
+</div>
+<div id="drill"><div class="dclose"><button id="dclose">close</button></div><div id="dcards"></div></div>
+<script>
+const CARDS=[{"id": "enum", "name": "enum with fields and behaviour", "one": "A fixed set of named constants that can carry data and methods -- your sizes, states, order types.", "sec": "A"}, {"id": "interface", "name": "interface vs abstract class", "one": "Interface = a contract (what you can do). Abstract class = a partial implementation (what you are).", "sec": "A"}, {"id": "record", "name": "record and immutability", "one": "A record is an immutable data carrier with equals/hashCode/toString for free -- ideal for ids, events, DTOs.", "sec": "A"}, {"id": "equals", "name": "equals and hashCode contract", "one": "If two objects are equal they must have the same hashCode -- or your HashMap silently loses them.", "sec": "A"}, {"id": "generics", "name": "generics you actually need", "one": "Type parameters on your own classes and methods; bounded types for 'anything comparable'; wildcards only when reading.", "sec": "A"}, {"id": "collections", "name": "the collections cheat-sheet", "one": "Pick by operation you need: O(1) lookup, ordered, sorted, FIFO, priority.", "sec": "A"}, {"id": "streams", "name": "lambdas, streams and comparators -- the 20% you use", "one": "Sort with Comparator.comparing, group with Collectors.groupingBy, and stop there in a round.", "sec": "A"}, {"id": "exceptions", "name": "exceptions: checked, unchecked, custom", "one": "Throw unchecked for programming and state errors; make a small domain hierarchy; never swallow.", "sec": "A"}, {"id": "threads", "name": "threads, Runnable, Callable, ExecutorService", "one": "Never new Thread() in a round: submit tasks to an executor, get Futures back, shut it down.", "sec": "B"}, {"id": "synchronized", "name": "synchronized and the intrinsic lock", "one": "Every object has one lock; synchronized takes it for the block or method. Simple, reentrant, no timeout.", "sec": "B"}, {"id": "volatile", "name": "volatile: visibility, not atomicity", "one": "volatile guarantees every thread sees the latest write. It does not make ++ atomic.", "sec": "B"}, {"id": "reentrantlock", "name": "ReentrantLock: tryLock, fairness, finally", "one": "An explicit lock you can try with a timeout, make fair, and pair with Conditions. Always unlock in finally.", "sec": "B"}, {"id": "rwlock", "name": "ReadWriteLock: many readers, one writer", "one": "Readers share, writers exclude. Wins when reads dominate; costs more than a plain lock otherwise.", "sec": "B"}, {"id": "condition", "name": "Condition / wait-notify: waiting for a state", "one": "Block until something becomes true, without spinning. Always wait in a while loop.", "sec": "B"}, {"id": "atomic", "name": "Atomic* and the CAS loop", "one": "compareAndSet(expected, new) succeeds only if nobody changed it -- lock-free updates for counters, flags, references.", "sec": "B"}, {"id": "chm", "name": "ConcurrentHashMap: computeIfAbsent, merge, putIfAbsent", "one": "A thread-safe map whose compound operations are atomic per key -- your get-or-create and counter in one call.", "sec": "B"}, {"id": "blockingqueue", "name": "BlockingQueue: producer-consumer without writing a lock", "one": "put blocks when full, take blocks when empty. The bounded queue is your back-pressure.", "sec": "B"}, {"id": "semaphore", "name": "Semaphore, CountDownLatch, CyclicBarrier", "one": "Permits for 'at most N at once'; a latch for 'wait until N things are done'; a barrier for 'all meet here, then continue'.", "sec": "B"}, {"id": "deadlock", "name": "deadlock, lock ordering, and lock striping", "one": "Two locks taken in opposite orders deadlock. Fix by a global order, a single lock, or tryLock with timeout.", "sec": "B"}, {"id": "immutability", "name": "immutability and confinement: the sync you do not write", "one": "If it never changes, or only one thread ever sees it, it needs no lock. Design for that first.", "sec": "B"}, {"id": "completable", "name": "CompletableFuture: composing async work (SDE-3)", "one": "Chain async steps with thenApply/thenCompose, join fan-outs with allOf, add timeouts and fallbacks.", "sec": "B"}, {"id": "memorymodel", "name": "the memory model in three sentences (SDE-3)", "one": "Without a happens-before edge, a thread may never see another's write. Locks, volatile, and thread start/join create edges.", "sec": "B"}, {"id": "srp", "name": "S -- single responsibility", "one": "One class, one reason to change. The tell: a class whose name needs 'and'.", "sec": "C"}, {"id": "ocp", "name": "O -- open for extension, closed for modification", "one": "Add a new case by adding a class, not by editing a switch that already works.", "sec": "C"}, {"id": "lsp", "name": "L -- Liskov substitution", "one": "A subtype must be usable anywhere the parent is, without surprises: no stricter preconditions, no weaker guarantees, no thrown 'not supported'.", "sec": "C"}, {"id": "isp", "name": "I -- interface segregation", "one": "Small, role-specific interfaces. Nobody should implement methods they do not need.", "sec": "C"}, {"id": "dip", "name": "D -- dependency inversion (and injection)", "one": "Depend on abstractions; hand dependencies in through the constructor. The class never news its collaborators.", "sec": "C"}, {"id": "strategy", "name": "Strategy -- a swappable algorithm", "one": "Pain: 'they will want to change this rule'. Shape: an interface for the rule, injected.", "sec": "D"}, {"id": "factory", "name": "Factory -- creation logic in one place", "one": "Pain: creation needs a decision (type string, config, environment). Shape: one method that returns the interface.", "sec": "D"}, {"id": "observer", "name": "Observer -- publish a change, do not call the listeners by name", "one": "Pain: 'the board / email / audit log must update, but the core must not know about them'. Shape: subject keeps listeners, notifies on change.", "sec": "D"}, {"id": "state", "name": "State -- behaviour depends on which state you are in", "one": "Pain: methods full of 'if (status == X)'. Shape: one class per state, the context delegates, transitions return the next state.", "sec": "D"}, {"id": "command", "name": "Command -- an action as an object (undo, queue, replay)", "one": "Pain: undo/redo, scheduling, audit of operations. Shape: execute() and undo() on an object that captures its arguments.", "sec": "D"}, {"id": "decorator", "name": "Decorator -- wrap to add behaviour, keep the interface", "one": "Pain: 'add surge / logging / caching / retry to X without touching X'. Shape: implement the same interface, hold the wrapped one.", "sec": "D"}, {"id": "builder", "name": "Builder -- constructing an object with many optional parts", "one": "Pain: a constructor with eight parameters, four of them nullable. Shape: a fluent builder that validates in build().", "sec": "D"}, {"id": "singleton", "name": "Singleton -- exactly one, and why you avoid it", "one": "Pain: one registry, one connection pool, one lot. Shape: enum singleton or a static holder; then inject it anyway.", "sec": "D"}, {"id": "template", "name": "Template Method and Chain of Responsibility", "one": "Template: a fixed skeleton with overridable steps. Chain: a request passes handlers until one takes it.", "sec": "D"}, {"id": "adapter", "name": "Adapter, Facade, Proxy -- the wrapping trio", "one": "Adapter converts an interface; Facade simplifies a subsystem; Proxy controls access to the same interface.", "sec": "D"}, {"id": "repository", "name": "Repository and the models / services / repositories split", "one": "Models hold data and invariants. Services hold use cases. Repositories hold storage. Nothing else.", "sec": "D"}, {"id": "composition", "name": "composition over inheritance", "one": "Has-a beats is-a unless the subtype is truly a kind-of and shares the base's contract.", "sec": "E"}, {"id": "encapsulate", "name": "encapsulate what varies, program to interfaces, law of Demeter", "one": "Find the axis that changes, hide it behind an interface, and stop reaching through objects.", "sec": "E"}, {"id": "idempotency", "name": "idempotency, fail-fast, and invariants in the model", "one": "Any operation a client may retry must be safe to repeat; validate at the boundary; keep invariants inside the object.", "sec": "E"}, {"id": "kiss", "name": "KISS, YAGNI, DRY -- and when to stop", "one": "Build the simplest thing that meets the stated requirement; say what you would add if asked.", "sec": "E"}, {"id": "testing", "name": "how you would test it -- the sentence that ends the round well", "one": "Unit tests on the model invariants and the service with fake repos; a concurrency test that races the invariant.", "sec": "E"}];
+const KW=/\b(abstract|boolean|break|case|catch|class|continue|default|do|double|else|enum|extends|final|finally|for|if|implements|import|int|interface|long|new|null|package|private|protected|public|return|static|super|switch|synchronized|this|throw|throws|try|void|while|var|record|true|false)\b/g,TY=/\b([A-Z][A-Za-z0-9]*)\b/g;
+function hl(el){const src=el.textContent;el.innerHTML=src.split('\n').map((l,i)=>{let e=l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');const parts=e.split(/(\/\/.*$|"(?:[^"\\]|\\.)*")/);e=parts.map((p,j)=>j%2?(p.startsWith('//')?'<span class="c">'+p+'</span>':'<span class="s">'+p+'</span>'):p.replace(KW,'<span class="k">$1</span>').replace(TY,'<span class="t">$1</span>').replace(/\b(\d+(?:\.\d+)?)\b/g,'<span class="n">$1</span>')).join('');return '<span class="ln">'+(i+1)+'</span>'+e;}).join('\n');}
+document.querySelectorAll('pre code.java').forEach(hl);
+if(location.hash){const c=document.querySelector(location.hash);if(c){c.open=true;c.scrollIntoView();}}
+let missed={};try{missed=JSON.parse(localStorage.getItem('primer.missed')||'{}');}catch(e){}
+function saveMissed(){try{localStorage.setItem('primer.missed',JSON.stringify(missed));}catch(e){}}
+document.querySelectorAll('[data-miss]').forEach(cb=>{const id=cb.dataset.miss;cb.checked=!!missed[id];cb.closest('.card').classList.toggle('missed',cb.checked);cb.addEventListener('click',e=>e.stopPropagation());cb.addEventListener('change',()=>{missed[id]=cb.checked;if(!cb.checked)delete missed[id];saveMissed();cb.closest('.card').classList.toggle('missed',cb.checked);});});
+document.querySelectorAll('.card summary label').forEach(l=>l.addEventListener('click',e=>e.stopPropagation()));
+document.getElementById('q').addEventListener('input',e=>{const q=e.target.value.toLowerCase();document.querySelectorAll('.card').forEach(c=>c.classList.toggle('hide',q&&!c.dataset.name.includes(q)&&!c.textContent.toLowerCase().includes(q)));});
+document.getElementById('expand').onclick=()=>document.querySelectorAll('.card').forEach(c=>c.open=true);
+document.getElementById('collapse').onclick=()=>document.querySelectorAll('.card').forEach(c=>c.open=false);
+const drill=document.getElementById('drill'),dcards=document.getElementById('dcards');
+document.getElementById('dclose').onclick=()=>drill.classList.remove('on');
+document.getElementById('drillBtn').onclick=()=>{
+  const miss=CARDS.filter(c=>missed[c.id]),rest=CARDS.filter(c=>!missed[c.id]);
+  const shuffle=a=>a.map(x=>[Math.random(),x]).sort((p,q)=>p[0]-q[0]).map(p=>p[1]);
+  const pick=shuffle(miss).slice(0,3).concat(shuffle(rest)).slice(0,3);
+  dcards.innerHTML=pick.map(c=>{const code=document.querySelector('#'+c.id+' pre').innerHTML;return '<div class="dcard" data-id="'+c.id+'"><h3>'+c.name+'</h3><span class="one">'+c.one+'</span><div class="task">Type the idiom from memory in a scratch Main.java, then javac it. Only then reveal.</div><div class="ans"><div class="ed"><pre>'+code+'</pre></div></div><p><button class="rev">reveal</button><button class="ok">got it</button><button class="bad">missed</button></p></div>';}).join('');
+  dcards.querySelectorAll('.dcard').forEach(d=>{const id=d.dataset.id;d.querySelector('.rev').onclick=()=>d.classList.add('rev');d.querySelector('.ok').onclick=()=>{delete missed[id];saveMissed();sync(id,false);d.style.opacity=.5;};d.querySelector('.bad').onclick=()=>{missed[id]=true;saveMissed();sync(id,true);d.style.opacity=.5;};});
+  drill.classList.add('on');window.scrollTo(0,0);
+};
+function sync(id,v){const cb=document.querySelector('[data-miss="'+id+'"]');if(cb){cb.checked=v;cb.closest('.card').classList.toggle('missed',v);}}
+</script></body></html>
