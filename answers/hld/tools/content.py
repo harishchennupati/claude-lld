@@ -75,7 +75,7 @@ the model.</p>
 <p><b>Words used below.</b> A <b>chunk</b> is a piece of up to 480 tokens cut from a document (a page, a
 file, a ticket or a chat thread). An <b>embedding</b> is a list of 1,024 numbers that stands for a
 chunk's meaning: similar meanings get nearby lists. Her <b>principals</b> are her own id plus every group
-she is in; each document's permissions are kept as lists of principals. A <b>turn</b> is one question and
+she is in, about 200 for a typical employee; each document's permissions are kept as lists of principals. A <b>turn</b> is one question and
 its answer. The <b>orchestrator</b> is our stateless service that runs every step of a turn.</p>
 
 <p><b>In scope:</b> finding and permission-checking the pieces, keeping our copy fresh, the streamed answer
@@ -160,6 +160,9 @@ third free for backlogs.</p>
              '<b>object storage</b>; the embedding model and reranker run on our own <b>GPU pool</b>.',
              ['<b>Chunks cut at headings, not fixed windows:</b> a fixed window needs no parser but cuts '
               'tables and code in half.',
+              '<b>Chunks as cut, not small chunks widened to their section at prompt time:</b> widening '
+              'gives the model more context, but each chunk then brings its section, so fewer fit in the '
+              '4,000 tokens.',
               '<b>Hybrid, not vectors alone (or keywords alone):</b> keywords find <code>OPS-2291</code> at '
               'once; vectors find "roll my signing credentials" for a page that says "rotate the key".',
               '<b>A reranker, not the big model, to pick the 8:</b> the big model would read 100 chunks, '
@@ -218,7 +221,8 @@ third free for backlogs.</p>
              'prompt is packed to a fixed 6,000 tokens (<a href="#h-s-turn">10</a>). The unchanging '
              'instructions go first, so the provider re-uses its work on them at a tenth of the price. A '
              'first turn is also cached in Redis for a day, keyed by the searched question and the exact 8 '
-             'chunks that passed the final check.',
+             'chunks that passed the final check. It serves about 1 first turn in 10, in 0.2 s, and saves about '
+             '$500 a day; follow-ups are never cached, because their prompts carry the conversation.',
              ['<b>A rewrite call, not the new turn glued to the previous question:</b> gluing is free and is '
               'our fallback if the rewrite times out, but it searches for the wrong thing when the subject '
               'changes.',
@@ -244,10 +248,6 @@ third free for backlogs.</p>
               'and nothing stays open between questions.',
               '<b>Stream and check each sentence, not check the whole answer first:</b> the cost is a '
               'sentence that may turn grey when its check fails.',
-              '<b>An entailment model, not a second big-model call, to check citations:</b> about 15 ms a '
-              'sentence against doubling the cost of every answer.',
-              '<b>A score check before the call, not the model\'s own "I don\'t know":</b> a model told to '
-              'refuse still answers from near misses, and each call costs 2.4 cents.',
               '<b>Contain injection, not detect it:</b> a detector misses payloads written as ordinary '
               'advice and blocks the security team\'s own pages about injection.']),
         step(6, 'Survive the provider, keep quality, keep companies apart',
@@ -257,8 +257,10 @@ third free for backlogs.</p>
              'A new chunker fixes the three questions tried and quietly breaks forty others. One missed '
              'filter shows one company\'s documents to another, and an EU company\'s text sits in US memory.',
              'Three fixes. A <b>model router</b> in each orchestrator keeps a rate budget (a token bucket) '
-             'per provider and a circuit breaker, and switches to a <b>fallback provider</b>, which answers '
-             '5% of questions every day so we know it works. Every turn goes to a <b>trace log</b>; an '
+             'per provider and a circuit breaker, and switches to a <b>fallback provider</b>. The fallback is '
+             'sized for the whole peak (the primary\'s limit is about 20 M input and 1.5 M output tokens a '
+             'minute, and the fallback\'s contract matches it), and it answers 5% of questions every day '
+             'so its prompt and limits are known to work. Every turn goes to a <b>trace log</b>; an '
              '<b>eval runner</b> checks each change on a golden set of labelled questions, then on a canary, '
              '5% of real traffic, before everyone gets it. Each large company gets its own <b>cell</b>, a '
              'full copy of the stack in the region it chose.',
@@ -316,9 +318,7 @@ from the request. Once Okta deactivates her, every call gets 401, however long h
 <li><b>The browser makes the turn's id</b> (<code>message_id</code>). If the stream drops, it asks for the
 turn by that id instead of sending the question again, which would start, and pay for, a second answer.
 It resends only on a 404 (the question never arrived); a resend that races a slow first POST gets 409.</li>
-<li><b>Ids</b> carry a type prefix (<code>cv_</code>, <code>m_</code>, <code>doc_</code>) and are random,
-so no one can guess another employee's. A citation carries the document's version and a character span
-in that version.</li>
+<li><b>Ids</b> are random, so no one can guess another employee's.</li>
 </ul>
 <p><b>Limits and events.</b> Each employee may ask 60 questions an hour (429 with Retry-After beyond it);
 503 if permissions cannot be checked before the stream opens. Other events: <code>drop</code> (erase a
@@ -328,7 +328,9 @@ starts again), <code>passages</code> (links only, when no model answers). A <cod
 
 <p><b>What the stream does not show.</b> Behind it is our own streaming call to the model provider. The
 other way round, the identity provider and the sources call us: a source's webhook is only a doorbell;
-we answer 200 at once and a connector then reads the change list.</p>
+we answer 200 at once and a connector then reads the change list. Not every identity provider resends
+a failed call, so every 15 minutes the identity sync also reads Okta's change log and re-reads each user
+and group it lists, and each night it re-reads everything.</p>
 ''' + pushes(
         ('The connection drops after 60 words. What happens to the turn, and what does the browser do?',
          'The turn runs on and is saved. An answer lasts only about 6.6 s, so the browser does not resume the '
@@ -386,6 +388,9 @@ we answer 200 at once and a connector then reads the change list.</p>
 On each shard's copy, a vector search walks the graph over one-byte vectors in RAM for the best 100,
 re-scores those with the full vectors from SSD, and keeps its best 50. One-byte storage loses about a
 point of recall, and re-scoring wins it back.</p>
+<div class="xy"><b>HNSW, not IVF-PQ:</b> IVF-PQ searches only the clusters nearest the question and
+compresses each vector to a short code, so it fits one machine, but it loses more recall and its clusters
+go stale as documents drift until a retrain; HNSW takes inserts and deletes as they come.</div>
 ''' + pushes(
         ('Why split by document id, not by team or source?',
          'All of a document\'s chunks sit on one shard, so a delete or a sharing change touches one shard. '
@@ -393,15 +398,15 @@ point of recall, and re-scoring wins it back.</p>
         ('How does the shard count change?',
          'A new index with the new count is built beside the old one and switched to by one row, as for a new '
          'embedding model (<a href="#h-s-change">13</a>). Splitting in place would block writes.'),
-        ('Why 4 shards of about 200 GB, above the usual 10 to 50 GB?',
-         'RAM decides the count: a 128 GB node keeps one shard\'s 32 GB of vectors and graph, and the rest '
-         'holds the engine\'s heap, the keyword index and room for merges. The cost is slower rebuilds, which '
-         'the other two copies cover.'),
         ('How are small companies packed?',
          'A shared cell has the same 12 nodes and holds about 10 million documents, say a hundred companies '
          'of 100,000. Each has its own one-shard index and its own share of ingest workers, so one company\'s '
          'first load cannot slow the others. Past about a million documents, a company moves to its own cell.'),
-    ) + deeper('the metadata database\'s tables', table(['table', 'one row holds'], [
+    ) + deeper('shard size, and the metadata database\'s tables', qa(
+        'Why 4 shards of about 200 GB, above the usual 10 to 50 GB?',
+        'RAM decides the count: a 128 GB node keeps one shard\'s 32 GB of vectors and graph, and the rest '
+        'holds the engine\'s heap, the keyword index and room for merges. The cost is slower rebuilds, which '
+        'the other two copies cover.') + table(['table', 'one row holds'], [
         ['<code>docs</code>', 'title, url, parent page, the filter fields, version, state (live or deleted), '
          'the number of allow sets, and the fetch-ticket columns (<a href="#h-s-fresh">08</a>)'],
         ['<code>chunks</code>', 'chunk id, doc id, position, character span; while a new chunker runs beside '
@@ -488,12 +493,15 @@ froze in a long garbage-collection pause. The queue gave its documents to worker
 8 at 10:02:01. When A wakes at 10:02:34, its version 7 must not bring the old step 3 back. And a draft
 deleted for legal reasons must stop reaching answers within seconds.</p>
 ''' + fig(4, caption='Top: the normal path, about 15 seconds from save to searchable. Middle: the worst case, a '
-          'lost doorbell, still under 5 minutes. Bottom: a delete, gone from answers in 2 seconds.') + '''
+          'lost doorbell, still under 5 minutes; the delay topic is a holding queue for a document fetched '
+          'under 30 s ago. Bottom: a delete, gone from answers in 2 seconds.') + '''
 <p><b>The fix: a fetch ticket.</b> Before fetching, a worker takes a number for the document from the
 database, one higher than the last. When it is done, it commits only if its ticket is still the newest one
 committed. Every index write carries the ticket as its version too (the engine calls this external
 versioning), and the index refuses a version lower than the one it holds. So two rules, database and
-index, both refuse the older fetch: A's ticket is 41, B's is 42.</p>
+index, both refuse the older fetch: A's ticket is 41, B's is 42. And a worker commits its queue offset only
+once the index has acknowledged every write, so a crash before that hands the document to another worker,
+whose fetch rewrites every chunk record.</p>
 <pre class="code">take a ticket:  UPDATE docs SET fetch_next = fetch_next + 1 WHERE doc_id = 'doc_91'
                 RETURNING fetch_next;                                -- 42
 commit:         UPDATE docs SET applied_fetch = 42, version = 8, ...
@@ -510,17 +518,17 @@ rewrites its chunk records from object storage without embedding.</p>
 seconds. Meanwhile the old step 3 cannot appear: its chunk rows are gone, so the final check drops them.
 Missing for seconds, never wrong.</p>
 
-<p><b>Busy and big documents.</b> Beside the main topic sit a <b>delay topic</b> (a document fetched less
+<p><b>A delete is immediate at the gate.</b> One transaction marks the document deleted and removes its
+chunk rows, so the final check drops them that second; the index deletes follow within seconds.</p>
+''' + deeper('the queue\'s extra topics, and the nightly audit', '''<p><b>Busy and big documents.</b> Beside the main topic sit a <b>delay topic</b> (a document fetched less
 than 30 s ago waits there, so a busy page never blocks the queue), a <b>large-file topic</b> for long scans,
 and a <b>backfill topic</b> for a new company's bulk load. A change event is dropped if a fetch that began
 after it has already finished.</p>
 
-<p><b>A delete is immediate at the gate.</b> One transaction marks the document deleted and removes its
-chunk rows, so the final check drops them that second; the index deletes follow within seconds. The one
-hole: a worker that paused between its commit and its index writes can still land a write late, bringing
-a chunk back as an <b>orphan</b> the database no longer lists. The final check drops it, and a <b>nightly
-audit</b> deletes it from the index.</p>
-''' + pushes(
+<p><b>The one
+hole:</b> a worker that paused between its commit and its index writes can still land a write late,
+bringing a chunk back as an <b>orphan</b> the database no longer lists. The final check drops it, and a
+<b>nightly audit</b> deletes it from the index.</p>''') + pushes(
         ('Someone deletes a shared drive of 500,000 documents. Does each wait for its own transaction?',
          'No. A delete needs no fetch, so a mass delete marks documents deleted a thousand to a statement: '
          'about 500,000 in under a minute. The final check drops them at once; their chunks go afterwards.'),
@@ -545,13 +553,13 @@ keep the best 100 ──▶ reranker scores each (question, chunk) ──▶ bes
 <p><b>Why add ranks, not scores?</b> The two scores cannot be compared: a keyword score has no upper limit
 and depends on the corpus, while a vector similarity lies between −1 and 1. This is <b>reciprocal rank
 fusion</b>. The 60 softens the gap between first and second place, so a chunk high in both lists beats one
-that tops only one. If the reranker is down, the best 20 in fusion order go on.</p>
+that tops only one. If the reranker is down, the best 20 in fusion order go on, and with no score to abstain on, the
+model is always called and told to say when the chunks do not answer.</p>
 
 <p><b>How chunks are cut.</b> Up to 480 tokens, so that with its title line a chunk fits the 512 the
 embedding model reads. A cut falls on a heading if it can, else at a paragraph's end, else at a sentence's
 end; neighbours overlap by 50 tokens. Tables are split by rows with the header repeated, code blocks at
-blank lines. Scanned pages go through text recognition; a document whose text comes out far smaller than
-its file is flagged for a person instead of being indexed empty.</p>
+blank lines.</p>
 
 <p><b>The one hole:</b> an answer spread over two documents that each look only half-relevant. The rewrite
 model splits a compound question into two searches; a two-hop question ("who owns the service that
@@ -595,8 +603,8 @@ previous turn or the summary held is checked against her permissions again; a tu
 no longer read is left out. The summary and previous turn enter the prompt inside a <code>&lt;history&gt;</code>
 tag, escaped like the chunks, because an answer can repeat an instruction hidden in a document.</p>
 
-<p><b>Timeouts.</b> The rewrite answers in about 400 ms, 99 times in 100 within 700 ms. After 900 ms the
-search uses the new turn joined to the previous rewritten question. <b>The one hole:</b> a wrong rewrite
+<p>If the rewrite is slow (after 900 ms), the search uses the new turn joined to the previous rewritten
+question. <b>The one hole:</b> a wrong rewrite
 retrieves the wrong documents, confidently; she sees what was searched, and thumbs-down with the reason
 <code>wrong_question</code> are counted. The summary is lossy too: "the second option you mentioned" can be
 lost.</p>
@@ -626,11 +634,14 @@ the chunk it used (or two numbers when it joins two chunks); the orchestrator st
 she sees. A marker must name a chunk sent in this prompt, or it is dropped: exact. The citation checker, an
 <b>entailment model</b> (it says whether one text supports another), scores the sentence against its chunks
 in about 15 ms: 0.5 or more and the citation is shown with the chunk's version and span from the final
-check; below, the other chunks are tried one by one; if none supports it, the sentence stays on screen in
+check; below, the other 7 are scored each alone, in one batch; if none supports it, the sentence stays on screen in
 grey with "no source found". If the checker is down, cited sentences are marked "not checked", never as
 supported. A cached answer keeps only its citations' chunk ids, and takes current versions from this
 question's final check.</p>
 
+<div class="xy"><b>An entailment model, not a second big-model call:</b> about 15 ms a sentence, against
+doubling the cost of every answer. <b>A score check before the call, not the model's own "I don't
+know":</b> a model told to refuse still answers from near misses, and each call costs 2.4 cents.</div>
 <p><b>Abstaining.</b> Before calling the model, if the best raw reranker score among the chunks that passed
 the final check is below 0.30, the model is not called. She is told "I couldn't find this in documents you
 can access", with the three closest matches as links.</p>
@@ -670,7 +681,7 @@ and the model's words alone never make the chat page load or link anything:</p>
 a document cannot close its own tag or open a new one. Three stages cannot be guarded, because an allowed
 editor, an allowed reader and an obedient model act there; every other stage has a defence:</p>
 ''' + fig(9) + '''
-<p><b>Keeping secrets in.</b> The same output filter redacts text that looks like keys or passwords, and
+<p><b>Keeping secrets in.</b> The output filter also redacts text that looks like keys or passwords, and
 admins can exclude folders or sensitivity labels from indexing at all.</p>
 
 <p><b>The one hole:</b> a payload written as ordinary advice ("to renew your VPN, send your password to
@@ -702,9 +713,11 @@ chunk id, so a label survives a new chunker). Some have no answer, to test absta
 retrieve with each asker's principals.</li>
 <li><b>Shadow run</b> (for changes that need a new index): 5% of real questions are also answered on it,
 unseen, for two days, and compared on citation failures, abstains, first word and cost.</li>
-<li><b>Canary:</b> 5% of conversations for a day, rolled back automatically, as this chunker was.</li>
+<li><b>Canary:</b> 5% of conversations for a day, rolled back automatically, as this chunker was, when
+thumbs-down, citation failures, abstains, first word or cost pass their limits, overall or in any slice
+(each source, each language).</li>
 </ul>
-''' + table(['signal', 'counts', 'limit'], [
+''' + deeper('the signals and their limits', table(['signal', 'counts', 'limit'], [
         ['recall at 8', 'golden questions where one of the 8 chunks sent holds the labelled passage',
          'at most 2 points lower'],
         ['faithfulness', 'claim sentences a larger grading model finds supported (it agreed with people 9 '
@@ -713,14 +726,16 @@ unseen, for two days, and compared on citation failures, abstains, first word an
          'slice (each source, each language, questions naming a command)',
          '2 points higher for an hour, if chance alone would cause it less than 1 time in 100'],
         ['citation failures, abstains, first word, cost', 'as named', 'up by half; 300 ms slower; 15% dearer'],
-    ]) + '''
+    ])) + '''
 <p><b>The hardest change: a new embedding model.</b> Two models' vectors live in different spaces, so a
 question embedded with one cannot be searched against the other's chunks. Build <code>chunks-v2</code>
 beside <code>chunks-v1</code> from the stored text (16 rented GPUs re-embed it in about 2 hours), write
 every live change to both, compare in shadow and canary, then switch the index <i>and</i> the embedding
 model together with one row. Keep v1 a week as the way back.</p>
 ''' + fig(11) + '''
-<p><b>One row, not the engine's index alias:</b> an alias switches the index in one step, but not the
+<p><b>Beside, not in place:</b> re-embedding in place needs no second set of nodes, but it takes hours,
+and meanwhile a question embedded by either model matches only part of the index.
+<b>One row, not the engine's index alias:</b> an alias switches the index in one step, but not the
 embedding model the orchestrator uses, and a question embedded by one model searched against the other's
 vectors is exactly the failure to prevent. <b>The one hole:</b> a change can pass everything and still lose
 on a kind of question neither check held, such as next month's launch; v1 kept a week makes going back one
@@ -752,8 +767,10 @@ again, so a lost commit could let a removed employee read on until the next re-r
 
 <p><b>A network split</b> (partition): some machines cannot reach others. The CAP theorem says each part
 must then choose consistency (every read sees the latest truth, or refuses) or availability (an answer,
-perhaps stale). Only the final check chooses consistency:</p>
-''' + table(['part', 'chooses', 'what happens when only it is cut off'], [
+perhaps stale). Only the final check chooses consistency: a zone that cannot reach the primary refuses and
+the load balancer moves its questions; the index, ingest and the conversation store keep serving, safely,
+because the final check comes after them.</p>
+''' + deeper('what each part does in a split', table(['part', 'chooses', 'what happens when only it is cut off'], [
         ['the final check, on the database primary', 'consistency', 'a zone that cannot reach the primary '
          'refuses, and the load balancer moves its questions. A primary cut off from the others cannot renew '
          'its lease, so it turns read-only before a copy is promoted.'],
@@ -761,7 +778,7 @@ perhaps stale). Only the final check chooses consistency:</p>
          'final check comes after it'],
         ['ingest and the identity sync', 'availability', 'changes queue up and apply when the split heals'],
         ['the conversation store', 'availability', 'the question is answered as a first turn, not saved'],
-    ]) + pushes(
+    ])) + pushes(
         ('Why does every final check read the primary, even from another zone?',
          'A copy can lag a removal, and this is the one step that must be exact; the primary is about a '
          'millisecond away. Everything else trades freshness for speed: the index may be 10 s behind, '
@@ -784,17 +801,12 @@ the conversation store's last second can be lost. <b>RTO</b> (time until back) i
           'there and probes the primary every 30 s.') + table(['what fails', 'what employees see', 'back in'], [
         ['the model provider', 'a stuck question is retried on the fallback; after 10 s every question goes '
          'there; both down: search-only answers, the 8 checked chunks as links', 'when it recovers'],
-        ['the GPU pool', 'no reranker: fusion order; no citation checker: "not checked"; no embedding '
+        ['the GPU pool', 'no reranker: fusion order, and no abstaining; no citation checker: "not checked"; no embedding '
          'model: keyword search only; no classifier: every question is rewritten', 'minutes'],
         ['one index node', 'nothing: two other copies answer', 'about 35 min to copy 200 GB from a peer'],
-        ['the whole index, corrupted', 'no answers', '1 to 1.5 h: restore the 6-hourly snapshot, rewrite '
-         'what changed since from stored vectors'],
         ['the metadata primary', 'about 30 s of "I can\'t check permissions right now"', 'about 30 s'],
         ['Redis', 'principal lists come from the database; no answer cache; each orchestrator keeps a sixth '
          'of the rate budget in memory', 'seconds'],
-        ['the conversation store primary', 'questions answered as first turns, unsaved', 'about 30 s'],
-        ['a source\'s API, or Okta', 'that source\'s edits wait; without Okta, no one new can sign in',
-         'catch up from the cursor'],
         ['a whole zone', 'seconds of retries; the other two zones carry on', 'seconds to 30 s'],
         ['the whole region', 'no answers; people open documents in their sources', 'hours: restore in the '
          'second region, rebuild the index from stored vectors'],
@@ -811,7 +823,13 @@ nightly backup plus its write-ahead log, so it can be restored to any second bef
          'Models follow citation markers and refusal instructions differently, so a prompt tuned for one can '
          'make another cite less or refuse more. The abstain threshold sits on the reranker\'s score, so it '
          'does not move.'),
-    ) + deeper('restoring the metadata database', '''<p>A restore goes to the last second before the damage,
+    ) + deeper('rarer failures, and restoring the metadata database', table(['what fails', 'what employees see', 'back in'], [
+        ['the whole index, corrupted', 'no answers', '1 to 1.5 h: restore the 6-hourly snapshot, rewrite '
+         'what changed since from stored vectors'],
+        ['the conversation store primary', 'questions answered as first turns, unsaved', 'about 30 s'],
+        ['a source\'s API, or Okta', 'that source\'s edits wait; without Okta, no one new can sign in',
+         'catch up from the cursor'],
+    ]) + '''<p>A restore goes to the last second before the damage,
 and then three repairs, the first before anything else: every document's fetch ticket is raised by a
 million, because the restore set tickets back below the versions the index holds and the index would
 refuse the next writes; the connectors' cursors are rewound so they re-read every change since; and the
@@ -823,7 +841,7 @@ daily sweep and a full identity sync run at once, for deletes and changes no one
             ['index RAM, 127 GB a copy', 'more shards, as a new index; if recall drops, walk 200 candidates '
              'instead of 100 (a point, for 30 ms)', '1 billion chunks: one bit per number in RAM (about 280 GB '
              'with the graph), re-scored from SSD'],
-            ['model tokens, 15 M uncached a minute', 'higher limits; a smaller model for ordinary questions',
+            ['model tokens, 15 M uncached a minute (18 M before caching)', 'higher limits; a smaller model for ordinary questions',
              '150 M a minute: split across providers and models'],
             ['reranker GPUs, 5,000 pairs a second', 'more GPUs; rerank 50 instead of 100', 'about 60 GPUs, or '
              '35 reranking 50'],
@@ -833,7 +851,9 @@ daily sweep and a full identity sync run at once, for deletes and changes no one
 <p><b>Running it.</b> Above the planned peak, each employee may ask 60 questions an hour, and a question
 whose provider budget is short waits up to 2 s, then goes to the fallback. Orchestrators are replaced a few
 at a time, each first <b>draining</b>: it takes no new turns and lets its streams finish, for at most 60 s.
-Model versions are pinned by exact id, never a name like "latest" that the provider can move.</p>
+Model versions are pinned by exact id, never a name like "latest" that the provider can move. A question
+is admitted only after its prompt is packed, when its size is known; it takes only its uncached input
+tokens from the bucket, and its output tokens are counted as they stream.</p>
 ''' + table(['watch', 'page someone when'], [
         ['first word, 95th percentile', 'above 2 s for 10 minutes'],
         ['the model router\'s breakers', 'one opens'],
