@@ -111,7 +111,7 @@ def problem(w):
         ''')
         + w.box('note', 'How to use this page',
                 '← and → move between steps. The list on the left shows minutes per step; steps '
-                'marked *later* are optional. The must-do path is about 2 h 20 of reading, then '
+                'marked *later* are optional. The must-do path is about 2 h 30 of reading, then '
                 'the drills. Read it once in **Read** mode; come back in **Practise** mode (top '
                 'right), where code and answers stay hidden until you ask.'))
 
