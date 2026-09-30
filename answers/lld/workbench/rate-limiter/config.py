@@ -1,0 +1,82 @@
+"""What the builder compiles and runs for the rate limiter. The page content is in problem.py."""
+
+SLUG = 'rate-limiter'
+NAME = 'Rate limiter'
+TITLE = 'Rate limiter · LLD workbench'
+SUBTITLE = 'LLD workbench · Java 17 · every line on this page compiles and runs'
+
+# Snapshots of the one source tree (see ../snap.py): the core, then one per follow-up.
+SNAPS = ['core', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'x']
+
+# The core, typed in this order. Each step compiles on its own with the steps before it.
+BUILD = [
+    dict(id='b1', files=['Decision.java', 'Limit.java', 'RateLimiter.java'], demo='B1Demo'),
+    dict(id='b2', files=['Clock.java', 'SystemClock.java', 'ManualClock.java'], demo='B2Demo'),
+    dict(id='b3', files=['Bucket.java', 'TokenBucket.java'], demo='B3Demo'),
+    dict(id='b4', files=['BucketFactory.java', 'Plan.java', 'Plans.java'], demo='B4Demo'),
+    dict(id='b5', files=['ClientRateLimiter.java']),
+    dict(id='b6', files=['Main.java'], demo='Main'),
+    dict(id='b7', files=['RateLimiterTest.java'], demo='RateLimiterTest'),
+]
+
+# The demo each follow-up runs (it checks its own numbers; see demos/Check.java).
+DEMOS = {'f1': 'F1Demo', 'f2': 'F2Demo', 'f3': 'F3Demo', 'f4': 'F4Demo', 'f5': 'F5Demo',
+         'f6': 'F6Demo', 'f7': 'F7Demo', 'f8': 'F8Demo', 'x': 'XDemo'}
+
+CORE_TYPES = ['Decision', 'Limit', 'RateLimiter', 'Clock', 'SystemClock', 'ManualClock', 'Bucket',
+              'TokenBucket', 'BucketFactory', 'Plan', 'Plans', 'ClientRateLimiter', 'Main',
+              'RateLimiterTest']
+FILE_ORDER = [t + '.java' for t in CORE_TYPES] + [t + '.java' for t in [
+    'SlidingWindowLog', 'CreditBucket', 'LimitLookup', 'Request', 'Rule', 'AllRulesLimiter',
+    'ShadowLimiter', 'Waiting', 'FakeRedis', 'RedisRateLimiter', 'HitCounter', 'LoggerRateLimiter']]
+
+STRIP = [
+    ('1 answer', ['Decision', 'Limit', 'RateLimiter']),
+    ('2 time', ['Clock', 'SystemClock', 'ManualClock']),
+    ('3 count', ['Bucket', 'TokenBucket']),
+    ('4 limits', ['BucketFactory', 'Plan', 'Plans']),
+    ('5 limiter', ['ClientRateLimiter']),
+    ('6 run', ['Main']),
+    ('7 prove', ['RateLimiterTest']),
+]
+
+# Broken copies of the core. The build makes each change, runs the tests, and stops unless the
+# named test fails on every run.
+GET_THEN_PUT = '''        Bucket bucket = buckets.get(clientId);
+        if (bucket == null) {
+            bucket = factory.create(plans.limitFor(clientId), now);
+            buckets.put(clientId, bucket);
+        }'''
+COMPUTE = '''        Bucket bucket = buckets.computeIfAbsent(clientId,
+                id -> factory.create(plans.limitFor(id), now));'''
+REFILL = 'tokens = Math.min(capacity, tokens + elapsed / millisPerToken);'
+
+MUTANTS = [
+    dict(label='no lock',
+         edits=[('TokenBucket.java', 'public synchronized Decision tryConsume',
+                 'public Decision tryConsume')],
+         test='many threads on one client get exactly its limit', runs=10,
+         html='Remove <code>synchronized</code> from <code>TokenBucket.tryConsume</code>'),
+    dict(label='get, then put',
+         edits=[('ClientRateLimiter.java', COMPUTE, GET_THEN_PUT)],
+         test='threads that meet a new client share one bucket', runs=10,
+         html='Replace <code>computeIfAbsent</code> with <code>get</code>, then <code>put</code> '
+              'if missing'),
+    dict(label='whole tokens',
+         edits=[('TokenBucket.java', 'private double tokens;', 'private long tokens;'),
+                ('TokenBucket.java', REFILL,
+                 'tokens = Math.min(capacity, tokens + (long) (elapsed / millisPerToken));')],
+         test='a refusal says exactly when to retry', runs=1,
+         html='Keep tokens in a <code>long</code>, so 120 ms earns 0 instead of 0.6'),
+    dict(label='no cap',
+         edits=[('TokenBucket.java', REFILL, 'tokens = tokens + elapsed / millisPerToken;')],
+         test='quiet time never fills a bucket past its capacity', runs=1,
+         html='Drop <code>Math.min(capacity, ...)</code> from the refill'),
+]
+
+# Extra programs run against a snapshot: their output answers the questions on the check step.
+EXTRA = [('QuizDemo', 'core'), ('QuizCostDemo', 'f3')]
+
+CONFIG = dict(SLUG=SLUG, NAME=NAME, TITLE=TITLE, SUBTITLE=SUBTITLE, SNAPS=SNAPS, BUILD=BUILD,
+              DEMOS=DEMOS, FILE_ORDER=FILE_ORDER, STRIP=STRIP, MUTANTS=MUTANTS,
+              CORE_TYPES=CORE_TYPES, EXTRA=EXTRA)

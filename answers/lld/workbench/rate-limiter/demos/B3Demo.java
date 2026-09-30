@@ -1,5 +1,5 @@
 // Step 3 on its own: score-widget's bucket (5 a second), driven by times we pick by hand.
-// It needs no clock and no limiter: a bucket is told the time.
+// It needs no clock and no limiter: a bucket is simply told the time.
 public class B3Demo {
     public static void main(String[] args) {
         Bucket widget = new TokenBucket(Limit.perSecond(5), 0);
@@ -14,6 +14,7 @@ public class B3Demo {
                 allowed++;
             }
         }
-        System.out.println("2200 ms  7 at once  " + allowed + " allowed, " + (7 - allowed) + " refused");
+        System.out.println("2200 ms  7 at once  " + allowed + " allowed, " + (7 - allowed)
+                + " refused");
     }
 }

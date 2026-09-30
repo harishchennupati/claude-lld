@@ -3,6 +3,7 @@
 class SystemClock implements Clock {
     @Override
     public long nowMillis() {
-        return System.nanoTime() / 1_000_000;   // its zero means nothing: we only ever subtract two readings
+        // nanoTime's zero means nothing, which is fine: we only ever subtract two readings.
+        return System.nanoTime() / 1_000_000;
     }
 }

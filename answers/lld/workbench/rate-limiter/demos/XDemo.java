@@ -6,8 +6,10 @@ public class XDemo {
         hits.hit(2);
         hits.hit(3);
         hits.hit(300);
-        System.out.println("hit counter: getHits(300) = " + hits.getHits(300) + ", getHits(301) = " + hits.getHits(301));
-        Check.that(hits.getHits(300) == 4 && hits.getHits(301) == 3, "the hit at 1 s leaves at 301 s");
+        int at300 = hits.getHits(300);
+        int at301 = hits.getHits(301);
+        System.out.println("hit counter: getHits(300) = " + at300 + ", getHits(301) = " + at301);
+        Check.that(at300 == 4 && at301 == 3, "the hit at 1 s leaves the window at 301 s");
 
         LoggerRateLimiter logger = new LoggerRateLimiter();
         boolean a = logger.shouldPrintMessage(1, "foo");

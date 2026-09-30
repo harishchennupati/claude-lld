@@ -16,7 +16,7 @@ public class F8Demo {
         int shared = send(serverA, serverB);
 
         System.out.println("fantasy-app (limit 50), 60 requests, 30 to each of 2 servers:");
-        System.out.println("  a map in each server: " + local + " allowed   (each server grants the whole 50)");
+        System.out.println("  a map in each server: " + local + " allowed  (each grants all 50)");
         System.out.println("  one bucket in Redis:  " + shared + " allowed");
         Check.that(local == 60 && shared == 50, "60 without Redis, 50 with it");
 

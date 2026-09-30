@@ -6,8 +6,8 @@ public class F3Demo {
         RateLimiter limiter = new ClientRateLimiter(plans, TokenBucket::new, clock);
 
         Decision history = limiter.tryAcquire("score-widget", 5);
-        Decision score = limiter.tryAcquire("score-widget");            // written before costs: still costs 1
-        clock.advance(600);                                             // 600 ms earn 3 tokens
+        Decision score = limiter.tryAcquire("score-widget");      // old call: still costs 1
+        clock.advance(600);                                       // 600 ms earn 3 tokens
         Decision early = limiter.tryAcquire("score-widget", 5);
         clock.advance(400);
         Decision onTime = limiter.tryAcquire("score-widget", 5);
@@ -17,7 +17,7 @@ public class F3Demo {
         System.out.println(" 600 ms  history (5)     " + early);
         System.out.println("1000 ms  history (5)     " + onTime);
         System.out.println("1000 ms  export (6)      " + tooBig);
-        Check.that(early.remaining() == 3 && early.retryAfterMillis() == 400, "3 left, retry in 400 ms");
-        Check.that(onTime.allowed() && tooBig.retryAfterMillis() == Decision.NEVER, "on time, and never");
+        Check.that(early.remaining() == 3 && early.retryAfterMillis() == 400, "3 left, 400 ms");
+        Check.that(onTime.allowed() && tooBig.retryAfterMillis() == Decision.NEVER, "never");
     }
 }

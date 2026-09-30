@@ -6,15 +6,15 @@ public class F2Demo {
         BucketFactory withCredits = (limit, now) -> new CreditBucket(limit, 5, now);
         RateLimiter limiter = new ClientRateLimiter(plans, withCredits, clock);
 
-        int s0 = send(limiter, 3);                 // second 0: uses 3 of 5, so 2 become credits
+        int s0 = send(limiter, 3);          // second 0: uses 3 of 5, so 2 become credits
         clock.advance(1_000);
-        int s1 = send(limiter, 8);                 // second 1: 5 + 2 credits
-        clock.advance(2_000);                      // second 2 is quiet: 5 more saved, but the cap is 5
-        int s3 = send(limiter, 12);                // second 3: 5 + 5 credits
-        System.out.println("second 0:  3 requests ->  " + s0 + " allowed   (2 unused become credits)");
-        System.out.println("second 1:  8 requests ->  " + s1 + " allowed   (5 for this second + 2 credits)");
-        System.out.println("second 2:  none          (5 more saved; credits capped at 5)");
-        System.out.println("second 3: 12 requests -> " + s3 + " allowed   (5 for this second + 5 credits)");
+        int s1 = send(limiter, 8);          // second 1: 5 + 2 credits
+        clock.advance(2_000);               // second 2 is quiet: 5 more saved, but the cap is 5
+        int s3 = send(limiter, 12);         // second 3: 5 + 5 credits
+        System.out.println("second 0:  3 requests ->  " + s0 + " allowed  (2 unused: credits)");
+        System.out.println("second 1:  8 requests ->  " + s1 + " allowed  (5 + 2 credits)");
+        System.out.println("second 2:  quiet              (5 more saved, capped at 5)");
+        System.out.println("second 3: 12 requests -> " + s3 + " allowed  (5 + 5 credits)");
         Check.that(s0 == 3 && s1 == 7 && s3 == 10, "3, then 7, then 10");
     }
 

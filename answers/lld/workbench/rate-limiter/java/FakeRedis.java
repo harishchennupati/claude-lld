@@ -2,12 +2,12 @@
 import java.util.HashMap;
 import java.util.Map;
 
-// A stand-in for Redis, so this runs anywhere. Real Redis runs one command or script at a time on
-// one thread, so two scripts never interleave: `synchronized` on each call models exactly that.
+// A stand-in for Redis, so this runs anywhere. Real Redis runs one command or script at a
+// time, on one thread, so two scripts never interleave: `synchronized` models exactly that.
 class FakeRedis {
-    private final Map<String, double[]> buckets = new HashMap<>();   // key -> {tokens, last refill}
-    private final Clock serverClock;                                   // Redis's own clock: the TIME command
-    private boolean down;                                              // to show what an outage does
+    private final Map<String, double[]> buckets = new HashMap<>();   // key -> {tokens, last}
+    private final Clock serverClock;   // Redis's own clock: its TIME command
+    private boolean down;              // to show what an outage does
 
     FakeRedis(Clock serverClock) {
         this.serverClock = serverClock;

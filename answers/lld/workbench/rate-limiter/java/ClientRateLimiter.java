@@ -56,7 +56,8 @@ class ClientRateLimiter implements RateLimiter {
         long now = clock.nowMillis();          // read the time once, and hand it to the bucket
         // Find this client's bucket, or create it on the first request, in ONE atomic step:
         // two threads that meet a new client at the same moment still share one bucket.
-        Bucket bucket = buckets.computeIfAbsent(clientId, id -> factory.create(plans.limitFor(id), now));
+        Bucket bucket = buckets.computeIfAbsent(clientId,
+                id -> factory.create(plans.limitFor(id), now));
         return bucket.tryConsume(now);
     }
     //@ end
@@ -66,7 +67,8 @@ class ClientRateLimiter implements RateLimiter {
         long now = clock.nowMillis();          // read the time once, and hand it to the bucket
         // Find this client's bucket, or create it on the first request, in ONE atomic step:
         // two threads that meet a new client at the same moment still share one bucket.
-        Bucket bucket = buckets.computeIfAbsent(clientId, id -> factory.create(plans.limitFor(id), now));
+        Bucket bucket = buckets.computeIfAbsent(clientId,
+                id -> factory.create(plans.limitFor(id), now));
         return bucket.tryConsume(cost, now);
     }
     //@ end
@@ -76,13 +78,14 @@ class ClientRateLimiter implements RateLimiter {
         return tryAcquire(key, cost, clock.nowMillis());
     }
 
-    // For a caller that checks several rules for one request, so that every rule sees the same instant.
+    // For a caller that checks several rules for one request: every rule sees the same instant.
     Decision tryAcquire(String key, int cost, long nowMillis) {
     //@ end
     //@ from f4 until f5
         // Find this key's bucket, or create it on the first request, in ONE atomic step:
         // two threads that meet a new key at the same moment still share one bucket.
-        Bucket bucket = buckets.computeIfAbsent(key, k -> factory.create(limits.limitFor(k), nowMillis));
+        Bucket bucket = buckets.computeIfAbsent(key,
+                k -> factory.create(limits.limitFor(k), nowMillis));
         return bucket.tryConsume(cost, nowMillis);
     }
 
@@ -123,13 +126,14 @@ class ClientRateLimiter implements RateLimiter {
     //@ from f6
 
     // Forgets buckets that are idle, because a new one would behave exactly the same. A timer
-    // calls this, never a request. A ConcurrentHashMap can be walked while other threads change it.
+    // calls this, never a request. A ConcurrentHashMap can be walked while threads change it.
     int evictIdle(long nowMillis) {
         int removed = 0;
         for (Map.Entry<String, LimitedBucket> e : buckets.entrySet()) {
             // remove(key, value) removes the entry only if the map still holds this same one,
             // so a bucket another thread has just replaced is left alone.
-            if (e.getValue().bucket().isIdle(nowMillis) && buckets.remove(e.getKey(), e.getValue())) {
+            LimitedBucket held = e.getValue();
+            if (held.bucket().isIdle(nowMillis) && buckets.remove(e.getKey(), held)) {
                 removed++;
             }
         }

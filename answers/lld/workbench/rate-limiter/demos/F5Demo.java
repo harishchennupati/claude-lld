@@ -18,13 +18,13 @@ public class F5Demo {
             }
             shadow.tryAcquire("fantasy-app");
         }
-        System.out.println("shadow run: score-widget " + widget + " of 5 allowed; the candidate would have refused "
-                + shadow.wouldRefuse());
-        Check.that(widget == 5 && shadow.wouldRefuse() == 2, "all 5 allowed, 2 would have been refused");
+        System.out.println("shadow run: score-widget " + widget + " of 5 allowed;"
+                + " the candidate would have refused " + shadow.wouldRefuse());
+        Check.that(widget == 5 && shadow.wouldRefuse() == 2, "5 allowed, 2 would be refused");
 
         RateLimiter limiter = new ClientRateLimiter(live, TokenBucket::new, clock);
-        limiter.tryAcquire("score-widget");                             // its bucket is built for 5 a second
-        live.setLimit(Plan.FREE, Limit.perSecond(3));                   // ops change the limit, no restart
+        limiter.tryAcquire("score-widget");                 // its bucket is built for 5 a second
+        live.setLimit(Plan.FREE, Limit.perSecond(3));       // ops change the limit: no restart
         clock.advance(1_000);
         int after = 0;
         Decision last = null;

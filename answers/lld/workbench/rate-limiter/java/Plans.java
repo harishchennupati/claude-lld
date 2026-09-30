@@ -12,14 +12,19 @@ class Plans {
 class Plans implements LimitLookup {
 //@ end
     //@ until f5
-    private final Map<Plan, Limit> limitOf = new EnumMap<>(Plan.class);   // filled once below, then only read
+    // Each plan's limit. Filled once in the constructor and only read after that,
+    // so threads can share it without a lock.
+    private final Map<Plan, Limit> limitOf = new EnumMap<>(Plan.class);
     //@ end
     //@ from f5
-    // Was an EnumMap, filled once and then only read. Now ops can change a limit while
-    // requests read it, and an EnumMap is not safe for that: a ConcurrentHashMap is.
+    // Each plan's limit. It was an EnumMap, filled once and then only read. Now ops can change
+    // a limit while requests read it, and an EnumMap is not safe for that: a ConcurrentHashMap is.
     private final Map<Plan, Limit> limitOf = new ConcurrentHashMap<>();
     //@ end
-    private final Map<String, Plan> planOf = new ConcurrentHashMap<>();   // clients sign up while requests run
+
+    // Which plan each client is on. Clients can sign up while requests are running,
+    // so many threads use this map at once: a ConcurrentHashMap.
+    private final Map<String, Plan> planOf = new ConcurrentHashMap<>();
 
     Plans(Limit free, Limit pro) {
         limitOf.put(Plan.FREE, free);
@@ -31,8 +36,8 @@ class Plans implements LimitLookup {
     }
     //@ from f5
 
-    // A new limit for a whole plan, while the service runs. Each client's bucket notices
-    // on the client's next request.
+    // A new limit for a whole plan, while the service runs. Each client's bucket is rebuilt
+    // on that client's next request.
     void setLimit(Plan plan, Limit limit) {
         limitOf.put(plan, limit);
     }

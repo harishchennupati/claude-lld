@@ -1,13 +1,13 @@
 //@ file from f1
 import java.util.ArrayDeque;
 
-// Exact: never more than `limit` requests in ANY window of `periodMillis`. It keeps the time of
-// every allowed request, oldest first. Logins, 5 a minute: after 5 attempts at 0 s, the 6th must
-// wait until 60 s, whatever happens in between.
+// Exact: never more than `limit` requests in ANY window of `periodMillis`. It keeps the time
+// of every allowed request, oldest first. Logins, 5 a minute: after 5 attempts at 0 s, the 6th
+// must wait until 60 s, whatever happens in between.
 class SlidingWindowLog implements Bucket {
     private final int limit;
     private final long periodMillis;
-    private final ArrayDeque<Long> times = new ArrayDeque<>();   // oldest first: add at the back, drop from the front
+    private final ArrayDeque<Long> times = new ArrayDeque<>();   // oldest first; both ends O(1)
 
     SlidingWindowLog(Limit limit, long nowMillis) {              // an empty log needs no start time
         this.limit = limit.capacity();
