@@ -29,8 +29,8 @@ public class RedisDemo {
         RateLimitResult open = serverA.check(r);
         RateLimiter closed = new RuleBasedRateLimiter(rules, new RedisBucketStore(redis, false),
                 clock);
-        System.out.println("Redis down, fail open:    " + open);
-        System.out.println("Redis down, fail closed:  " + closed.check(r));
+        System.out.println("Redis down, fail open:    " + Check.show(open));
+        System.out.println("Redis down, fail closed:  " + Check.show(closed.check(r)));
         Check.that(open.allowed() && open.remaining() == 50, "fail open says the whole budget");
     }
 

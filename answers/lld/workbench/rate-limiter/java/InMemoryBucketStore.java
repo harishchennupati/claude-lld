@@ -14,13 +14,9 @@ class InMemoryBucketStore implements BucketStore {
 
     @Override
     public Bucket bucketFor(String key, BucketFactory factory, Limit limit, long nowMillis) {
-        Bucket bucket = buckets.get(key);      // the usual case: the key has a bucket; no lock
-        if (bucket == null) {
-            // A key's first request: find-or-create as ONE atomic step, so two threads that meet
-            // a new key at the same moment still get the same bucket.
-            bucket = buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));
-        }
-        return bucket;
+        // Find-or-create as ONE atomic step, so two threads that meet a new key at the same
+        // moment still get the same bucket. The factory runs only for a new key.
+        return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));
     }
 
     //@ from idle
@@ -50,9 +46,9 @@ class InMemoryBucketStore implements BucketStore {
             }
         }, periodMillis, periodMillis, TimeUnit.MILLISECONDS);
     }
-    //@ end
 
-    int size() {
+    int size() {                               // for the demo: how many buckets are kept
         return buckets.size();
     }
+    //@ end
 }

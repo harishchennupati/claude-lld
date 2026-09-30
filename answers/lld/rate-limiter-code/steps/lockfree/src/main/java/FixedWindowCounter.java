@@ -16,9 +16,6 @@ class FixedWindowCounter implements Bucket {
     @Override
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         roll(nowMillis);
-        if (cost > limit) {
-            return Decision.never(limit - used);
-        }
         if (used + cost <= limit) {
             used += cost;
             return Decision.allow(limit - used);

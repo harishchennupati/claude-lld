@@ -23,9 +23,6 @@ class AtomicTokenBucket implements Bucket {
         while (true) {
             State seen = state.get();                    // what this thread read
             State now = refilled(seen, nowMillis);       // plus what time has earned since
-            if (cost > capacity) {
-                return Decision.never((long) now.tokens());
-            }
             if (now.tokens() < cost) {                   // refused: nothing to write
                 long wait = (long) Math.ceil((cost - now.tokens()) * millisPerToken);
                 return Decision.deny((long) now.tokens(), wait);

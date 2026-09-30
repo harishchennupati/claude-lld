@@ -41,9 +41,6 @@ class RedisTokenBucket implements Bucket {
 
     @Override
     public Decision tryConsume(int cost, long nowMillis) {       // Redis uses its own clock
-        if (cost > limit.capacity()) {
-            return Decision.never(0);
-        }
         try {
             long[] r = redis.tokenBucket(key, limit.capacity(), limit.millisPerToken(), cost);
             return r[0] == 1 ? Decision.allow(r[1]) : Decision.deny(r[1], r[2]);

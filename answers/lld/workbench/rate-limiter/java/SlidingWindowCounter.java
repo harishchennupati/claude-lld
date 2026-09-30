@@ -20,9 +20,6 @@ class SlidingWindowCounter implements Bucket {
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         roll(nowMillis);
         double estimate = estimate(nowMillis);
-        if (cost > limit) {
-            return Decision.never((long) Math.max(0, limit - estimate));
-        }
         if (estimate + cost <= limit) {
             current += cost;
             return Decision.allow((long) (limit - estimate - cost));

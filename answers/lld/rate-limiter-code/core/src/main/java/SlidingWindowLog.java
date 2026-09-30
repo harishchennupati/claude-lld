@@ -16,9 +16,6 @@ class SlidingWindowLog implements Bucket {
     @Override
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         dropExpired(nowMillis);
-        if (cost > limit) {
-            return Decision.never(limit - times.size());
-        }
         if (times.size() + cost <= limit) {
             for (int i = 0; i < cost; i++) {
                 times.addLast(nowMillis);                        // one entry per token spent

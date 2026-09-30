@@ -20,9 +20,8 @@ class Waiting {
         this.seats = new Semaphore(maxWaiting);
     }
 
-    // True once the request is allowed. False at once if it can never fit, if the waits would add
-    // up to more than maxWaitMillis, or if the waiting room is full. A request that needs no wait
-    // needs no seat either.
+    // True once the request is allowed. False at once if the waits would add up to more than
+    // maxWaitMillis, or if the waiting room is full. A request that needs no wait needs no seat.
     boolean acquire(RequestContext request, long maxWaitMillis) throws InterruptedException {
         RateLimitResult r = limiter.check(request);
         if (r.allowed()) {
@@ -35,7 +34,7 @@ class Waiting {
             long waited = 0;                      // what we have slept so far: no clock needed
             while (!r.allowed()) {
                 long wait = r.retryAfterMillis();
-                if (wait == Decision.NEVER || waited + wait > maxWaitMillis) {
+                if (waited + wait > maxWaitMillis) {
                     return false;                 // no point sleeping only to fail
                 }
                 sleeper.sleep(wait);              // exactly as long as the limiter said, then ask

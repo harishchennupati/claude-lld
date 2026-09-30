@@ -41,9 +41,8 @@ class RuleBasedRateLimiter implements RateLimiter {
     @Override
     public RateLimitResult check(RequestContext request) {
         long now = clock.nowMillis();                     // one instant for every rule
-        List<Bucket> charged = new ArrayList<>();
-        long remaining = RateLimitResult.UNLIMITED;
-        RateLimitResult result = null;
+        List<Bucket> charged = new ArrayList<>();         // what this request has taken
+        long remaining = Long.MAX_VALUE;                  // lowered by every rule
         //@ until live
         for (RateLimitRule rule : rules.matching(request)) {
         //@ end
@@ -58,30 +57,27 @@ class RuleBasedRateLimiter implements RateLimiter {
                 for (Bucket spent : charged) {
                     spent.refund(request.cost(), now);
                 }
-                result = RateLimitResult.refused(d, rule.name());
-                break;
+                return tell(request, RateLimitResult.refused(d, rule.name()));
             }
             charged.add(bucket);
             remaining = Math.min(remaining, d.remaining());   // the tightest rule decides
         }
-        if (result == null) {
-            result = RateLimitResult.allowed(remaining);
-        }
-        tell(request, result);
-        return result;
+        return tell(request, RateLimitResult.allowed(remaining));
     }
 
     // A bucket key has three parts: the rule, whose budget, and the limit. With the limit in the
     // key, a client that upgrades from FREE to PRO gets a PRO bucket on its very next request.
     private Bucket bucketFor(RateLimitRule rule, RequestContext request, long now) {
         Limit limit = rule.limits().limitFor(request);
-        String key = rule.name() + "|" + rule.scope().keyOf(request) + "|" + limit;
+        // "plan|fantasy-app|50/1000"
+        String key = rule.name() + "|" + rule.scope().keyOf(request)
+                + "|" + limit.capacity() + "/" + limit.periodMillis();
         return store.bucketFor(key, rule.algorithm(), limit, now);
     }
 
     // After the decision, holding no lock. A listener that throws is skipped: a broken
     // dashboard must never turn into a broken API.
-    private void tell(RequestContext request, RateLimitResult result) {
+    private RateLimitResult tell(RequestContext request, RateLimitResult result) {
         for (RateLimitListener listener : listeners) {
             try {
                 listener.onDecision(request, result);
@@ -89,5 +85,6 @@ class RuleBasedRateLimiter implements RateLimiter {
                 // In production: log it. The request goes on either way.
             }
         }
+        return result;
     }
 }

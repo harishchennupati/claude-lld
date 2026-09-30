@@ -21,9 +21,6 @@ class CreditBucket implements Bucket {
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         roll(nowMillis);
         long left = (capacity - used) + credits;
-        if (cost > capacity + maxCredits) {
-            return Decision.never(left);
-        }
         int fromWindow = Math.min(cost, capacity - used);   // this window's requests first...
         int fromCredits = cost - fromWindow;                // ...then the savings
         if (fromCredits > credits) {

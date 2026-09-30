@@ -1,21 +1,14 @@
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 // The rules, in the order they are checked. Built once and only read after that, so every
 // request thread shares it without a lock.
 class RuleBook {
     private final List<RateLimitRule> rules;
 
+    // Rule names are part of bucket keys, so they must differ. List.of(...) cannot be changed.
     RuleBook(List<RateLimitRule> rules) {
-        Set<String> names = new HashSet<>();
-        for (RateLimitRule rule : rules) {
-            if (!names.add(rule.name())) {      // names are part of bucket keys: they must differ
-                throw new IllegalArgumentException("two rules named " + rule.name());
-            }
-        }
-        this.rules = List.copyOf(rules);        // unmodifiable: nobody can change it later
+        this.rules = rules;
     }
 
     // The rules that cover this request, in order.

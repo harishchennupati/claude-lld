@@ -16,11 +16,5 @@ public class RuleBookDemo {
             }
             System.out.printf("%-12s %-8s ->%s%n", r.clientId(), r.endpoint(), names);
         }
-        try {
-            new RuleBook(List.of(rules.matching(requests.get(0)).get(0),
-                    rules.matching(requests.get(0)).get(0)));
-        } catch (IllegalArgumentException e) {
-            System.out.println("two rules with one name -> " + e.getMessage());
-        }
     }
 }

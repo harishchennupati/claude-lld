@@ -33,9 +33,10 @@ public class CostDemo {
         long perClient = (after - before) / ids.length;
         System.out.println("memory per new client (its buckets and their keys): about "
                 + perClient + " bytes; a million clients: about " + perClient + " MB");
-        // Using the store after measuring keeps it reachable until then; otherwise the collector
-        // may free the whole store as soon as the last check returns, and we would measure 0.
-        Check.that(sink > 0 && perClient > 0 && store.size() > 2 * ids.length, "measured");
+        // Keep the store reachable until here; otherwise the collector may free it as soon as the
+        // last check returns, and we would measure 0.
+        java.lang.ref.Reference.reachabilityFence(store);
+        Check.that(sink > 0 && perClient > 0, "measured");
     }
 
     static long used(Runtime rt) throws InterruptedException {

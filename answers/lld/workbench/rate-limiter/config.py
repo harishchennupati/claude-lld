@@ -86,8 +86,10 @@ MUTANTS = [
          html='Remove <code>synchronized</code> from <code>TokenBucket.tryConsume</code>'),
     dict(label='get, then put',
          edits=[('InMemoryBucketStore.java',
-                 'bucket = buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));',
-                 'bucket = factory.create(limit, nowMillis);\n            buckets.put(key, bucket);')],
+                 'return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));',
+                 'Bucket bucket = buckets.get(key);\n        if (bucket == null) {\n'
+                 '            bucket = factory.create(limit, nowMillis);\n'
+                 '            buckets.put(key, bucket);\n        }\n        return bucket;')],
          test='threads that meet a new client share one bucket', runs=10,
          html='Replace <code>computeIfAbsent</code> with <code>put</code> after the '
               '<code>get</code> finds nothing'),
@@ -116,8 +118,8 @@ MUTANTS = [
          html='Drop <code>if (elapsed &lt;= 0) return;</code> from the refill'),
     dict(label='limit not in the key',
          edits=[('RuleBasedRateLimiter.java',
-                 'String key = rule.name() + "|" + rule.scope().keyOf(request) + "|" + limit;',
-                 'String key = rule.name() + "|" + rule.scope().keyOf(request);')],
+                 '\n                + "|" + limit.capacity() + "/" + limit.periodMillis();',
+                 ';')],
          test="each client gets its plan's budget; an upgrade applies at once", runs=1,
          html='Leave the limit out of the bucket key'),
     dict(label='loosest remaining',

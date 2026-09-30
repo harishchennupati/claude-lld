@@ -21,17 +21,18 @@ everything; **Practise** mode hides the code and the answers until the reader as
 |---|---|---|
 | Understand | The problem | the interviewer's line (a real reported wording, with company and year); the situation, with realistic names and numbers; one flow picture; "what this really is" in one sentence; the questions to ask, each with what its answer changes in the code; what we build (the product's rules as a table); what SDE-2 and SDE-3 are graded on; the hour (what to type in a 60-minute round, what in a 90-minute machine-coding round); how to use the page |
 | | The core idea (e.g. how to count) | the first idea, drawn failing (a ✗ text panel); the options as a table; "X, not Y" lines; the chosen mechanism with its formula and a worked trace whose numbers the code prints later |
-| Design | How to get there | the first version everyone writes, compiled and run (the 15-minute version); then one interviewer push per move: what it breaks, what the design becomes, and a bold "X, not Y" line; the same path as a folded table; what is left out on purpose; the typing order. It comes *before* the finished diagram, so the diagram is the summary |
+| Design | How to get there | the first version everyone writes, compiled and run (the 15-minute version); then one interviewer push per move: what the code we have cannot do and the tempting wrong fix, the new types (each named as record, interface, class or enum), a short code sketch, a bold "X, not Y" line, and a chip row of the design so far. By the last push every type exists. It comes *before* the finished diagram, so the diagram is the summary |
 | | The design | the caller's code first; the class diagram; one sequence diagram of a real request; who does what, and when each class changes |
-| | Threads (when the problem has them) | the three ways two threads break shared data (lost update, check-then-act, stale read), each a short ✗ trace with its name; the fix and the fix's limit; later steps reuse the names |
 | Build | one step per group of 1-5 types, in typing order | the where-we-are strip; 2-4 sentences of why; the code, whole files, explained in its comments; the output of a tiny program that uses only what exists so far; a ✗/✓ panel where a race or a wrong first idea is the point; a "Java ·" note where a language or library idea is first used; at most two "If the interviewer asks" answers |
 | | Run it | `Main` in parts, its output, and what the output shows |
 | | Tests | the test file in parts (the first test open, the rest folded); its output; the break-it table (real broken copies, each with the test that must fail) |
-| | Why it holds up | what threads share and what guards it; why it cannot deadlock; measured cost; SOLID and patterns pointed at the code; patterns *not* used and why |
+| | Why it holds up | the thread breaks met in the build (each is taught in the step where it happens, never in a separate primer) as one table; what threads share and what guards it; why it cannot deadlock; measured cost |
+| | Principles and patterns | SOLID as a table (in one line / here / without it); patterns used, with the problem each solves here; patterns you might reach for and why not; what else they probe (program to an interface, composition, immutability, testability) |
 | Follow-ups | one step each, ordered so each builds on the last; optional ones marked *later* | the ask (a reported wording, company, year); "Builds on:" the step before; the strip with only new and changed types; where it lands in *our* design (which interface absorbs it); the diff (new code with changes highlighted; repeated changes folded); the demo's output; the catch (the one hole left); Java notes; interview answers |
-| Remember and practise | Recall | cards (the ask, the core mechanism, the shape, threads, X-not-Y, tests, follow-ups, what the tests need) and the lines to remember exactly |
+| Remember and practise | Recall | the whole design as signatures in typing order; cards (the pushes, the core mechanism in numbers, threads, where each follow-up lands, the tests); the lines to remember exactly |
 | | Practise | drill 0: the 15-minute version; drill 1: the 60-minute round subset with a tick list; drill 2: machine coding, then the page's tests against your code (plus the whole core in one file for an online editor); drill 3: each follow-up with its own time, started from `<slug>-code/steps/<step>/`; drill 4: out loud; when to repeat; a miss log kept in the browser |
 | | Check yourself | predict the output (answers printed by real code); spot the bug (real bugs, each with its fix as code); what would you change if... (answers as code); the questions they ask; everything folded |
+| | All the code | download buttons for the core and complete Maven projects (zips embedded in the page); every core file in typing order; each follow-up's new files, folded |
 
 The left list shows minutes per step; the must-do path is the steps without *later*.
 
@@ -47,6 +48,8 @@ These come from the reader's feedback on earlier versions. Break none of them.
 - No "say this" boxes, no scripts of what to tell the interviewer, no "a strong answer contains",
   no walkthrough lists of the same content in other words.
 - Code first. The explanation lives in the code's comments; prose around code is 2-4 sentences.
+- Only code you would type in the room: no validation, no custom `toString`, no edge-case paths
+  or helpers that exist only for demos. Mention the edge case in a Q&A instead.
 - Code in digestible pieces: whole files of 10-50 lines; a longer file is shown in labelled parts
   (`W.part`), with a copy button for the whole file.
 - Explain a concept where it is first needed (a "Java ·" note), never in a glossary dump.

@@ -14,7 +14,7 @@ public class QuizDemo {
         }
         clock.advance(450);
         for (int i = 1; i <= 3; i++) {
-            System.out.println("1.  450 ms  #" + i + "  " + limiter.check(widget));
+            System.out.println("1.  450 ms  #" + i + "  " + Check.show(limiter.check(widget)));
         }
 
         // 2. fantasy-app (PRO, 50 a second): one request, 10 quiet seconds, then 60 at once.
@@ -32,6 +32,7 @@ public class QuizDemo {
         RequestContext history = new RequestContext("cricket-blog", "203.0.113.7", "/history", 5);
         limiter.check(history);
         clock.advance(700);
-        System.out.println("3.  700 ms  history (5)  " + limiter.check(history));
+        System.out.println("3.  700 ms  history (5)  "
+                + Check.show(limiter.check(history)));
     }
 }

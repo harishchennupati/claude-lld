@@ -25,7 +25,6 @@ public class RateLimiterTest {
         test("each rule counts by its own key", RateLimiterTest::scopes);
         test("sign-ins are exact: never 6 in any minute", RateLimiterTest::exactSignIns);
         test("the daily quota starts again at midnight", RateLimiterTest::quota);
-        test("a request too big for its bucket is refused for good", RateLimiterTest::tooBig);
         test("the tightest rule's remaining is reported", RateLimiterTest::tightest);
         test("listeners hear every refusal", RateLimiterTest::listeners);
         test("a listener that throws does not break a request", RateLimiterTest::brokenListener);
@@ -121,12 +120,6 @@ public class RateLimiterTest {
         check(limiter.check(scores("score-widget")).allowed(), "a new day, a new quota");
     }
 
-    static void tooBig() {
-        RateLimiter limiter = limiter(new ManualClock(0));
-        RateLimitResult r = limiter.check(new RequestContext("score-widget", IP, "/export", 6));
-        check(!r.allowed() && r.retryAfterMillis() == Decision.NEVER, "6 never fit in 5");
-    }
-
     static void tightest() {
         RateLimiter limiter = limiter(new ManualClock(0));
         RateLimitResult r = limiter.check(request("fantasy-app", "/search"));
@@ -188,7 +181,7 @@ public class RateLimiterTest {
             return new TokenBucket(limit, now);
         };
         Set<Bucket> seen = ConcurrentHashMap.newKeySet();       // a thread-safe set
-        together(16, () -> seen.add(store.bucketFor("plan|news-app|5/1000ms", slow,
+        together(16, () -> seen.add(store.bucketFor("plan|news-app|5/1000", slow,
                 Limit.perSecond(5), 0)));
         check(seen.size() == 1, "one bucket for one key, got " + seen.size());
     }

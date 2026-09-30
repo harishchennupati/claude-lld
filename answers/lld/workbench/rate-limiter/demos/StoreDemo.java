@@ -11,7 +11,7 @@ public class StoreDemo {
     public static void main(String[] args) throws InterruptedException {
         InMemoryBucketStore store = new InMemoryBucketStore();
         Limit limit = Limit.perSecond(5);
-        String key = "plan|news-app|5/1000ms";
+        String key = "plan|news-app|5/1000";
         List<Bucket> seen = new CopyOnWriteArrayList<>();
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(16);
@@ -28,10 +28,9 @@ public class StoreDemo {
         long distinct = seen.stream().distinct().count();
         System.out.println("16 threads asked for one new key: " + seen.size() + " answers, "
                 + distinct + " bucket");
-        Bucket other = store.bucketFor("plan|cricket-blog|5/1000ms", Algorithm.TOKEN_BUCKET,
+        Bucket other = store.bucketFor("plan|cricket-blog|5/1000", Algorithm.TOKEN_BUCKET,
                 limit, 0);
-        System.out.println("another key, another bucket: " + (other != seen.get(0))
-                + "; buckets in the store: " + store.size());
-        Check.that(distinct == 1 && store.size() == 2, "one bucket per key");
+        System.out.println("another key, another bucket: " + (other != seen.get(0)));
+        Check.that(distinct == 1 && other != seen.get(0), "one bucket per key");
     }
 }

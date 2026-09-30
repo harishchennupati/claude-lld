@@ -393,3 +393,11 @@ details.rv :not(pre) > code { white-space: normal; }
   .tw td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block;
     font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--mut); }
 }
+
+/* ---------------------------------------------------------------- derivation and downloads */
+.strip.grow .chip small { color: var(--ov); font-size: 10px; margin-left: 3px; }
+.strip.grow .chip.now small { color: inherit; opacity: .75; }
+.dls { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 22px; }
+a.dl { display: inline-block; padding: 9px 14px; border: 1px solid var(--acc); border-radius: 8px;
+  color: var(--acc); text-decoration: none; font-weight: 600; }
+a.dl:hover { background: var(--sur); }

@@ -103,7 +103,7 @@ def classes():
                    ('TOKEN_BUCKET, SLIDING_WINDOW_LOG,', 'FIXED_WINDOW'),
                    ('create(limit, now)',), size=11)
     y6 = 668
-    _, pl = s.uml(516, y6, 200, 'PlanLimits', None, ('Plans + EnumMap<Plan, Limit>',), (),
+    _, pl = s.uml(516, y6, 200, 'PlanLimits', None, ('Plans + Map<Plan, Limit>',), (),
                   size=11.5)
     s.path(f'M616 {pl["y"]} L616 {lp["y"] + lp["h"] + 2}', 'sv-ln dash', end='tri')
     _, plans = s.uml(300, y6, 196, 'Plans', None, ('client -> Plan (FREE, PRO)',), (), size=11.5)
@@ -148,7 +148,7 @@ def journey():
         ('self', 1, 'now = clock.nowMillis(): one instant for every rule'),
         ('call', 1, 2, 'matching(request)'),
         ('ret', 2, 1, 'plan, quota, search, global'),
-        ('call', 1, 3, 'bucketFor("plan|fantasy-app|50/1000ms", …)'),
+        ('call', 1, 3, 'bucketFor("plan|fantasy-app|50/1000", …)'),
         ('call', 1, 4, 'tryConsume(1, now)'),
         ('ret', 4, 1, 'allowed, 47 left', 'g'),
         ('self', 1, '"quota": allowed, likewise'),
@@ -178,7 +178,7 @@ def redis():
     s.text(398, 44, 'Redis: runs one script at a time, so the script is one step', 'sv-t', 13,
            'start', 600)
     s.rect(398, 62, 512, 64, 'sv-box rec', 8)
-    s.text(414, 86, 'rl:plan|fantasy-app|50/1000ms  →  { tokens: 12.4, last: … }', 'sv-mono sv-t',
+    s.text(414, 86, 'rl:plan|fantasy-app|50/1000  →  { tokens: 12.4, last: … }', 'sv-mono sv-t',
            12)
     s.text(414, 108, 'one hash per bucket: the two numbers a TokenBucket keeps', 'sv-m', 11)
     rows = ["1  TIME: now from Redis's clock, not each server's",

@@ -24,7 +24,8 @@ public class MoreDemo {
                 late += bucket.tryConsume(1, 1_001).allowed() ? 1 : 0;
             }
             Decision next = bucket.tryConsume(1, 1_001);
-            System.out.printf("%-24s %4d   %8d     %s%n", e.getKey(), early, late, next);
+            System.out.printf("%-24s %4d   %8d     %s%n", e.getKey(), early, late,
+                    Check.show(next));
             if (e.getValue() == Algorithm.FIXED_WINDOW) {
                 fixedTotal = early + late;
             }
@@ -39,7 +40,8 @@ public class MoreDemo {
         }
         Decision one = counter.tryConsume(1, 1_300);
         Decision two = counter.tryConsume(1, 1_300);
-        System.out.println("\ncounter, 5 at 999 ms, then at 1,300 ms: " + one + "; then " + two);
+        System.out.println("\ncounter, 5 at 999 ms, then at 1,300 ms: " + Check.show(one)
+                + "; then " + Check.show(two));
         Check.that(one.allowed() && !two.allowed(), "estimate 3.5: one more, then no");
 
         // The leaky bucket as a meter is the token bucket in a mirror (level = 5 - tokens).

@@ -11,9 +11,9 @@ public class CountDemo {
         }
         System.out.println("5 sign-ins at 0 s, a 6th at 12 s:");
         System.out.println("  " + bucket.getClass().getSimpleName() + "        "
-                + bucket.tryConsume(1, 12_000));
+                + Check.show(bucket.tryConsume(1, 12_000)));
         System.out.println("  " + log.getClass().getSimpleName() + "   "
-                + log.tryConsume(1, 12_000));
+                + Check.show(log.tryConsume(1, 12_000)));
 
         long lateEvening = 86_400_000L * 20_000 + 86_000_000;          // 23:53:20 UTC
         Bucket quota = Algorithm.FIXED_WINDOW.create(Limit.perDay(3), lateEvening);
@@ -22,7 +22,8 @@ public class CountDemo {
             today.append(quota.tryConsume(1, lateEvening).allowed() ? " yes" : " no");
         }
         System.out.println("a quota of 3 a day, 4 requests at 23:53:20:" + today);
-        System.out.println("  the 4th again     " + quota.tryConsume(1, lateEvening));
-        System.out.println("  at 00:00:00       " + quota.tryConsume(1, lateEvening + 400_000));
+        System.out.println("  the 4th again     " + Check.show(quota.tryConsume(1, lateEvening)));
+        System.out.println("  at 00:00:00       "
+                + Check.show(quota.tryConsume(1, lateEvening + 400_000)));
     }
 }

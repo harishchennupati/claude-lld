@@ -17,10 +17,7 @@ public class WaitingDemo {
         }
         System.out.println("8 requests passed at: " + String.join(", ", times) + " ms");
         boolean quick = waiting.acquire(job, 100);                    // the token is 200 ms away
-        RequestContext huge = new RequestContext("score-widget", "203.0.113.7", "/export", 6);
-        boolean tooBig = waiting.acquire(huge, 60_000);               // 6 never fit in 5
         System.out.println("will wait 100 ms, the token is 200 ms away -> " + quick + ", at once");
-        System.out.println("a request that costs 6 -> " + tooBig + ", at once");
-        Check.that(!quick && !tooBig && clock.nowMillis() == 600, "both refused, no sleeping");
+        Check.that(!quick && clock.nowMillis() == 600, "refused at once, no sleeping");
     }
 }

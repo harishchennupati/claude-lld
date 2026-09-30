@@ -4,10 +4,11 @@ public class BucketDemo {
     public static void main(String[] args) {
         Bucket widget = new TokenBucket(Limit.perSecond(5), 0);
         for (int i = 1; i <= 6; i++) {
-            System.out.println("   0 ms  request " + i + "  " + widget.tryConsume(1, 0));
+            Decision d = widget.tryConsume(1, 0);
+            System.out.println("   0 ms  request " + i + "  " + Check.show(d));
         }
-        System.out.println(" 120 ms  request 7  " + widget.tryConsume(1, 120));
-        System.out.println(" 200 ms  request 8  " + widget.tryConsume(1, 200));
+        System.out.println(" 120 ms  request 7  " + Check.show(widget.tryConsume(1, 120)));
+        System.out.println(" 200 ms  request 8  " + Check.show(widget.tryConsume(1, 200)));
         int allowed = 0;
         for (int i = 0; i < 7; i++) {
             if (widget.tryConsume(1, 2_200).allowed()) {

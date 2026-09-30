@@ -11,10 +11,11 @@ public class LimiterDemo {
         RequestContext search = RequestContext.of("fantasy-app", "203.0.113.7", "/search");
         RequestContext scores = RequestContext.of("fantasy-app", "203.0.113.7", "/scores");
         for (int i = 1; i <= 3; i++) {
-            System.out.println("/search #" + i + "  " + limiter.check(search));
+            System.out.println("/search #" + i + "  " + Check.show(limiter.check(search)));
         }
         RateLimitResult next = limiter.check(scores);
-        System.out.println("/scores     " + next + "   (47, not 46: the 3rd search spent nothing)");
+        System.out.println("/scores     " + Check.show(next)
+                + "   (47, not 46: the 3rd search spent nothing)");
         System.out.println("metrics     " + metrics.snapshot());
         Check.that(next.remaining() == 47, "the refused search gave its plan token back");
     }

@@ -18,9 +18,6 @@ class TokenBucket implements Bucket {
     @Override
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         refill(nowMillis);
-        if (cost > capacity) {
-            return Decision.never((long) tokens);        // 6 tokens never fit in a bucket of 5
-        }
         if (tokens >= cost) {
             tokens -= cost;
             return Decision.allow((long) tokens);        // whole tokens left: 2.6 -> 2

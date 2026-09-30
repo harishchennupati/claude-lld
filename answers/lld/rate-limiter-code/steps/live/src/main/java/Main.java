@@ -1,4 +1,5 @@
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,7 +38,7 @@ public class Main {
             RateLimitFilter.Response r =
                     api.handle(request, req -> new RateLimitFilter.Response(200, Map.of()));
             System.out.printf("%4d ms  %-12s %-8s #%d  %d %s%n", clock.nowMillis(), client,
-                    endpoint, i, r.status(), r.headers());
+                    endpoint, i, r.status(), new TreeMap<>(r.headers()));   // sorted
         }
     }
 

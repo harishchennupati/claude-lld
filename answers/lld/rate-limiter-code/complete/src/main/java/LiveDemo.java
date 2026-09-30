@@ -28,7 +28,8 @@ public class LiveDemo {
             last = live.check(RequestContext.of("score-widget", "203.0.113.7", "/scores"));
             allowed += last.allowed() ? 1 : 0;
         }
-        System.out.println("after the switch: " + allowed + " of 5 allowed, then " + last);
+        System.out.println("after the switch: " + allowed + " of 5 allowed, then "
+                + Check.show(last));
         Check.that(allowed == 3, "3 a second now");
     }
 }

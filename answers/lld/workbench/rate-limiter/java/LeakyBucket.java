@@ -19,9 +19,6 @@ class LeakyBucket implements Bucket {
     @Override
     public synchronized Decision tryConsume(int cost, long nowMillis) {
         leak(nowMillis);
-        if (cost > capacity) {
-            return Decision.never((long) (capacity - level));
-        }
         if (level + cost <= capacity) {
             level += cost;
             return Decision.allow((long) (capacity - level));
