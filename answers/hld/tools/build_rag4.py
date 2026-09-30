@@ -41,6 +41,7 @@ EXTRA_CSS = """<style>
 .cards>div{background:var(--sur);border-radius:8px;padding:10px 14px}
 .cards h4{margin:0 0 6px;color:var(--acc);font-family:"Space Grotesk",sans-serif;font-size:15px}
 .cards ul{margin:0;padding-left:18px} .cards li{font-size:13px;margin:3px 0}
+p code,li code,td code,.qa code{background:var(--sur);padding:0 4px;border-radius:4px;color:#f5c2e7;font-size:.95em}
 pre.code{background:#181825;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:12.5px;line-height:1.55}
 @media (max-width:760px){.fwd{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.req{grid-template-columns:1fr}}
 </style>"""
