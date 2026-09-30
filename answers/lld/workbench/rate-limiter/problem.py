@@ -76,7 +76,7 @@ def problem(w):
             ['plan', 'requests with a key', 'the client', 'FREE 5/s · PRO 50/s', 'token bucket'],
             ['quota', 'requests with a key', 'the client', 'FREE 10,000/day · PRO 1,000,000/day',
              'fixed window'],
-            ['search', '`/search`', 'client + endpoint', '2/s', 'token bucket'],
+            ['search', '`/search`, with a key', 'client + endpoint', '2/s', 'token bucket'],
             ['login', '`/login` (no key yet)', 'the IP', '5/min, exact', 'sliding window log'],
             ['global', 'every request', 'everyone', '1,000/s', 'token bucket'],
         ])
@@ -584,10 +584,11 @@ def book(w):
         + w.code(['RateLimitRule.java', 'RuleBook.java', 'ScoreApiRules.java'])
         + w.run('RuleBookDemo')
         + w.md('''
-        Search covers only requests with a key: `withKey().and(endpoint("/search"))`. Without
-        the `withKey()`, every keyless search would share one `anonymous` bucket, and three
-        strangers would use up each other's searches. A request without a key to an endpoint that
-        needs one gets 401 from authentication, before the limiter is asked.
+        Search covers only requests with a key: `withKey().and(endpoint("/search"))`, which is
+        why the keyless search above meets only the global rule. Without the `withKey()`, every
+        keyless search would share one `anonymous` bucket, and three strangers would use up each
+        other's searches. In production a keyless request to an endpoint that needs a key gets
+        401 from authentication, before the limiter is asked.
         ''')
         + w.java('Predicate and Function', '`Predicate<RequestContext>` is a function from a '
                  'request to true or false (`request -> request.endpoint().equals("/search")`); '
@@ -799,9 +800,9 @@ def holds(w):
         ''')
         + w.asc('\n'.join('  ' + c for c in cost))
         + w.md('''
-        Most of a check is building the three bucket keys; a record key would avoid the string
-        work. The memory is why [Idle clients](#idle) sweeps buckets that a new one would replace
-        exactly.
+        A check on `/scores` builds three short key strings and does three map lookups, one per
+        rule that covers it. The memory is why [Idle clients](#idle) sweeps buckets that a new one
+        would replace exactly.
 
         ## Design principles, where they are in the code
         ''')

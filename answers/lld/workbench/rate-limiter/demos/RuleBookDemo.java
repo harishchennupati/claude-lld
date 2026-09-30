@@ -7,7 +7,8 @@ public class RuleBookDemo {
         List<RequestContext> requests = List.of(
                 RequestContext.of("fantasy-app", "203.0.113.7", "/scores"),
                 RequestContext.of("fantasy-app", "203.0.113.7", "/search"),
-                RequestContext.of(RequestContext.ANONYMOUS, "192.0.2.1", "/login"));
+                RequestContext.of(RequestContext.ANONYMOUS, "192.0.2.1", "/login"),
+                RequestContext.of(RequestContext.ANONYMOUS, "192.0.2.1", "/search"));
         for (RequestContext r : requests) {
             StringBuilder names = new StringBuilder();
             for (RateLimitRule rule : rules.matching(r)) {
