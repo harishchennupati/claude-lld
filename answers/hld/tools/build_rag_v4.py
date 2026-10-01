@@ -1,5 +1,5 @@
-"""Builds llm-chatbot-rag-v4.html: v3's look, figures and sentences, edited to about two hours of
-reading. The words are in rag_v4_text.py."""
+"""Builds llm-chatbot-rag-v4.html: v3's look and figures, with a new text written for about an hour
+and a half of reading. The words are in rag_v4_text.py and rag_v4_a/b/c.py."""
 import os
 import re
 import sys
@@ -36,6 +36,7 @@ for group, items in T.TOC:
     toc += '</ol>'
 toc += '</nav>'
 
+v3.head.append(BeautifulSoup(T.CSS, 'html.parser'))
 main = v3.find('main')
 main.clear()
 main.append(BeautifulSoup('<header class="hero"><h1>Enterprise RAG assistant</h1></header>' + toc
