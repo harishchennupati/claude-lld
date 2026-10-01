@@ -391,8 +391,8 @@ def counting(w):
 
 # ==================================================================================== design
 # Each branch reads the way an engineer works it: the need; the diagram so far;
-# then the code: the traps, the files (each top comment says what the type is for, why it is a
-# record, interface, enum or class, and the logic is explained line by line), and the hour.
+# then the code: above each file, what it is, why it is this kind of type and its trap; the file,
+# whose comments say what the code does; and what to type in the hour.
 NEED = {
     'door': '''
         **Need:** fantasy-app's `GET /search?q=kohli` arrives. Before any work, something must
@@ -458,52 +458,167 @@ for (RateLimitRule rule : rules) {                       // branch 1: the rules
     charged.add(counter);
 }'''
 
-# Before the code: the traps it handles. Each type's kind, and why, is in its file's top comment.
-TRAPS = {
-    'door': '''
-        **The traps:**
-
-        - No API key before sign-in, so the customer id can be `null`.
-        - Retry-After is whole seconds, rounded up: a 200 ms wait must say 1, not 0, or the
+# Above each file as it is written: what it is, why it is this kind of Java type, the pattern if
+# any, and the trap it handles. Said here once; the file's comments say only what the code does.
+WHY = {
+    'Request.java': """
+        - **What:** everything the door knows about one request: customer id, IP, endpoint.
+        - **Why a record:** plain data that never changes, so any thread can read it. Java writes
+          the constructor, the getters and `equals` for us.
+        - **Trap:** no API key before sign-in, so `customerId` is `null` there.
+        """,
+    'RateLimitResult.java': """
+        - **What:** the limiter's answer: allowed, how long to wait, which rule said no.
+        - **Why a record, not a boolean:** a boolean can only say yes or no. The door needs all
+          three to send a 429 with Retry-After.
+        """,
+    'RateLimiter.java': """
+        - **What:** the one question the door asks: may this request go ahead now?
+        - **Why an interface:** the door depends on the promise, not on the class behind it, so
+          the limiter can change without touching the door.
+        - **The `default` method:** code inside an interface. Every implementation gets
+          `rateLimit(customerId)` for free.
+        """,
+    'RateLimitFilter.java': """
+        - **What:** the front door. Every request passes here before any endpoint runs, so no
+          endpoint can forget the check.
+        - **Why a class:** it holds the limiter and does work with it.
+        - **Why the limiter is handed in:** it arrives through the constructor (dependency
+          injection), so the filter never picks which limiter it gets.
+        - **Trap:** Retry-After is whole seconds, rounded up. 200 ms must say 1, not 0, or the
           client retries at once and is refused again.
-        ''',
-    'limiter': '''
-        **The traps:**
-
-        - Read the time once per request, so every rule judges the same instant.
-        - Refund every counter already charged before returning a refusal.
-        - Typed before its parts exist, as in the room: it compiles once the store is written.
-        ''',
-    'rules': '''
-        **The traps:**
-
-        - Keys from different rules must never collide, so the rule's name comes first:
-          `rate:fantasy-app`, `search:fantasy-app:/search`, `login:203.0.113.7`, `global:*`.
-        - Sign-in has no customer yet, so `login` matches caller `ANY` and counts per IP.
-        ''',
-    'limits': '''
-        **The traps:**
-
-        - A request with no key has no plan: `planOf(null)` answers FREE, not a crash.
-        - The plan is looked up on every request, so an upgrade applies at once.
-        ''',
-    'counters': '''
-        **The traps:**
-
-        - A bucket changes two values together, its tokens and its last refill time, so refill,
-          check and take must be one step: the methods are `synchronized` (the picture below
-          the bucket).
-        - The lock is per counter, so different customers never wait on each other.
-        - A refund never fills a bucket past its capacity.
-        ''',
-    'store': '''
-        **The traps:**
-
-        - "`get`, then `put` if missing" lets two threads meeting a new customer both create a
-          counter: two budgets. `computeIfAbsent` finds, creates and stores as one step per key.
-        - The limit is part of the map's key, so after an upgrade the next request gets a fresh
-          50-a-second counter, not the old 5-a-second one.
-        ''',
+        """,
+    'RuleBasedRateLimiter.java': """
+        - **What:** asks every matching rule in order. All must allow; otherwise refund what was
+          charged and refuse.
+        - **Why a class that implements `RateLimiter`:** it is the work behind the door's
+          promise.
+        - **Why its parts are handed in:** rules, store and clock are `final` fields set in the
+          constructor (dependency injection). It never builds them, so a demo can pass a clock
+          moved by hand, and Redis can replace the store.
+        - **Trap:** read the time once per request, so every rule judges the same instant.
+        - **Typed before its parts exist,** as in the room. It compiles once the store is written.
+        """,
+    'Clock.java': """
+        - **What:** the time, handed in instead of read inside.
+        - **Why an interface with one method:** `System::currentTimeMillis` fits it in
+          production; a demo passes a clock it moves by hand.
+        """,
+    'RateLimitRule.java': """
+        - **What:** one config entry: name, match, count_per, limit, algorithm.
+        - **Why a record:** config data, built once at startup and never changed, so every thread
+          reads it without a lock. A record can still have methods: `matches` and `keyFor` sit
+          next to the fields they read.
+        - **Trap:** keys from different rules must never collide, so the rule's name comes first:
+          `rate:fantasy-app`, `login:203.0.113.7`, `global:*`.
+        """,
+    'Match.java': """
+        - **What:** the `match:` line: the kind of caller, and an endpoint (`"*"` for all).
+        - **Why a record:** two values and one comparison.
+        """,
+    'Caller.java': """
+        - **What:** `CUSTOMER` or `ANY`.
+        - **Why an enum:** a closed set the compiler checks. A string could hold a typo.
+        """,
+    'CountPer.java': """
+        - **What:** whose budget a request spends: customer, customer and endpoint, IP, everyone.
+        - **Why an enum:** `keyFor` switches over it, and the compiler flags a missing case.
+        """,
+    'ScoreApiRules.java': """
+        - **What:** the YAML's rules in code, in the same order.
+        - **Why a `final class` with a `static` method:** no state, one function that builds a
+          list. No object is needed, and nothing should extend it.
+        - **Trap:** sign-in has no customer yet, so `login` matches `ANY` and counts per IP.
+        - **Later:** loading the YAML file replaces only this class.
+        """,
+    'Limit.java': """
+        - **What:** X requests every Y.
+        - **Why a record:** two numbers that never change.
+        - **`perSecond(5)`, `perDay(10_000)`:** static factory methods, named ways to build one.
+          Clearer than `new Limit(5, 1000)`.
+        """,
+    'LimitPolicy.java': """
+        - **What:** "how much for this request?"
+        - **Why an interface:** the rule holds the promise and never knows which kind of limit
+          it has.
+        - **Pattern:** Strategy. A third kind of limit is a third class, with no `if` added to
+          the rule.
+        """,
+    'FixedLimit.java': """
+        - **What:** the same limit for every caller.
+        - **Why a record:** one value. A record can implement an interface like any class.
+        """,
+    'PlanLimit.java': """
+        - **What:** whatever the customer's plan carries: its rate, or its daily allowance.
+        - **Why a class, not a record:** it holds the live `Customers` directory and looks the
+          plan up on every call. Behaviour, not a value.
+        - **`Field`:** an enum nested inside, because only `PlanLimit` uses it.
+        - **Trap:** the plan is looked up on every request, so an upgrade applies at once.
+        """,
+    'Plan.java': """
+        - **What:** FREE and PRO, each with its rate and its daily limit.
+        - **Why an enum with fields:** a closed set whose values carry data, set through the
+          enum's constructor. A new plan is one line.
+        """,
+    'Customers.java': """
+        - **What:** who is on which plan.
+        - **Why a class:** its state changes on sign-ups and upgrades.
+        - **Why `ConcurrentHashMap`:** upgrades write while requests read. Readers never see it
+          half-updated, and never wait for a lock.
+        - **Trap:** `planOf(null)` answers FREE, not a crash.
+        """,
+    'Decision.java': """
+        - **What:** one counter's answer: allowed, or how long to wait.
+        - **Why a record:** plain data. `allow()` and `deny(ms)` name the two answers.
+        """,
+    'Counter.java': """
+        - **What:** `tryAcquire` and `refund`.
+        - **Why an interface:** the limiter calls every way of counting the same way.
+        - **Pattern:** Strategy.
+        - **Why not an abstract class:** that is for shared fields and code, and the counters
+          share none: tokens, a count, a list of times. A class can also extend only one class,
+          but implement many interfaces.
+        """,
+    'TokenBucket.java': """
+        - **What:** tokens that refill with time. Each request takes one.
+        - **Why a class:** its tokens change on every request.
+        - **Why `synchronized`:** refill, check and take must be one step, or two threads both
+          take the last token (picture below). The lock is per bucket, so customers never wait on
+          each other.
+        - **Trap:** a refund never fills the bucket past its capacity.
+        """,
+    'FixedWindowCounter.java': """
+        - **What:** a count per window of the clock, reset when the window changes.
+        - **Why a class:** the count changes on every request. `synchronized` guards it.
+        """,
+    'SlidingWindowLog.java': """
+        - **What:** the time of every allowed request in the last period.
+        - **Why a class:** the list changes on every request. `synchronized` guards it.
+        """,
+    'Algorithm.java': """
+        - **What:** the `algorithm:` names from the config.
+        - **Why an enum:** a closed set the compiler checks.
+        """,
+    'CounterFactory.java': """
+        - **What:** an `Algorithm` in, a new counter out.
+        - **Why a `final class` with a `static` method:** no state, one `switch`.
+        - **Pattern:** Factory. The one place that knows every counter class, so a new way of
+          counting is one class plus one `case`.
+        """,
+    'CounterStore.java': """
+        - **What:** the counter for a key, created on its first request.
+        - **Why an interface:** where counts live will change (memory today, Redis with many
+          servers). The limiter holds the promise, not the place.
+        """,
+    'InMemoryCounterStore.java': """
+        - **What:** a map from key to counter, shared by every thread.
+        - **Why a class:** it owns changing state.
+        - **Why `computeIfAbsent`:** "get, then put if missing" lets two threads meeting a new
+          customer both create a counter. `computeIfAbsent` finds, creates and stores as one
+          step.
+        - **Trap:** the limit is part of the key, so after an upgrade the next request gets a
+          fresh 50-a-second counter, not the old 5-a-second one.
+        """,
 }
 
 
@@ -585,30 +700,30 @@ def whole_design(w):
 # what to type in a 60-minute round.
 def code_door(w):
     return (w.code(['Request.java', 'RateLimitResult.java', 'RateLimiter.java',
-                    'RateLimitFilter.java'])
+                    'RateLimitFilter.java'], why=WHY)
             + hour(w, 'the three records and the interface; the filter only if there is time.'))
 
 
 def code_limiter(w):
-    return (w.code(['RuleBasedRateLimiter.java', 'Clock.java'])
+    return (w.code(['RuleBasedRateLimiter.java', 'Clock.java'], why=WHY)
             + hour(w, 'all of it: this loop is the heart of the answer.'))
 
 
 def code_rules(w):
     return (w.code(['RateLimitRule.java', 'Match.java', 'Caller.java', 'CountPer.java',
-                    'ScoreApiRules.java'])
+                    'ScoreApiRules.java'], why=WHY)
             + hour(w, 'the rule, `Match`, `Caller` and `CountPer`; two config entries, and say the '
                       'rest.'))
 
 
 def code_limits(w):
     return (w.code(['Limit.java', 'LimitPolicy.java', 'FixedLimit.java', 'PlanLimit.java',
-                    'Plan.java', 'Customers.java'])
+                    'Plan.java', 'Customers.java'], why=WHY)
             + hour(w, '`Limit`, `LimitPolicy` and `FixedLimit`; plans if there is time.'))
 
 
 def code_counting(w):
-    return (w.code(['Decision.java', 'Counter.java', 'TokenBucket.java'])
+    return (w.code(['Decision.java', 'Counter.java', 'TokenBucket.java'], why=WHY)
             + w.md('The bucket on its own, told the time by hand: the walk-through from '
                    '[How to count](#counting).')
             + w.run('BucketDemo')
@@ -638,14 +753,14 @@ def code_counting(w):
             + w.md('The other two ways our rules count, the enum that names all three, and the '
                    'factory that makes them:')
             + w.code(['FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java',
-                      'CounterFactory.java'])
+                      'CounterFactory.java'], why=WHY)
             + w.run('CountingDemo')
             + hour(w, '`Counter`, `TokenBucket`, `Algorithm` and the factory; the window and the '
                       'log only if asked.'))
 
 
 def code_store(w):
-    return (w.code(['CounterStore.java', 'InMemoryCounterStore.java'])
+    return (w.code(['CounterStore.java', 'InMemoryCounterStore.java'], why=WHY)
             + w.md('16 threads meet a new customer at the same instant:')
             + w.run('StoreDemo')
             + hour(w, 'all of it.'))
@@ -662,7 +777,7 @@ def code_run(w):
         - a refill
         - 100 threads racing for fantasy-app's 50 a second, with the clock frozen
         ''')
-            + w.code(['Main.java'])
+            + w.code(['Main.java'], why=WHY)
             + w.run('Main')
             + w.md('''
         Read it against the config:
@@ -687,10 +802,7 @@ def design_steps(w):
                         stage=f'Design and build · {k + 1} of {n}', body=
             w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1])
             + think(w, st) + grown(w, st)
-            + w.md('## The code')
-            + (w.md('Each file\'s top comment says what it is for, and why it is a record, an '
-                    'interface, an enum or a class.') if st == 'door' else '')
-            + w.md(TRAPS[st]) + CODE[st](w)
+            + w.md('## The code') + CODE[st](w)
             + (think_back(w) if st == 'store' else '')))
     out.append(step('run', D, 'Run it, and the whole design', 'Run it, and the whole design',
                     minutes=10, stage=f'Design and build · {n} of {n}', body=

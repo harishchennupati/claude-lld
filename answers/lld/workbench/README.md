@@ -10,7 +10,7 @@ python3 build.py rate-limiter --fresh    # recompile and rerun everything, ignor
 
 A problem can define `VARIANTS` in `problem.py` (suffix → pages function) to build the same
 content in more than one layout. The rate limiter now builds one: design and build in one walk,
-each branch as short bulleted reasoning (what is needed, what we build, why; no lists of options), the diagram so far, then the code. Prefer bullets, numbered steps and small tables over paragraphs everywhere; keep a paragraph only for a one- or two-line lead-in.
+each branch as the need (bullets, no lists of options), the diagram so far, then the code: above each file, bullets on what it is, why it is a record, interface, enum or class, and its trap; the file's comments say only what the code does. Prefer bullets, numbered steps and small tables over paragraphs everywhere; keep a paragraph only for a one- or two-line lead-in.
 
 ## What the reader gets
 

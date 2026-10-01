@@ -1,8 +1,6 @@
-// The fixed window: a count per window of the clock (a calendar day for the daily quota,
-// UTC), reset to 0 when a new window starts. Right when the calendar is the rule; across a
-// window's
+// The fixed window: a count per window of the clock (a calendar day for the daily quota, UTC),
+// reset to 0 when a new window starts. Right when the calendar is the rule; across a window's
 // edge it can let twice the limit through, which is why the per-second rules do not use it.
-// Why a class: its count changes on every request, guarded by synchronized.
 class FixedWindowCounter implements Counter {
     private final int limit;
     private final long periodMillis;

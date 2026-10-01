@@ -249,7 +249,7 @@ class W:
         blocks = []
         for f in files:
             if why and f in why:
-                blocks.append(f'<p class="why">{inline(why[f])}</p>')
+                blocks.append(f'<div class="why">{md(why[f])}</div>')
             text = self.t.text(f, snap_)
             rows = hl.lines_html(text)
             body = ''.join(f'<span class="l">{r or " "}</span>' for r in rows)

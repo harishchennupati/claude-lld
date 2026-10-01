@@ -2,8 +2,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 // One server's counters: one per key, shared by every request thread.
-// Why a class: it owns changing state, a ConcurrentHashMap. Swapping it for a Redis class changes
-// no other file.
 class InMemoryCounterStore implements CounterStore {
     private final Map<String, Counter> counters = new ConcurrentHashMap<>();
 

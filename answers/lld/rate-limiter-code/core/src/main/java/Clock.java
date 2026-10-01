@@ -1,6 +1,5 @@
-// Time, handed in rather than read inside.
-// Why an interface with one method: production passes System::currentTimeMillis, which fits any
-// one-method interface; a demo passes a clock it moves by hand, so "200 ms later" takes no time.
+// Time, handed in rather than read inside. Production passes System::currentTimeMillis; a demo or
+// a test passes a clock it moves by hand, so "200 ms later" takes no time at all.
 interface Clock {
     long nowMillis();
 }

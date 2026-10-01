@@ -1,10 +1,8 @@
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Who is on which plan.
-// Why a class: its state changes (sign-ups, upgrades), so not a record. The map is private and
-// reached only through planOf() and setPlan(). It is a ConcurrentHashMap because upgrades write
-// while request threads read: readers never see it half-updated, and never wait for a lock.
+// Who is on which plan. Sign-ups and upgrades write while request threads read, so the map is a
+// ConcurrentHashMap: readers never see it half-updated, and nobody waits for a lock to read.
 class Customers {
     private final Map<String, Plan> planOf = new ConcurrentHashMap<>();
 

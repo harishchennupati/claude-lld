@@ -1,9 +1,7 @@
-// The token bucket: it holds at most `capacity` tokens (the biggest burst) and earns one back
-// every millisPerToken. Each request takes one token; with none left, it is refused and told when
-// the next one arrives. No timer adds tokens: each call works out what the time since the last
-// call has earned ("lazy refill"), so a million idle customers cost no threads.
-// Why a class: its tokens change on every request, and its methods are synchronized so two threads
-// never both take the last token.
+// The token bucket: it holds at most `capacity` tokens (the biggest burst) and earns one back every
+// millisPerToken. Each request takes one token; with none left, it is refused and told when the
+// next one arrives. No timer adds tokens: each call works out what the time since the last call
+// has earned ("lazy refill"), so a million idle customers cost no threads.
 class TokenBucket implements Counter {
     private final int capacity;              // 5 a second: at most 5 at once
     private final double millisPerToken;     // 5 a second: one token every 200 ms

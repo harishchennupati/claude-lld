@@ -1,13 +1,10 @@
 import java.util.ArrayList;
 import java.util.List;
 
-// Decides one request by asking every rule that matches it. The request goes ahead only if
-// all of them allow it. Rules are asked in order, and each one takes its token as it goes; if a
-// later rule refuses, the tokens the earlier ones took are given back, so a refused request spends
+// Decides one request by asking every rule that matches it. The request goes ahead only if all of
+// them allow it. Rules are asked in order, and each one takes its token as it goes; if a later
+// rule refuses, the tokens the earlier ones took are given back, so a refused request spends
 // nothing anywhere ("all or nothing").
-// Why a class that implements RateLimiter: it is the work behind the door's promise. Its parts
-// (rules, store, clock) are final fields passed into the constructor (dependency injection): it
-// never builds them, so a demo can pass a hand-moved clock and Redis can replace the store.
 class RuleBasedRateLimiter implements RateLimiter {
     private final List<RateLimitRule> rules;      // from the config, in the order they are checked
     private final CounterStore counters;          // where every rule's counts live

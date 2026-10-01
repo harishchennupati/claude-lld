@@ -1,11 +1,9 @@
 import java.util.Map;
 import java.util.function.Supplier;
 
-// The front door: every request passes through here before any endpoint runs, so no endpoint
-// can forget the check. It knows HTTP and nothing about rules; the limiter knows rules and nothing
+// The front door: every request passes through here before any endpoint runs, so no endpoint can
+// forget the check. It knows HTTP and nothing about rules; the limiter knows rules and nothing
 // about HTTP.
-// Why a class: it holds another object (the limiter) and does work with it. The limiter is passed
-// into the constructor, so the filter never picks which one it gets.
 class RateLimitFilter {
     record Response(int status, Map<String, String> headers) {
     }
