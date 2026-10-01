@@ -1,5 +1,8 @@
-// One key's count under one algorithm. The limiter never knows which algorithm it holds: each is
-// a class behind this interface (the Strategy pattern).
+// One key's count under one rule. Each way of counting is a class behind this interface (the
+// Strategy pattern), so the limiter never knows which one it holds.
 interface Counter {
     Decision tryAcquire(long nowMillis);
+
+    // Give back one request this counter allowed: a later rule refused it.
+    void refund(long nowMillis);
 }

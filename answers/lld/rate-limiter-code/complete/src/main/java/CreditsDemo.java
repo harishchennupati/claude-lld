@@ -1,8 +1,8 @@
 // 5 a second with credits: a quiet second saves 5, spent after the next second's own 5.
 public class CreditsDemo {
     public static void main(String[] args) {
-        Counter c = new InMemoryCounterStore(Algorithm.CREDITS)
-                .counterFor("news-app", Limit.perSecond(5), 0);
+        Counter c = new InMemoryCounterStore()
+                .counterFor("news-app", Limit.perSecond(5), Algorithm.CREDITS, 0);
         int first = count(c, 100, 2);             // second 0: uses 2 of 5, saves 3
         int second = count(c, 1_100, 12);         // second 1: 5 of its own + 3 credits
         int fourth = count(c, 3_100, 12);         // second 2 was quiet: it saves 5, the cap

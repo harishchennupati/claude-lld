@@ -13,8 +13,8 @@ class TokenBucket implements Counter {
         this.lastRefillMillis = nowMillis;
     }
 
-    // synchronized: refill, check and take are one step. Without it two threads can both see the
-    // last token and both take it. The lock is this bucket's, so other customers never wait.
+    // synchronized: refill, check and take are one step, or two threads can both see the last
+    // token and both take it. The lock is this bucket's, so other keys never wait.
     @Override
     public synchronized Decision tryAcquire(long nowMillis) {
         refill(nowMillis);
@@ -26,6 +26,11 @@ class TokenBucket implements Counter {
         return Decision.deny(waitMillis);
     }
 
+    @Override
+    public synchronized void refund(long nowMillis) {
+        tokens = Math.min(capacity, tokens + 1);
+    }
+
     private void refill(long nowMillis) {
         long elapsed = nowMillis - lastRefillMillis;
         if (elapsed <= 0) {
@@ -33,12 +38,5 @@ class TokenBucket implements Counter {
         }
         tokens = Math.min(capacity, tokens + elapsed / millisPerToken);
         lastRefillMillis = nowMillis;
-    }
-
-    // Full again: exactly what a new bucket would be.
-    @Override
-    public synchronized boolean isIdle(long nowMillis) {
-        refill(nowMillis);
-        return tokens >= capacity;
     }
 }

@@ -7,10 +7,8 @@ record Limit(int requests, long periodMillis) {
     static Limit perMinute(int requests) {
         return new Limit(requests, 60_000);
     }
-    //@ from door
 
     static Limit perDay(int requests) {
         return new Limit(requests, 86_400_000);
     }
-    //@ end
 }

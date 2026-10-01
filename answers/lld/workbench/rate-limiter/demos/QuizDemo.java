@@ -10,7 +10,6 @@ public class QuizDemo {
             a.append("  ").append(Check.show(widget.tryAcquire(450)));
         }
         System.out.println(a);
-
         Counter fantasy = new TokenBucket(Limit.perSecond(50), 0);
         fantasy.tryAcquire(0);
         int passed = 0;

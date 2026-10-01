@@ -1,9 +1,8 @@
-//@ file from windows
 import java.util.ArrayDeque;
 import java.util.Deque;
 
-// The time of every allowed request in the last period. Exact: never more than the limit in ANY
-// period. The price: one timestamp per request, so keep it for small limits such as sign-ins.
+// The time of every allowed request in the last period: exact, never more than the limit in ANY
+// period. One timestamp per request, so it is for small limits such as sign-ins.
 class SlidingWindowLog implements Counter {
     private final int limit;
     private final long periodMillis;
@@ -25,4 +24,16 @@ class SlidingWindowLog implements Counter {
         }
         return Decision.deny(times.peekFirst() + periodMillis - nowMillis);   // oldest leaves
     }
+
+    @Override
+    public synchronized void refund(long nowMillis) {
+        times.pollLast();                    // forget the newest entry: the count is right
+    }
+    //@ from idle
+
+    @Override
+    public synchronized boolean isIdle(long nowMillis) {
+        return times.isEmpty() || times.peekLast() <= nowMillis - periodMillis;
+    }
+    //@ end
 }

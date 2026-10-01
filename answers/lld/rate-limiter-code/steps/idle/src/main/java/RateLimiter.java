@@ -1,11 +1,11 @@
-// The one question the API asks before it does any work: may this caller go ahead now?
-// The API depends on this interface, never on the class behind it.
+// The one question the front door asks before any work. The door depends on this interface,
+// never on the class behind it.
 interface RateLimiter {
-    // key: who is counted. The customer id here; later an IP, or "customer + endpoint".
-    Decision check(String key);
+    RateLimitResult check(Request request);
 
-    // The interviewer's own signature: just yes or no.
+    // The interviewer's own signature: a customer, yes or no. Endpoint "/" and no IP, so only
+    // the customer-wide rules and the global cap apply.
     default boolean rateLimit(String customerId) {
-        return check(customerId).allowed();
+        return check(new Request(customerId, null, "/")).allowed();
     }
 }

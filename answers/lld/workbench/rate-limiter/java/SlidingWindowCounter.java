@@ -1,7 +1,6 @@
 //@ file from windows
-// The log's answer, guessed from two counts: this window's, and the last window's, assumed to
-// be spread evenly. At 300 ms into a window, 70% of the last window is still inside "the last
-// second". Two numbers per key, almost exact.
+// The log's answer, guessed from two counts: this window's, and the last window's, assumed to be
+// spread evenly. Two numbers per key instead of one timestamp per request.
 class SlidingWindowCounter implements Counter {
     private final int limit;
     private final long periodMillis;
@@ -29,6 +28,13 @@ class SlidingWindowCounter implements Counter {
             current++;
             return Decision.allow();
         }
-        return Decision.deny(windowStart + periodMillis - nowMillis);   // at most: this window ends
+        return Decision.deny(windowStart + periodMillis - nowMillis);   // at most this long
+    }
+
+    @Override
+    public synchronized void refund(long nowMillis) {
+        if (current > 0) {
+            current--;
+        }
     }
 }

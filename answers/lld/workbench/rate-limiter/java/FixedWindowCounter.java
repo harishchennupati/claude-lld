@@ -1,6 +1,5 @@
-//@ file from windows
-// A count per clock window, reset when a new window starts. Simple, and exact for calendar
-// quotas, but 5 at 995 ms and 5 at 1001 ms both pass: twice the limit across the edge.
+// A count per clock window, reset when a new window starts: right for "10,000 a day", where the
+// calendar day (UTC here) is the rule. Across a window's edge it lets twice the limit through.
 class FixedWindowCounter implements Counter {
     private final int limit;
     private final long periodMillis;
@@ -10,7 +9,7 @@ class FixedWindowCounter implements Counter {
     FixedWindowCounter(Limit limit, long nowMillis) {
         this.limit = limit.requests();
         this.periodMillis = limit.periodMillis();
-        this.windowStart = nowMillis - nowMillis % periodMillis;    // follow the clock (UTC days)
+        this.windowStart = nowMillis - nowMillis % periodMillis;
     }
 
     @Override
@@ -25,6 +24,13 @@ class FixedWindowCounter implements Counter {
             return Decision.allow();
         }
         return Decision.deny(windowStart + periodMillis - nowMillis);   // the window's end
+    }
+
+    @Override
+    public synchronized void refund(long nowMillis) {
+        if (nowMillis - nowMillis % periodMillis == windowStart && count > 0) {
+            count--;
+        }
     }
     //@ from idle
 

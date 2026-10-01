@@ -1,5 +1,5 @@
-// Which limit applies to a key. One method, so how limits are chosen (one for everyone, per
-// customer, by plan) can change without the limiter knowing.
+// How much a rule allows for this request: a fixed limit, or one from the customer's plan.
+// One method, so a new way of setting limits is a new class and the limiter never changes.
 interface LimitPolicy {
-    Limit limitFor(String key);
+    Limit limitFor(Request request);
 }

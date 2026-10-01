@@ -6,7 +6,7 @@ sources, so it always matches the page.
 | folder | what is in it |
 |---|---|
 | `core/` | the core from the page's build steps, with `Main` |
-| `complete/` | the core plus every follow-up, with each follow-up's demo (WindowsDemo, CreditsDemo, TiersDemo, LimitsDemo, IdleDemo) |
+| `complete/` | the core plus every follow-up, with each follow-up's demo (WindowsDemo, NewRuleDemo, CreditsDemo, IdleDemo) |
 | `steps/<step>/` | the code exactly as it is after each follow-up: start a follow-up drill here |
 
 Each folder is a plain Maven project (Java 17, no dependencies). In IntelliJ: File > Open, pick

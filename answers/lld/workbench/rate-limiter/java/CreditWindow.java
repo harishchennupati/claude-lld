@@ -8,6 +8,7 @@ class CreditWindow implements Counter {
     private long windowStart;
     private int used;
     private int credits;
+    private boolean lastFromCredits;         // so a refund goes back where it came from
 
     CreditWindow(Limit limit, int maxCredits, long nowMillis) {
         this.limit = limit.requests();
@@ -20,7 +21,7 @@ class CreditWindow implements Counter {
     public synchronized Decision tryAcquire(long nowMillis) {
         long start = nowMillis - nowMillis % periodMillis;
         if (start > windowStart) {
-            long quietWindows = (start - windowStart) / periodMillis - 1;   // none used at all
+            long quietWindows = (start - windowStart) / periodMillis - 1;   // not used at all
             long unused = (limit - used) + quietWindows * limit;
             credits = (int) Math.min(maxCredits, credits + unused);
             windowStart = start;
@@ -28,12 +29,23 @@ class CreditWindow implements Counter {
         }
         if (used < limit) {
             used++;
+            lastFromCredits = false;
             return Decision.allow();
         }
         if (credits > 0) {
-            credits--;                       // the window is spent: use savings
+            credits--;                       // this window is spent: use savings
+            lastFromCredits = true;
             return Decision.allow();
         }
         return Decision.deny(windowStart + periodMillis - nowMillis);
+    }
+
+    @Override
+    public synchronized void refund(long nowMillis) {
+        if (lastFromCredits) {
+            credits++;
+        } else if (used > 0) {
+            used--;
+        }
     }
 }

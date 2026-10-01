@@ -10,4 +10,9 @@ final class Check {
     static String show(Decision d) {
         return d.allowed() ? "allowed" : "refused, retry in " + d.retryAfterMillis() + " ms";
     }
+
+    static String show(RateLimitResult r) {
+        return r.allowed() ? "allowed"
+                : "refused by " + r.refusedBy() + ", retry in " + r.retryAfterMillis() + " ms";
+    }
 }

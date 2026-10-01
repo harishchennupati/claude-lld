@@ -8,6 +8,10 @@ python3 build.py rate-limiter            # writes ../rate-limiter-workbench.html
 python3 build.py rate-limiter --fresh    # recompile and rerun everything, ignoring the cache
 ```
 
+A problem can define `VARIANTS` in `problem.py` (suffix → pages function) to build the same
+content in more than one layout; the rate limiter builds `-workbench.html` (design and build in
+one walk) and `-workbench-b.html` (the design walk, then the build in the same order).
+
 ## What the reader gets
 
 The reader is preparing for SDE-2/3 interviews. They read a page once, then close it and must

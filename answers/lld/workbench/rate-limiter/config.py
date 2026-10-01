@@ -7,44 +7,53 @@ SUBTITLE = 'LLD workbench · Java 17 · every class on this page compiles and ru
 
 # Snapshots of the one source tree (see ../snap.py): the core, then one per follow-up, in the
 # order the follow-ups build on each other. Named after their step, never numbered.
-SNAPS = ['core', 'windows', 'tiers', 'door', 'idle', 'credits']
+SNAPS = ['core', 'windows', 'newrule', 'credits', 'idle']
 
-# The core, in the order it is typed in the room: top-down, from the question the API asks to
-# where the counts live. A step whose parts come later is not compiled on its own
-# (compile=False); `alone` compiles a step with just the files it needs.
+# The core, in the order it is typed in the room: top-down, from the front door to where the
+# counts live, the caller before its parts. A step whose parts come later is not compiled on its
+# own (compile=False); `alone` compiles a step with just the files it needs.
 BUILD = [
-    dict(id='question', files=['RateLimiter.java', 'Decision.java']),
-    dict(id='limiter', files=['PerKeyRateLimiter.java', 'Clock.java'], compile=False),
-    dict(id='limits', files=['Limit.java', 'LimitPolicy.java', 'CustomerLimits.java'],
-         alone=['Limit.java', 'LimitPolicy.java', 'CustomerLimits.java']),
-    dict(id='bucket', files=['Counter.java', 'TokenBucket.java'],
-         alone=['Decision.java', 'Limit.java', 'Counter.java', 'TokenBucket.java'],
+    dict(id='door', files=['Request.java', 'RateLimitResult.java', 'RateLimiter.java',
+                           'RateLimitFilter.java']),
+    dict(id='limiter', files=['RuleBasedRateLimiter.java', 'Clock.java'], compile=False),
+    dict(id='rules', files=['RateLimitRule.java', 'CountPer.java', 'ScoreApiRules.java'],
+         compile=False),
+    dict(id='limits', files=['Limit.java', 'LimitPolicy.java', 'FixedLimit.java', 'PlanLimit.java',
+                             'Plan.java', 'Customers.java'],
+         alone=['Request.java', 'Limit.java', 'LimitPolicy.java', 'FixedLimit.java',
+                'PlanLimit.java', 'Plan.java', 'Customers.java']),
+    dict(id='counters', files=['Decision.java', 'Counter.java', 'TokenBucket.java',
+                               'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java'],
+         alone=['Limit.java', 'RateLimitResult.java', 'Decision.java', 'Counter.java', 'TokenBucket.java',
+                'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java'],
          demo='BucketDemo'),
-    dict(id='store', files=['Algorithm.java', 'CounterStore.java', 'InMemoryCounterStore.java'],
-         demo='StoreDemo'),
+    dict(id='store', files=['CounterStore.java', 'InMemoryCounterStore.java'], demo='StoreDemo'),
     dict(id='run', files=['Main.java'], demo='Main'),
 ]
 
 # The demo each follow-up runs (it checks its own numbers; see demos/Check.java).
-DEMOS = {'windows': 'WindowsDemo', 'credits': 'CreditsDemo', 'tiers': 'TiersDemo',
-         'door': 'LimitsDemo', 'idle': 'IdleDemo'}
+DEMOS = {'windows': 'WindowsDemo', 'newrule': 'NewRuleDemo', 'credits': 'CreditsDemo',
+         'idle': 'IdleDemo'}
 
 # Extra programs run against a snapshot: their output answers questions elsewhere on the page.
-EXTRA = [('QuizDemo', 'core')]
+EXTRA = [('QuizDemo', 'core'), ('CountingDemo', 'core')]
 
-CORE_TYPES = ['RateLimiter', 'Decision', 'PerKeyRateLimiter', 'Clock', 'Limit', 'LimitPolicy',
-              'CustomerLimits', 'Counter', 'TokenBucket', 'Algorithm', 'CounterStore',
-              'InMemoryCounterStore', 'Main']
+CORE_TYPES = ['Request', 'RateLimitResult', 'RateLimiter', 'RateLimitFilter',
+              'RuleBasedRateLimiter', 'Clock', 'RateLimitRule', 'CountPer', 'ScoreApiRules',
+              'Limit', 'LimitPolicy', 'FixedLimit', 'PlanLimit', 'Plan', 'Customers', 'Decision',
+              'Counter', 'TokenBucket', 'FixedWindowCounter', 'SlidingWindowLog', 'Algorithm',
+              'CounterStore', 'InMemoryCounterStore', 'Main']
 FILE_ORDER = [t + '.java' for t in CORE_TYPES] + [t + '.java' for t in [
-    'FixedWindowCounter', 'SlidingWindowLog', 'SlidingWindowCounter', 'CreditWindow', 'Tier',
-    'TierLimits', 'Request', 'ApiLimits']]
+    'SlidingWindowCounter', 'CreditWindow']]
 
 STRIP = [
-    ('the question', ['RateLimiter', 'Decision']),
-    ('the limiter', ['PerKeyRateLimiter', 'Clock']),
-    ('how much', ['Limit', 'LimitPolicy', 'CustomerLimits']),
-    ('counting', ['Counter', 'TokenBucket']),
-    ('where counts live', ['Algorithm', 'CounterStore', 'InMemoryCounterStore']),
+    ('the door', ['Request', 'RateLimitResult', 'RateLimiter', 'RateLimitFilter']),
+    ('the limiter', ['RuleBasedRateLimiter', 'Clock']),
+    ('the rules', ['RateLimitRule', 'CountPer', 'ScoreApiRules']),
+    ('how much', ['Limit', 'LimitPolicy', 'FixedLimit', 'PlanLimit', 'Plan', 'Customers']),
+    ('counting', ['Decision', 'Counter', 'TokenBucket', 'FixedWindowCounter', 'SlidingWindowLog',
+                  'Algorithm']),
+    ('where counts live', ['CounterStore', 'InMemoryCounterStore']),
     ('run', ['Main']),
 ]
 

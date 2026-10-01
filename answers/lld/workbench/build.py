@@ -617,14 +617,16 @@ def main(slug):
     cfg = problem.CONFIG
     runs = Runs(pdir, cfg)
     runs.run_all(use_cache='--fresh' not in sys.argv)
-    w = W(runs, cfg)
-    pages = problem.pages(w)
-    out = os.path.join(os.path.dirname(HERE), f'{slug}-workbench.html')
-    page = render(cfg, pages, None, out)
+    variants = getattr(problem, 'VARIANTS', None) or {'': problem.pages}
+    for suffix, make in variants.items():      # one page per variant of the same content
+        w = W(runs, cfg)
+        pages = make(w)
+        out = os.path.join(os.path.dirname(HERE), f'{slug}-workbench{suffix}.html')
+        page = render(cfg, pages, None, out)
+        words = len(re.sub(r'<[^>]+>', ' ', re.sub(r'<(script|style|svg|pre)[\s\S]*?</\1>', ' ', page)).split())
+        print(f'wrote {out}: {len(page):,} bytes, {len(pages)} steps, about {words:,} words outside code')
     if cfg.get('EXPORT_README'):
         export_projects(runs, cfg, os.path.join(os.path.dirname(HERE), f'{slug}-code'))
-    words = len(re.sub(r'<[^>]+>', ' ', re.sub(r'<(script|style|svg|pre)[\s\S]*?</\1>', ' ', page)).split())
-    print(f'wrote {out}: {len(page):,} bytes, {len(pages)} steps, about {words:,} words outside code')
 
 
 if __name__ == '__main__':

@@ -1,14 +1,15 @@
-// A million customers who call once a day: forget the counters that a new one would equal.
+// A million customers who call once a day: forget the counters a new one would equal.
 public class IdleDemo {
     public static void main(String[] args) {
-        InMemoryCounterStore store = new InMemoryCounterStore(Algorithm.TOKEN_BUCKET);
+        InMemoryCounterStore store = new InMemoryCounterStore();
         Limit limit = Limit.perSecond(5);
         for (int i = 0; i < 1_000; i++) {
-            store.counterFor("customer-" + i, limit, 0).tryAcquire(0);   // one call each
+            store.counterFor("rate:customer-" + i, limit, Algorithm.TOKEN_BUCKET, 0)
+                    .tryAcquire(0);                                       // one call each
         }
-        store.counterFor("busy-app", limit, 0).tryAcquire(0);
-        for (int i = 0; i < 5; i++) {
-            store.counterFor("busy-app", limit, 900).tryAcquire(900);   // still busy at 900 ms
+        for (int i = 0; i < 6; i++) {
+            store.counterFor("rate:busy-app", limit, Algorithm.TOKEN_BUCKET, 900)
+                    .tryAcquire(900);                                     // still busy at 900 ms
         }
         System.out.println("counters before the sweep: " + store.size());
         store.evictIdle(1_000);
