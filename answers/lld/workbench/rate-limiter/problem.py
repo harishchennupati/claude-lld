@@ -462,30 +462,24 @@ for (RateLimitRule rule : rules) {                       // branch 1: the rules
 # any, and the trap it handles. Said here once; the file's comments say only what the code does.
 WHY = {
     'Request.java': """
-        - **What:** the three things a limit can depend on: `customerId`, `ip`, `endpoint`.
         - **Record:** plain data, never changes after it is made.
         - **Watch out:** before sign-in there is no API key, so `customerId` is `null`.
         """,
     'RateLimitResult.java': """
-        - **What:** the limiter's answer: `allowed`, `retryAfterMillis`, `refusedBy`.
         - **Record, not a boolean:** the 429 needs Retry-After and the rule's name too.
         """,
     'RateLimiter.java': """
-        - **What:** one method, `check(request)`.
         - **Interface:** so the class doing the work can be swapped later (Redis-backed,
           dry-run) without editing the filter.
         - **`rateLimit(customerId)`:** the interviewer's signature, kept as a default method.
         """,
     'RateLimitFilter.java': """
-        - **What:** runs before every endpoint. Calls `limiter.check`, returns 200 or 429.
         - **Limiter through the constructor:** the filter never does `new RuleBasedRateLimiter`.
           `Main` passes the real one; a test passes a fake one.
         - **Watch out:** Retry-After is whole seconds, rounded up. 200 ms must become 1, not
           0, or the client retries at once and is refused again.
         """,
     'RuleBasedRateLimiter.java': """
-        - **What:** the loop from the first draft. For each matching rule, take a token; if any
-          rule says no, give back the tokens already taken and refuse.
         - **Rules, store and clock through the constructor:** `Main` gives the real store and
           the system clock; a demo gives a clock it moves by hand. Same limiter code in both.
         - **Watch out:** read the clock once per request, so every rule sees the same instant.
@@ -493,73 +487,46 @@ WHY = {
           is written.
         """,
     'Clock.java': """
-        - **What:** one method, `nowMillis()`.
         - **Interface:** production passes `System::currentTimeMillis`; a demo sets the time by
           hand.
         """,
     'RateLimitRule.java': """
-        - **What:** one entry of the config: `name`, `match`, `countPer`, `limits`, `algorithm`,
-          plus `matches(request)` and `keyFor(request)`.
         - **Record:** set once at startup, read by every thread with no lock.
         - **Watch out:** the key starts with the rule's name, so two rules never share a counter
           by accident: `rate:fantasy-app`, `login:203.0.113.7`, `global:*`.
         """,
-    'Match.java': """
-        - **What:** the `match:` line: `caller` and `endpoint` (`"*"` means every endpoint), and
-          `matches(request)`.
-        """,
-    'Caller.java': """
-        - **What:** `CUSTOMER` or `ANY`.
-        """,
     'CountPer.java': """
-        - **What:** `CUSTOMER`, `CUSTOMER_AND_ENDPOINT`, `IP`, `EVERYONE`. `keyFor` switches
-          over it, so a missing case fails the build.
+        - **Enum:** `keyFor` switches over it, so a missing case fails the build.
         """,
     'ScoreApiRules.java': """
-        - **What:** the five rules from the YAML, in the same order, built by `build(customers)`.
         - **Watch out:** at sign-in there is no customer yet, so the `login` rule matches `ANY`
           and counts per IP.
         - **Later:** a YAML loader replaces this class and nothing else.
         """,
     'Limit.java': """
-        - **What:** `requests` and `periodMillis`: X requests every Y.
         - **`perSecond(5)`, `perDay(10_000)`:** read better than `new Limit(5, 1000)`.
         """,
     'LimitPolicy.java': """
-        - **What:** one method, `limitFor(request)`.
         - **Interface:** a limit is either fixed or from the plan. Without this, the rule needs
           `if (fixed) ... else look up the plan`, and every new kind adds a branch. With it,
           the rule calls `limitFor` and the implementing class decides.
         - **Pattern:** Strategy.
         """,
-    'FixedLimit.java': """
-        - **What:** `limitFor` returns the same `Limit` for everyone.
-        """,
     'PlanLimit.java': """
-        - **What:** `limitFor` finds the customer's plan and returns its `rate` or its `daily`
-          limit.
         - **Class, not a record:** it keeps a reference to `Customers` and does a lookup on every
           call.
-        - **`Field`:** `RATE` or `DAILY`, nested inside because no other class uses it.
         - **Watch out:** the lookup is per request, so an upgrade applies at once.
         """,
     'Plan.java': """
-        - **What:** `FREE` and `PRO`, each holding its `rate` and `daily` limits.
         - **Limits live on the plan, not in the rules:** adding ENTERPRISE is one line here.
         """,
     'Customers.java': """
-        - **What:** `setPlan(customerId, plan)` and `planOf(customerId)`.
         - **`ConcurrentHashMap`:** upgrades write while requests read; a plain `HashMap`
           breaks under that.
         - **Watch out:** `planOf(null)` returns `FREE`, so a request with no key does not
           crash.
         """,
-    'Decision.java': """
-        - **What:** `allowed` and `retryAfterMillis`: one counter's answer. `allow()` and
-          `deny(ms)` build the two kinds.
-        """,
     'Counter.java': """
-        - **What:** `tryAcquire(now)` and `refund(now)`.
         - **Interface:** the limiter calls a token bucket, a fixed window and a sliding log the
           same way.
         - **Pattern:** Strategy, like `LimitPolicy`.
@@ -567,35 +534,20 @@ WHY = {
           nothing: tokens, a count, a list of times.
         """,
     'TokenBucket.java': """
-        - **What:** `tokens` and `lastRefillMillis`. Each call refills for the time passed, then
-          takes one token if there is one.
         - **`synchronized`:** refill, check and take must be one step. Without it, two threads
           both read "1 token left" and both take it (picture below). The lock is per bucket, so
           two customers never wait for each other.
         - **Watch out:** `refund` never goes above `capacity`.
         """,
-    'FixedWindowCounter.java': """
-        - **What:** a `count` and the window it belongs to. A new window resets the count to 0.
-        """,
-    'SlidingWindowLog.java': """
-        - **What:** a deque of the times of the allowed requests in the last period.
-        """,
-    'Algorithm.java': """
-        - **What:** `TOKEN_BUCKET`, `FIXED_WINDOW`, `SLIDING_WINDOW_LOG`, as named in the config.
-        """,
     'CounterFactory.java': """
-        - **What:** `create(algorithm, limit, now)`: a `switch` to `new TokenBucket(...)`,
-          `new FixedWindowCounter(...)` or `new SlidingWindowLog(...)`.
         - **Pattern:** Factory. The one place that writes `new` for counters; a new way of
           counting is one class plus one `case` here.
         """,
     'CounterStore.java': """
-        - **What:** one method, `counterFor(key, limit, algorithm, now)`.
         - **Interface:** in memory today, Redis with many servers. The limiter only calls
           `counterFor`, so that swap is one new class and no limiter change.
         """,
     'InMemoryCounterStore.java': """
-        - **What:** a `ConcurrentHashMap` from key to `Counter`.
         - **`computeIfAbsent`:** with `get` then `put`, two threads meeting a new customer at the
           same instant both create a counter: two budgets. `computeIfAbsent` does find-or-create
           as one step.
