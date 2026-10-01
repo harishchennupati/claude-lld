@@ -4,7 +4,7 @@ import java.util.Map;
 // new entry, and nothing that reads limits changes.
 class PlanLimits implements LimitPolicy {
     private final Plans plans;
-    // Set once, only read after that: no lock needed (see the Java note).
+    // Set once, only read after that: a final field is safely seen by every thread, no lock.
     private final Map<Plan, Limit> limitOf;
 
     PlanLimits(Plans plans, Map<Plan, Limit> limitOf) {

@@ -25,6 +25,7 @@ class SlidingWindowLog implements Bucket {
         // Full. For a cost of 1 the wait is simply: times.peekFirst() + periodMillis - nowMillis
         // (enough in the room). For any cost: with 5 entries and a cost of 2, the 2nd-oldest
         // entry must leave the window first.
+        // A cost above the limit never gets here: the front door refuses it first.
         long mustLeave = times.size() + cost - limit;
         long leavesAt = 0;
         int seen = 0;
