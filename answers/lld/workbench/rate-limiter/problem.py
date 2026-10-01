@@ -375,49 +375,41 @@ def counting(w):
 # ==================================================================================== design
 # The design is thought through in branches, and each branch is typed as soon as it is decided:
 # start at the door, list what the limiter needs (breadth first), take each branch down (depth
-# first) and come back. Every branch reads the same way: the question, the options weighed, the
-# decision, the diagram so far, then the code, explained in its comments.
-def branch(w, question, options, decision):
-    """The thinking for one branch: the question, the options weighed, what we choose."""
-    opts = '\n'.join('- ' + ' '.join(o.split()) for o in options)
-    return (w.md('**The question.** ' + question)
-            + w.md('**The options.**\n\n' + opts)
-            + w.md('**The decision.** ' + decision))
-
-
+# first) and come back. Each branch is a short line of reasoning (what is needed, what we build,
+# why), then the diagram so far, then the code, explained in its comments.
 def think_door(w):
-    return branch(w,
-        '''A request arrives at the score API: fantasy-app's `GET /search?q=kohli`. Before any work,
-        something must decide: go ahead, or 429 now. Where does that check live, what goes in, and
-        what comes out?''',
-        ['**A check inside each endpoint:** simple, but every endpoint must remember it, and one '
-         'that forgets is unprotected.',
-         '**One filter in front of every endpoint:** nothing can forget it. ✓',
-         '**It answers a boolean:** too little. A refused customer must hear when to retry and '
-         'which limit it hit.',
-         '**It answers a small result record:** allowed, retry-after, the rule. ✓'],
-        '''A `RateLimitFilter` at the door asks one question, through an interface it can never see
-        behind: `RateLimiter.check(request)`. The `Request` record carries everything a limit could
-        depend on: the customer (authentication has already turned the API key into an id; none
-        before sign-in), the IP and the endpoint. The answer is a `RateLimitResult` record. The
-        interviewer's `rateLimit(customerId)` stays, as a one-line default.''')
+    return w.md('''
+        fantasy-app's `GET /search?q=kohli` arrives. Before any real work, something has to
+        decide: go ahead, or 429 now.
+
+        That check lives in **one filter in front of every endpoint**, so no endpoint can forget
+        it. The filter counts nothing itself. It asks one question through an interface,
+        `RateLimiter.check(request)`, and turns the answer into HTTP.
+
+        **In** goes a `Request` record holding everything a limit could depend on: the customer
+        (authentication has already turned the API key into an id, and there is none before
+        sign-in), the IP and the endpoint. **Out** comes a `RateLimitResult` record rather than a
+        boolean, because a refused caller must hear when to retry and which limit said no. The
+        plain `rateLimit(customerId)` many interviewers start from stays, as a one-line default on
+        the interface.
+        ''')
 
 
 def think_limiter(w):
-    return (branch(w,
-        '''Look at the config: one request is usually matched by **several rules at once**:
-        fantasy-app's search is matched by `rate`, `daily`, `search` and `global`. What must the
-        limiter do with them, and what does it need for that?''',
-        ['**Ask every rule first, then take a token from each:** between the asking and the '
-         'taking, another thread can take the same token.',
-         '**Ask and take all of them under one lock:** correct, but the whole API waits on that '
-         'one lock.',
-         '**Take as you go; if a later rule refuses, give back what the earlier ones took:** '
-         'all or nothing, with a lock only per counter. ✓ (A token given back a moment late may '
-         'already have been refused to someone else: acceptable.)'],
-        '''The limiter walks the rules in order and lets the request through only if every rule that
-        matches it allows it. Before going deeper, list everything that needs, **breadth first**:''')
-        + w.md('''
+    return (w.md('''
+        One request usually matches several rules: fantasy-app's search matches `rate`, `daily`,
+        `search` and `global`. The limiter walks the rules in order and lets the request through
+        only if every rule that matches it allows it.
+
+        The care is in **all or nothing**. If `rate` and `daily` each take a token and then
+        `search` refuses, the request never ran, so it must have spent nothing. The limiter takes
+        as it goes, remembers which counters it charged, and gives those tokens back on a refusal.
+        It cannot check every rule first and take afterwards: between the check and the take,
+        another thread can take the same token. And because each counter has its own lock, one
+        customer never waits on another.
+
+        Before going deeper, list everything this needs, **breadth first**:
+
         1. **the rules:** what one is, and which ones match a request → branch 1
         2. for each rule, **how much** it allows → branch 1a, under the rules
         3. for each rule, **what has been counted**, and how → branch 2
@@ -442,79 +434,85 @@ for (RateLimitRule rule : rules) {                       // branch 1: the rules
 
 
 def think_rules(w):
-    return branch(w,
-        '''What is one rule? Read one entry of the config: it has a name, a `match`, a `count_per`,
-        a `limit` and an `algorithm`. How do those become types?''',
-        ['**A `Predicate<Request>` per rule:** matches anything, but nobody can read it, print it '
-         'or load it from the file.',
-         '**Plain values that mirror the config:** ✓ `match` is a small record of the caller kind '
-         '(customer, or anyone) and the endpoint (`"*"` for all); `count_per` is a plain enum with '
-         'four answers.',
-         '**Whose budget as a string field:** typos become silent bugs. **As an enum:** the '
-         'compiler knows every case, and the key is built with a `switch`. ✓'],
-        '''A `RateLimitRule` record holds a `Match` (with a `Caller` enum), a `CountPer` enum, a
-        `LimitPolicy` (branch 1a) and an `Algorithm` (branch 2). The counter's key is the rule's
-        name plus whose budget it is: `rate:fantasy-app`, `login:203.0.113.7`. `ScoreApiRules` is
-        the config in code, an entry per rule in the same order; loading the YAML file later
-        replaces that one class.''')
+    return w.md('''
+        A rule is one entry of the config, so a `RateLimitRule` record has the config's fields,
+        one for one:
+
+        - `name`: a string. It starts the counter's key and names the limit in the 429.
+        - `match`: a small `Match` record of the kind of caller (a `Caller` enum: a customer, or
+          anyone) and the endpoint (`"*"` for all). `matches(request)` is two comparisons.
+        - `count_per`: a `CountPer` enum, saying whose budget a request spends. `keyFor(request)`
+          switches on it to build the counter's key: `rate:fantasy-app`,
+          `search:fantasy-app:/search`, `login:203.0.113.7`, `global:*`.
+        - `limit`: a `LimitPolicy`, branch 1a.
+        - `algorithm`: an `Algorithm` enum, branch 2.
+
+        The fields are plain values, not a lambda per rule, so a rule can be printed, compared and
+        loaded from the YAML. They are enums, not strings, so a typo fails to compile and the
+        compiler sees every case of the `switch`. `ScoreApiRules` is the config written in code,
+        one entry per rule in the same order. Loading the YAML file later replaces only that
+        class.
+        ''')
 
 
 def think_limits(w):
-    return branch(w,
-        '''How much does a rule allow? The config has two kinds of answer: a fixed number
-        (`search: 2 per second`), or whatever the customer's plan says (`rate: from_plan rate`).
-        Where do plan limits live, and how does a rule hold either kind?''',
-        ['**Plan limits inside each rule** (`rate` lists FREE 5 and PRO 50, `daily` lists its own '
-         'two): a new plan means editing every rule.',
-         '**On the plan:** a plan belongs to the customer and carries its limits; a new plan is '
-         'one line. ✓',
-         '**A flag on the rule, "fixed or from the plan", with an if:** the next kind of limit '
-         'adds another flag and another if.',
-         '**One interface, "how much for this request?", with a class per kind:** the rule never '
-         'knows which it holds (Strategy); a third kind is a third class. ✓'],
-        '''A `Plan` enum carries its `rate` and `daily` limits; `Customers` says who is on which
-        plan. `LimitPolicy` has two small classes: `FixedLimit` and `PlanLimit`. `Customers` is
-        written by sign-ups and upgrades while requests read it, so it is a `ConcurrentHashMap`.
-        ↑ Back to the rule, which now has its policy; ↑ back to the limiter's list.''')
+    return w.md('''
+        A rule's limit is either a fixed number (`search: 2 per second`) or whatever the
+        customer's plan says (`rate: from_plan rate`).
+
+        Plan limits belong **on the plan**, not inside each rule: a `Plan` enum in which FREE and
+        PRO each carry a `rate` and a `daily` limit, so a new plan is one line. `Customers` says
+        who is on which plan. Sign-ups and upgrades write it while requests read it, so it is a
+        `ConcurrentHashMap`.
+
+        The rule should not care which kind of limit it holds. So `LimitPolicy` is one interface,
+        `limitFor(request)`, with two small classes: `FixedLimit` returns its number, and
+        `PlanLimit` looks up the customer's plan and returns its `rate` or its `daily` limit. This
+        is Strategy: a third kind of limit is a third class, with no `if` added to the rule.
+
+        ↑ Back to the rule, which now has its policy. ↑ Back to the limiter's list.
+        ''')
 
 
 def think_counting(w):
-    return branch(w,
-        '''How is one budget counted? Each rule names its algorithm, and
-        [How to count](#counting) said which fits which: the token bucket for `rate`, `search` and
-        `global` (a burst, then a steady rate), the fixed window for `daily` (a calendar day), the
-        log for `login` (small, and exact). How does the limiter use three different ones, and
-        what happens when two threads use one at once?''',
-        ['**A switch on the algorithm inside the limiter:** every new way of counting edits the '
-         'limiter.',
-         '**One interface with a class per way of counting:** the limiter only calls '
-         '`tryAcquire` and `refund` (Strategy). ✓ A factory with a plain switch makes the right '
-         'class for a rule\'s `Algorithm`: the one place that knows the list. ✓',
-         '**Two threads, one counter, no lock:** both read "1 token left", both take it.',
-         '**An `AtomicLong`:** guards one number, but two change together (the tokens and the '
-         'last refill time).',
-         '**`synchronized` on each counter:** refill, check and take become one step, and the '
-         'lock is per counter, so different customers never wait on each other. ✓'],
-        '''A `Counter` interface (`tryAcquire`, `refund`), answering with a small `Decision`
-        record; three classes, `TokenBucket`, `FixedWindowCounter` and `SlidingWindowLog`; an
-        `Algorithm` enum and a `CounterFactory`. ↑ Back to the limiter's list.''')
+    return w.md('''
+        Each rule names how its budget is counted, and [How to count](#counting) matched them up:
+        the token bucket for `rate`, `search` and `global` (a burst, then a steady rate), the fixed
+        window for `daily` (a calendar day), and the log for `login` (small, and exact).
+
+        The limiter should not know which one it is talking to. So `Counter` is one interface:
+        `tryAcquire(now)` answers with a `Decision` record (allowed, or how long to wait), and
+        `refund()` gives a token back. `TokenBucket`, `FixedWindowCounter` and `SlidingWindowLog`
+        implement it, which is Strategy again. `CounterFactory.create` switches on the rule's
+        `Algorithm`. It is the one place that knows the list, so a new way of counting is one
+        class plus one `case`.
+
+        **Threads.** A bucket changes two values together, its tokens and the time it last
+        refilled, and refill, check and take must be one step. Otherwise two threads both see the
+        last token and both take it (the picture under the code). So each counter's methods are
+        `synchronized`. The lock belongs to one counter, so different customers never wait on
+        each other.
+
+        ↑ Back to the limiter's list.
+        ''')
 
 
 def think_store(w):
-    return branch(w,
-        '''Where do the counts live? Each (rule, whose budget) needs its own counter, kept between
-        requests and shared by every request thread. What holds them, and what goes wrong when two
-        threads meet a new customer, or a customer upgrades?''',
-        ['**A `HashMap` inside the limiter:** not safe for many threads, and the limiter would '
-         'decide where counts live, which is the one thing that changes with many servers.',
-         '**`get`, then `put` if missing:** two threads meeting a new customer both see nothing, '
-         'both create a counter: two budgets.',
-         '**`ConcurrentHashMap.computeIfAbsent`:** finds, creates and stores as one step for that '
-         'key. ✓',
-         '**The limit in the map\'s key:** a customer who upgrades gets a fresh 50-a-second '
-         'counter on the next request, instead of the old 5-a-second one. ✓'],
-        '''A `CounterStore` interface (Redis can replace it), and an `InMemoryCounterStore`
-        with a `ConcurrentHashMap`, which asks the `CounterFactory` for new counters.''')
+    return w.md('''
+        Each pair of rule and budget, such as `rate:fantasy-app`, needs its own counter. That
+        counter lives between requests and is shared by every thread. So the counts live in a map
+        from key to counter, behind a `CounterStore` interface. The limiter must not decide where
+        counts live, because that is the one thing that changes with many servers, when Redis
+        replaces the map.
+
+        `InMemoryCounterStore` uses `ConcurrentHashMap.computeIfAbsent`, which finds, creates and
+        stores as one step for that key. Two threads meeting a new customer at the same instant
+        therefore get the same counter, not one each. New counters come from the
+        `CounterFactory`.
+
+        The limit is part of the map's key. When fantasy-app upgrades, its next request gets a
+        fresh 50-a-second counter instead of the old 5-a-second one.
+        ''')
 
 
 def think_back(w):
