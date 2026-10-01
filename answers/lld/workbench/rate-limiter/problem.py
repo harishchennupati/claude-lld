@@ -390,7 +390,7 @@ def counting(w):
 
 
 # ==================================================================================== design
-# Each branch reads the way an engineer works it: the need; the diagram so far, and how to read it;
+# Each branch reads the way an engineer works it: the need; the diagram so far;
 # then the code: the traps, the files (each top comment says what the type is for, why it is a
 # record, interface, enum or class, and the logic is explained line by line), and the hour.
 NEED = {
@@ -457,67 +457,6 @@ for (RateLimitRule rule : rules) {                       // branch 1: the rules
     if (!d.allowed()) { refund the earlier counters; return refused; }   // all or nothing
     charged.add(counter);
 }'''
-
-# How to read the diagram after each branch: what is new, and what each line means.
-READ = {
-    'door': '''
-        **Reading the diagram:**
-
-        - **Boxes:** a dashed border is an interface; «record» and «enum» are marked above the
-          name; green is new in this branch.
-        - **Left to right:** `RateLimitFilter` **asks** (plain arrow) the `RateLimiter` interface.
-          The two records on the right are what goes in and what comes out.
-        - **Who keeps the promise:** nobody yet. The filter knows only the interface; the class
-          behind it comes next.
-        ''',
-    'limiter': '''
-        **Reading the diagram:**
-
-        - **Dashed line, hollow triangle, pointing up:** `RuleBasedRateLimiter` **implements**
-          `RateLimiter`. The door above still sees only the interface.
-        - **Plain arrow to `Clock`:** the limiter **uses** a clock it is handed, never one it
-          makes.
-        - **Its fields** (rules, store, clock) are the breadth-first list. The rules and the
-          counting get lanes below; the store joins this lane last.
-        ''',
-    'rules': '''
-        **Reading the diagram:**
-
-        - **The diamond** on the limiter's bottom edge: the limiter **holds a list of**
-          `RateLimitRule`s.
-        - **Plain arrows from the rule:** it **uses** a `Match` (which uses `Caller`) and a
-          `CountPer`. Its `limits` and `algorithm` fields get their own boxes in the next
-          branches.
-        - **Dashed "builds":** `ScoreApiRules` makes the list, in config order.
-        ''',
-    'limits': '''
-        **Reading the diagram:**
-
-        - **The rule's arrow ends at `LimitPolicy`,** an interface, never at a class: the rule
-          cannot tell which kind of limit it holds.
-        - **Two hollow triangles into it:** `FixedLimit` and `PlanLimit` both **implement** it.
-          This is the Strategy pattern, drawn: one promise, two ways of keeping it.
-        - **`PlanLimit` → `Customers` → `Plan`:** look up the customer's plan, then read its
-          limit.
-        ''',
-    'counters': '''
-        **Reading the diagram:**
-
-        - **Three hollow triangles into `Counter`:** the token bucket, the window and the log
-          each **implement** it. Strategy again.
-        - **`Counter` → `Decision`:** every counter answers with the same small record.
-        - **`CounterFactory` "creates" counters,** using `Algorithm` to choose the class.
-        ''',
-    'store': '''
-        **Reading the diagram:**
-
-        - **The limiter → `CounterStore`:** it uses an interface, so it never knows the counts
-          are in memory.
-        - **Hollow triangle:** `InMemoryCounterStore` **implements** it, and **uses** the
-          `CounterFactory` for each new counter.
-        - **The whole core is drawn now:** every name in the first-draft loop has a box.
-        ''',
-}
 
 # Before the code: the traps it handles. Each type's kind, and why, is in its file's top comment.
 TRAPS = {
@@ -609,16 +548,6 @@ def grown(w, st):
 def whole_design(w):
     return (w.md('''
         ## The whole design
-
-        Read it top to bottom as the questions you asked:
-
-        1. **who asks:** the door
-        2. **who decides:** the limiter, with the clock and the store it is handed
-        3. **what each rule says:** which requests, whose budget, how much, how counted
-        4. **how one budget is counted**
-
-        Arrows: a hollow triangle means "implements", a diamond "holds a list of", a plain arrow
-        "uses".
         ''')
         + w.fig(figures.classes(), title='The core')
         + w.md('''
@@ -757,7 +686,7 @@ def design_steps(w):
         out.append(step(st, D, nav, title.split(' · ', 1)[1], minutes=8,
                         stage=f'Design and build · {k + 1} of {n}', body=
             w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1])
-            + think(w, st) + grown(w, st) + w.md(READ[st])
+            + think(w, st) + grown(w, st)
             + w.md('## The code')
             + (w.md('Each file\'s top comment says what it is for, and why it is a record, an '
                     'interface, an enum or a class.') if st == 'door' else '')
