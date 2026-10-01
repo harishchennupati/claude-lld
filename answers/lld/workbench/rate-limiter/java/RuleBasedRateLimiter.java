@@ -8,7 +8,7 @@ import java.util.List;
 class RuleBasedRateLimiter implements RateLimiter {
     private final List<RateLimitRule> rules;      // from the config, in the order they are checked
     private final CounterStore counters;          // where every rule's counts live
-    private final Clock clock;                    // handed in, so a demo can move time by hand
+    private final Clock clock;                    // passed in, so a demo can move time by hand
 
     RuleBasedRateLimiter(List<RateLimitRule> rules, CounterStore counters, Clock clock) {
         this.rules = List.copyOf(rules);          // read-only: every thread shares it, no lock

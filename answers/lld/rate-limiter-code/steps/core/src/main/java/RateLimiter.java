@@ -1,6 +1,6 @@
 // The one question the front door asks before any work: may this request go ahead now?
-// The door depends on this interface, never on the class behind it, so the class behind it can
-// change (another limiter, a dry-run wrapper) without the door knowing.
+// The filter calls only this interface, never a concrete class, so the class that does the work
+// can change (another limiter, a dry-run wrapper) without the filter changing.
 interface RateLimiter {
     RateLimitResult check(Request request);
 
