@@ -206,19 +206,12 @@ def counting(w):
 MOVES = [
     dict(q='My limiter says no. What does the client do with a no?',
          think='''
-        Read the problem again: a refused client gets **429**, a **Retry-After** header and the
-        rule that refused it. My `allow()` returns `false`. That is all the client learns. It
-        cannot tell whether to wait 80 ms or until midnight, so it will just retry in a loop, which
-        is exactly the bug that started all this.
-
-        The input is just as thin. `allow(clientId)` knows the client, but the rules in the problem
-        also need the endpoint (searches), the IP (sign-ins, before anyone has a key) and the cost
-        (a match history costs 5). If I keep adding parameters, every caller changes every time.
+        The problem says a refused client gets 429, when to retry, and which rule refused. My
+        `allow()` returns `false`, so the client just retries in a loop: the very bug that started
+        this. The input is thin too: the rules also need the endpoint, the IP and the cost.
         ''',
          so='''
-        So I wrap both ends in **records**: plain values, built once, never changed. One goes in,
-        one comes out, and the limiter is an **interface** with that one question. I keep two
-        answers apart: what one bucket decided, and what the whole request got.
+        So both ends become **records**, and the limiter an **interface** with one method.
         ''',
          adds=[('RequestContext', 'record'), ('Decision', 'record'), ('RateLimitResult', 'record'),
                ('RateLimiter', 'interface')],
@@ -235,19 +228,13 @@ interface RateLimiter {
             'as a one-line default method on top of `check`.'),
     dict(q='Every answer depends on the time. Where does my code get the time from?',
          think='''
-        Look at the first line of `allow()`: `System.currentTimeMillis()`. The whole decision
-        hangs on that number: how many tokens came back since the last request, how long until the
-        next one. Yet it is read in secret, inside the method.
-
-        That bites the moment I want to know the code is right. Did 120 ms of quiet really earn
-        0.6 of a token? To see it, I would have to sleep 120 ms and hope the machine was not busy.
-        The same hidden input makes the midnight reset of the daily quota impossible to check
-        without waiting for midnight.
+        `allow()` calls `System.currentTimeMillis()` inside. Every decision hangs on that hidden
+        number, so to check that 120 ms of quiet earns 0.6 of a token, I would have to sleep and
+        hope the machine is not busy.
         ''',
          so='''
-        So time becomes something the limiter is **handed**, like any other input: an
-        **interface** with one method. Production passes the real clock; a test, or a demo, passes
-        a clock it moves by hand, and "120 ms later" takes no time at all.
+        So the limiter is **handed** a clock: the real one in production, one I move by hand in
+        tests.
         ''',
          adds=[('Clock', 'interface'), ('SystemClock', 'class'), ('ManualClock', 'class')],
          code='''
@@ -263,18 +250,12 @@ class ManualClock implements Clock {            // advance(120) is "120 ms later
          xy='Time handed in, not read inside.'),
     dict(q='Many requests arrive at once. Who waits for whom?',
          think='''
-        The API serves requests on a thread pool, so `allow()` runs on many threads at once. I made
-        it `synchronized`, which is correct, but look at what it locks: the whole limiter. When the
-        score widget's retry loop sends 2,000 requests a second, every one of them holds that lock
-        in turn, and the paying fantasy app queues behind them.
-
-        What actually needs protecting? Only one client's two numbers, its tokens and when they
-        were last topped up. Two different clients never touch the same numbers.
+        `synchronized allow()` locks the whole limiter, so the widget's 2,000 requests a second
+        queue the paying fantasy app behind them. Yet all that needs guarding is one client's two
+        numbers.
         ''',
          so='''
-        So those two numbers, and the arithmetic on them, move into an object of their own, and the
-        lock moves with them: one **class** per client's budget. While I am at it, "5 a second"
-        stops being two magic numbers and becomes a **record**.
+        So those numbers, their arithmetic and their lock move into a **class** per client.
         ''',
          adds=[('TokenBucket', 'class'), ('Limit', 'record')],
          code='''
@@ -289,20 +270,13 @@ class TokenBucket {
          xy='A lock per bucket, not one lock for everyone.'),
     dict(q='Does every rule in the problem want a token bucket?',
          think='''
-        Back to the rules table. Sign-ins must be exact: never 6 in a minute. A token bucket cannot
-        promise that, because after a quiet spell it lets a full burst through on top of what it
-        earns. The daily quota starts again at midnight, and a token bucket knows nothing about
-        midnight. So I need two more ways of counting.
-
-        The obvious move is a `type` field and an `if (type == LOG) ... else if (type == WINDOW)`
-        in the limiter. It works today, and every new way of counting reopens that method, and
-        every test of it.
+        Sign-ins must be exact, and the quota resets at midnight: a token bucket can do neither.
+        The obvious fix, `if (type == LOG) ... else ...` in the limiter, reopens that method for
+        every new way of counting.
         ''',
          so='''
-        Instead, the limiter only ever asks one question, "may this cost pass now?", and each way
-        of counting is a class that answers it: an **interface** and three classes. A rule still
-        has to say which one it wants, so an **enum** names them, and each constant knows how to
-        build its class.
+        So each way of counting is a class behind one **interface**, and an **enum** names them
+        for the rules.
         ''',
          adds=[('Bucket', 'interface'), ('SlidingWindowLog', 'class'),
                ('FixedWindowCounter', 'class'), ('BucketFactory', 'interface'),
@@ -325,21 +299,12 @@ enum Algorithm implements BucketFactory {                 // no switch anywhere
          xy='An interface, not a switch. This is the Strategy pattern.'),
     dict(q='How do the five limits from the problem get into the code?',
          think='''
-        PRO gets 50 a second and FREE 5; searches get 2 a second each; sign-ins 5 a minute per IP;
-        the whole API 1,000 a second; plus the daily quota. My hands want to write
-        `if (plan == PRO) ...` and `if (endpoint.equals("/search")) ...`. Each of those is a
-        product decision welded into the limiter, and the product team changes them every month.
-
-        So I look at the five side by side instead. Every one of them answers the same four
-        questions: which requests does it cover, whose budget do they spend, how much is allowed,
-        and how is it counted.
+        My hands want `if (plan == PRO)` and `if (endpoint.equals("/search"))`: product decisions
+        welded into the limiter. Side by side, though, all five limits answer the same four
+        questions: which requests, whose budget, how much, counted how.
         ''',
          so='''
-        Four answers make a **rule**, and a rule is data: a record built from small parts.
-        "Which requests" is a true-or-false function on the request, such as
-        `endpoint("/search")`; "whose budget" is an **enum**; "how much" is a `LimitPolicy`,
-        fixed or looked up by the client's **plan**. One class lists the product's rules, and a
-        rule book answers "which rules cover this request?".
+        So a limit is a **rule**: a record of those four answers, and the product's rules are a list.
         ''',
          adds=[('RateLimitRule', 'record'), ('KeyScope', 'enum'), ('LimitPolicy', 'interface'),
                ('PlanLimits', 'class'), ('Plans', 'class'), ('Plan', 'enum'),
@@ -357,19 +322,12 @@ new RateLimitRule("search", withKey().and(endpoint("/search")), KeyScope.CLIENT_
          xy='Rules as data, not if-statements. A new limit is one new line in `ScoreApiRules`.'),
     dict(q='Each rule needs a bucket per client. Where do they all live?',
          think='''
-        A bucket now belongs to a rule and a key, such as `plan|fantasy-app|50/1000`: the rule,
-        whose budget, and the limit (so an upgrade to PRO starts a fresh bucket). My first cut kept
-        them in a `HashMap` inside the limiter: `get`, and if nothing is there, `put` a new one.
-
-        Picture two threads meeting a brand-new client in the same instant. Both `get` and see
-        nothing, both create a bucket, both `put`, and that client has just been handed two
-        budgets. And there is a second smell: the limiter is deciding where buckets are stored,
-        which is precisely what changes when we run on more than one server.
+        My map does `get`, then `put` if nothing is there. Two threads meeting a new client both
+        see nothing, both create a bucket, and the client gets two budgets. And where buckets live
+        is exactly what changes on more servers.
         ''',
          so='''
-        So buckets get a home of their own behind an **interface**. The in-memory **class** finds
-        or creates a bucket in one atomic step, and later a Redis store can take its place without
-        the limiter noticing.
+        So buckets live in a **store** behind an interface, found or created in one atomic step.
         ''',
          adds=[('BucketStore', 'interface'), ('InMemoryBucketStore', 'class')],
          code='''
@@ -382,18 +340,12 @@ return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));''',
          xy='A store behind an interface, not a map inside the limiter.'),
     dict(q='A search passes three rules. What if the third one says no?',
          think='''
-        Follow one search from fantasy-app. The plan rule takes a token, the quota rule takes one,
-        and then the search rule refuses. The client gets a 429, and yet two of its tokens are
-        gone, for a request that never ran. Do that a few times and a well-behaved client is
-        starved by its own refusals.
-
-        Could I check every rule first, and only then take the tokens? Not safely: between the
-        check and the take, another thread can spend the same token.
+        Plan takes a token, quota takes one, then search refuses: two tokens gone for a request
+        that never ran. Checking every rule first and taking afterwards does not help: another
+        thread can spend the token in between.
         ''',
          so='''
-        So one **class** charges the rules in order, remembers which buckets it charged, and on the
-        first refusal gives everything back. Each bucket stays locked only for its own step, and
-        `Bucket` learns to refund.
+        So the limiter charges rules in order and refunds them all on the first refusal.
         ''',
          adds=[('RuleBasedRateLimiter', 'class')],
          code='''
@@ -412,15 +364,11 @@ for (RateLimitRule rule : rules.matching(request)) {
             'handler that takes the request, and here every rule must agree.'),
     dict(q='Who turns a refusal into a 429, and how does ops see it?',
          think='''
-        The limiter now decides well, but nobody outside sees it. The tempting place for the 429
-        and a log line is right inside `check`. Then the limiter knows about HTTP status codes and
-        about our logger, a batch job could not reuse it, and every new dashboard ops asks for
-        would edit the class that must never break.
+        Putting the 429 and a log line inside `check` ties the limiter to HTTP and our logger, and
+        every new report would edit the class that must never break.
         ''',
          so='''
-        So HTTP stays at the front door: a **class** that asks the limiter first and turns the
-        answer into a response. Reports listen from the side: an **interface** told about every
-        decision after it is made, and one **class** that counts refusals per rule.
+        So HTTP stays in a filter at the door, and reports are listeners on the side.
         ''',
          adds=[('RateLimitFilter', 'class'), ('RateLimitListener', 'interface'),
                ('RefusalMetrics', 'class')],
@@ -463,12 +411,10 @@ def derive(w):
     return step('derive', D, 'How to get there', 'How the design grows, one question at a time',
                 minutes=10, body=
         w.md('''
-        Nobody designs twenty classes up front. What follows is how one engineer thinks it through:
-        write the class that works, then look at it and keep asking awkward questions, each one
-        prompted by the problem statement or by something in the code. Each answer breaks the
-        current code in a specific way, the obvious patch fails for a specific reason, and a few
-        small types fall out, each with one job. Read it as their notes, and ask each question
-        yourself before reading on.
+        Nobody designs twenty classes up front. You write the class that works, then look at it and
+        ask awkward questions, prompted by the problem or by the code. Each answer breaks something,
+        the obvious patch fails, and a few small types fall out. Ask each question yourself before
+        reading on.
 
         This is the class everyone writes first. It is compiled and run here:
         ''')
