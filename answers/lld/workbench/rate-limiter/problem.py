@@ -66,22 +66,23 @@ rules:                                # checked in this order; a request must pa
 # ================================================================================ understand
 def problem(w):
     return step('problem', U, 'The problem', 'A rate limiter for a cricket-score API', minutes=6, body=
-        w.ask('Each customer may make X requests every Y seconds. Implement '
-              '`rateLimit(customerId)`. Keep the code simple, but extensible: we will add to it.',
-              src="Atlassian's version, as candidates report it; Freshworks, Postman, Swiggy, "
-                  'OpenAI and Anthropic ask versions of it.', label='The interviewer')
+        w.ask('We run a public API that serves live cricket scores to other apps: a score widget '
+              'that news sites embed, a fantasy-cricket app, a few cricket blogs. Each app calls us '
+              'with its API key, and each is on a plan, free or paid. Last week the widget shipped a '
+              'retry bug and sent us 2,000 requests a second, and the API slowed down for everyone, '
+              'including the customers who pay us.'
+              '</p><p class="aq">'
+              'Design and code the rate limiter that sits in front of this API. For every request it '
+              'decides: may this go ahead now? If not, the caller gets a 429 and should know when to '
+              'try again. Paid plans get more than free ones, and some endpoints need limits of their '
+              'own: search is expensive, and sign-in has to stop password guessing.'
+              '</p><p class="aq">'
+              'Start with one server and keep the counts in memory, but it serves many requests at '
+              'once. Write working Java. We will add requirements as we go, so a new limit should not '
+              'mean a rewrite.')
         + w.md('''
-        ## The situation
-
-        We run a public API that serves live cricket scores to other apps, our **customers**: a
-        score widget that news sites embed, a fantasy-cricket app on a paid plan, a few cricket
-        blogs, and a developer portal where people sign in to get their keys. Last week the widget
-        shipped a retry loop that sent 2,000 requests a second, and the API slowed down for
-        everyone, including the paying fantasy app.
-
-        So before the API does any work, it asks one question: *may this request go ahead now?*
-        If not, it answers at once with **429 Too Many Requests**, a **Retry-After** header and
-        the limit that said no.
+        The brief gives the shape, not the numbers: those come from your questions. The limiter
+        answers one question before the API does any work: *may this request go ahead now?*
         ''')
         + w.fig(figures.flow(), caption='The limiter sits at the front door, before the real work.')
         + w.md('''
@@ -90,19 +91,23 @@ def problem(w):
         Each answer changes the code:
         ''')
         + w.table(['You ask', 'Assume they say', 'What it changes'], [
-            ['Limit by what?', 'Per customer; searches per customer too; sign-ins per IP (no key '
-             'yet); and one cap for the whole API', 'Each limit says whose budget it spends.'],
-            ['Same limit for everyone?', 'By plan: FREE 5 a second, PRO 50, plus a daily quota',
-             'Limits come from the customer\'s plan, not from constants.'],
+            ['What are the plan limits?', 'FREE: 5 a second and 10,000 a day. PRO: 50 a second '
+             'and 1,000,000 a day', 'Limits come from the customer\'s plan, not from constants; '
+             'one plan has two limits.'],
+            ['Search and sign-in: how much, and per what?', 'Search: 2 a second per customer. '
+             'Sign-in: 5 a minute per IP, since the caller has no key yet', 'Each limit says whose '
+             'budget it spends: a customer, a customer on one endpoint, an IP.'],
+            ['Anything that protects the servers themselves?', 'Yes: never more than 1,000 a second '
+             'in total', 'One more limit, spent by everyone together.'],
             ['Can a customer burst?', 'Yes, up to its limit; sign-ins must be exact',
              'Each limit names how it counts.'],
             ['Several limits apply: which wins?', 'All must allow; a refused request counts '
-             'nowhere', 'All or nothing.'],
-            ['What does a refused customer get?', '429, when to retry, and which limit',
+             'nowhere', 'All or nothing, with a refund.'],
+            ['What goes in the 429?', 'Retry-After in whole seconds, and which limit said no',
              'The answer is a small record, not a boolean.'],
-            ['One server or many?', 'One, for now', 'Counts in memory, behind an interface.'],
-            ['Many requests at once?', 'Yes: a thread pool', 'Thread-safe, and customers never '
-             'wait on each other.'],
+            ['A customer upgrades mid-day?', 'The new limit applies at once', 'Look the plan up '
+             'on every request; the counter\'s key carries the limit, so a new limit gets a fresh '
+             'counter.'],
         ], cls='qs')
         + w.md('''
         ## The limits, as the product's config
@@ -685,7 +690,7 @@ def design_steps(w):
 
 
 # ================================================================================ follow-ups
-def followup(w, s, nav, title, ask, src, lands, minutes, opt=False, after_run='', hole=None,
+def followup(w, s, nav, title, ask, lands, minutes, opt=False, src=None, after_run='', hole=None,
              first=()):
     snaps = CONFIG['SNAPS']
     body = (w.ask(ask, src=src, label='Follow-up' if not opt else 'Follow-up · when you have time')
@@ -703,7 +708,6 @@ def followup(w, s, nav, title, ask, src, lands, minutes, opt=False, after_run=''
 def windows(w):
     return followup(w, 'windows', 'More ways to count', 'More ways to count', minutes=5,
         ask='Implement a sliding window counter too. Which would you pick, and why?',
-        src='Swiggy (2025) asked for a sliding window and a leaky bucket in the same round.',
         lands='''
         A new `Counter` class and a new `case`: no rule, no limiter, no store logic changes. The
         demo runs the two tests from [How to count](#counting) on the real classes. The leaky
@@ -732,7 +736,6 @@ def credits(w):
         opt=True,
         ask='A customer that uses less than its limit in one second should keep the unused '
             'requests as credits, up to a maximum, and spend them later.',
-        src="Atlassian's rate limiter round, as the follow-up to this exact problem.",
         lands='''
         Another way of counting, so another `Counter` and one `case`: a fixed window that saves
         what a window did not use, up to one window's worth here.
@@ -747,8 +750,7 @@ def servers(w):
     return step('servers', F, 'Many servers', 'Many servers, one budget', minutes=6,
                 stage='Follow-up', body=
         w.ask("We now run 10 API servers behind a load balancer. A customer's limit must hold "
-              'across all of them.', src='OpenAI and Anthropic (2026) asked for a distributed '
-              'rate limiter.', label='Follow-up')
+              'across all of them.', label='Follow-up')
         + w.md('''
         Each server counts on its own today, so 10 servers grant 10 times the limit. The counts
         must be shared, and the core already has the seam: `CounterStore`. A `RedisCounterStore`

@@ -23,7 +23,7 @@ everything; **Practise** mode hides the code and the answers until the reader as
 
 | group | steps | what each step holds |
 |---|---|---|
-| Understand | The problem | the interviewer's line (a real reported wording); the situation, with realistic names; one flow picture; the questions to ask, each with what its answer changes in the code; what the hour holds (typed vs said) and the 60-minute plan; how to use the page |
+| Understand | The problem | the interviewer's brief, as a real interviewer says it (situation, goal, constraints; the numbers come from your questions), with realistic names; one flow picture; the questions to ask, each with what its answer changes in the code; what the hour holds (typed vs said) and the 60-minute plan; how to use the page |
 | | The core idea (e.g. how to count) | every option explained from scratch with ASCII pictures and worked numbers, its catch, and where it is still the right choice; all options on the same tests; one line each; which one the core uses and why |
 | Design | The design, top-down | start at the front door and keep asking "what does this need?", going deeper (↓) until a question is settled, then back (↑); each answer is a type, with the first-draft code where it helps; the whole design as one tree; one case walked before typing; where each new requirement will land |
 | Build | one step per group of 1-3 types, in the order they are typed in the room (top-down, the caller before its parts) | the where-we-are strip; whole files, explained in their comments; a tiny program's output where it helps; a ✗/✓ panel where a race is the point; "The thinking": why the code is written this way, including the threads, patterns and SOLID point it makes |
