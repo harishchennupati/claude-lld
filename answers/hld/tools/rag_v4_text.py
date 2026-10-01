@@ -56,7 +56,8 @@ provider.”</p><p class="pi"><b>What this really is.</b> This is retrieval-augm
 search engine whose results are read by a model instead of a person. Before the model sees anything, we
 find the few pieces of the company's documents that answer the question and that this employee is allowed
 to read. After it writes, a citation reaches her only if it points at a piece we gave the model, and our
-citation checker scores whether the piece supports its sentence. The model is rented, slow and sometimes
+citation checker scores whether the piece supports its sentence; a sentence whose citation it cannot
+confirm is shown in grey. The model is rented, slow and sometimes
 wrong; the design is everything around it. <b>In scope:</b> finding and permission-checking the pieces,
 keeping our copy of the documents fresh, the streamed answer with checked citations, keeping quality as
 things change, and where it runs. <b>Out of scope:</b> training models, an assistant that takes actions,
@@ -69,14 +70,15 @@ def body(fig):
     B.append(band('Start', 'Who is in the room, and what is asked'))
     B.append(h2('s-who', 'Who is who, and one question from Enter to the last citation'))
     B.append(tx('Five roles: the first three in the order a question travels, then two that feed us from '
-                'the side.'))
+                'the side. The design and every picture use the role names; the example next to each is only '
+                'so the story has faces.'))
     B.append(how(
         '<b>The employee</b>, who asks questions in a conversation in our chat page and opens the sources '
         'of each answer. Example: Asha, a support engineer.',
         '<b>Us, the assistant.</b> We keep a searchable copy of the company\'s documents with their '
         'permissions, and answer from it. Because we hold a copy of every document, a company must trust us '
-        'with them: our staff reach it only through audited emergency access, and a company with machines of '
-        'its own can hold the key that encrypts its copy.',
+        'with them: our staff reach it only through audited emergency access, and when no other company '
+        'shares its machines, a company can also hold the key that encrypts its copy.',
         '<b>The model provider</b>, which rents us the language model that writes answers and a small, fast '
         'model that rewrites questions. Models read and write <b>tokens</b>, word fragments about three '
         'quarters of a word long, and providers bill by the token. By contract, no provider keeps our prompts '
@@ -84,12 +86,15 @@ def body(fig):
         '<b>The identity provider</b>, which says who is in which group and pushes every change to us over '
         'SCIM, the standard protocol for that. Example: Okta.',
         '<b>The source systems</b>, where people edit documents and set their permissions, and which tell us '
-        'about changes: the company\'s wiki, drive, ticket tracker and chat tool.'))
+        'about changes: the company\'s wiki, drive, ticket tracker (Jira, whose issues this page calls '
+        'tickets) and chat tool.'))
     B.append(tx('<b>Exact gates, approximate middle.</b> A <b>turn</b>, one question and its answer, passes '
                 'two gates, and both are rules checked against our records, so neither guesses. The first '
                 'works on <b>chunks</b>, pieces of up to 480 tokens cut from a document. Before the model sees '
                 'anything, every chunk goes through the <b>final check</b>, a query that asks our metadata '
-                'database whether our records let the employee read it. The second gate works after the model '
+                'database whether our records let the employee read it. That relational database holds each '
+                'document\'s chunk list and permissions. The check is final because it runs last, after '
+                'searches that also filter by her permissions but may lag. The second gate works after the model '
                 'writes: a citation reaches her only if it names a chunk we gave the model. Everything between '
                 'the gates is a best guess, scored and never guaranteed: which chunks are relevant, how fresh '
                 'an edit is, how the answer is worded, and whether a cited chunk supports its sentence.'))
@@ -98,8 +103,11 @@ def body(fig):
                 'and each document\'s permissions are copied to us as lists of them. Chunks are found by their '
                 'words and by their meaning: an <b>embedding model</b> turns text into a vector of 1,024 '
                 'numbers, and similar meanings get nearby vectors. A <b>reranker</b>, a small model on our '
-                'GPUs, scores how well a chunk answers a question, and the large model writes from the best 8. '
-                'The diagram follows a conversation\'s first turn.'))
+                'GPUs, scores how well a chunk answers a question, and the large model writes from the best 8, '
+                'marking each sentence with the chunk it used. The <b>citation checker</b>, another small model '
+                'on our GPUs, checks each citation as the answer streams, and a <b>question classifier</b>, one '
+                'more, sorts each question by kind as it arrives. The diagram follows a conversation\'s first '
+                'turn.'))
     B.append(fig(0))
     B.append(tx('<b>Other turns, other endings.</b> A follow-up first goes to the rewrite model, which makes '
                 'it stand alone: about 0.4 s more. When no chunk she may read answers well enough, she is told '
@@ -117,12 +125,16 @@ def body(fig):
         'Keep up with the sources: once we hear of a change, an edit is searchable within 5 minutes, and a '
         'delete or a removed permission is honoured within a minute.',
         'Keep answer quality checked as documents, models and prompts change.'))
-    B.append(tx('It must keep answering when a model provider slows down, rate-limits or fails; survive the '
-                'loss of a <b>zone</b>, one of a cloud region\'s separate data centres; keep working while a '
-                'source\'s API limits our connectors; be available 99.9% of the time, about 43 minutes of '
-                'downtime a month, which is enough because employees can still open their documents directly; '
-                'treat instructions inside documents as text, never as orders; and keep each company\'s '
-                'documents inside the area it chose, such as the EU.'))
+    B.append(how(
+        'It must keep answering when a model provider, outside our control, slows down, rate-limits or '
+        'fails.',
+        'It must survive the loss of a <b>zone</b>, one of a cloud region\'s separate data centres.',
+        'It must keep working while a source\'s API limits our <b>connectors</b>, the programs that read the '
+        'sources.',
+        'It must be available 99.9% of the time, about 43 minutes of downtime a month; more is not needed, '
+        'because employees can still open their documents directly.',
+        'It must treat instructions inside documents as text, never as orders, and keep each company\'s '
+        'documents inside the area it chose, such as the EU.'))
     B.append(table(['number', 'how', 'what it decides'], [
         ['RAM for the vectors', '10 million documents × 10 chunks (an average document is about 4,500 '
          'tokens) = 100 million vectors of 1,024 numbers. At 4 bytes a number that is 410 GB; with the graph '
@@ -166,7 +178,8 @@ def body(fig):
          'few chunks into the prompt, and a rented <b>model</b> answers from them. A deleted document simply '
          'stops being found, and every fact has a source.'
          + vs('<b>Retrieval, not fine-tuning.</b> Fine-tuning teaches a tone or a format, not facts that '
-              'change every week.')
+              'change every week. Retrieval costs a search index and about 4,000 extra prompt tokens an '
+              'answer.')
          + vs('<b>Renting the model, not hosting an open one.</b> An open 70-billion-parameter model needs '
               'about 120 GPUs at our peak, about $50,000 a week, against about $60,000 rented. That saves '
               'little, and buys a model that follows citation instructions less well and a team to run it.')],
@@ -187,10 +200,11 @@ def body(fig):
          'ticket OPS-2291 finds similar tickets, not the one it names.',
          'The <b>search index</b> searches both ways: by vector, with <b>HNSW</b> (a graph that finds near '
          'neighbours without comparing against every vector), and by keyword, with <b>BM25</b> (the standard '
-         'score for how well words match), and merges the two lists by rank. The <b>embedding model</b> runs '
-         'on our <b>GPU pool</b>.'
+         'score for how well words match), and merges the two lists by rank. The <b>embedding model</b>, run '
+         'on our <b>GPU pool</b>, embeds each chunk once, at ingest, and each question as it arrives.'
          + vs('<b>Hybrid, not keyword search alone.</b> Keywords find exact codes at once, but "roll my '
-              'signing credentials" shares no word with "rotate the key".')],
+              'signing credentials" shares no word with "rotate the key". Hybrid costs two searches a '
+              'question and a fusion step.')],
         ['<b>F4. Put the best few chunks in front of the model</b>',
          'Take the top 8 of the merged list.',
          'The first ranking is fast but approximate: the chunk that answers is often 15th or 30th.',
@@ -209,8 +223,8 @@ def body(fig):
          'A small <b>rewrite model</b> turns a follow-up into a standalone question, a <b>question '
          'classifier</b> decides which turns need it, and older turns become a rolling summary in the '
          '<b>conversation store</b>.'
-         + vs('<b>A rewrite call, not the new turn joined to the previous question.</b> Joining is free, and '
-              'is our fallback, but a follow-up that changes subject then searches for the wrong thing.')],
+         + vs('<b>A rewrite call, not the new turn joined to the previous question.</b> Joining is free, adds no 400 '
+              'ms, and is our fallback, but a follow-up that changes subject then searches for the wrong thing.')],
         ['<b>F6. Show each employee only what she may read</b>',
          'Search everything, then drop what she cannot open; or tell the model not to reveal it.',
          'For someone who may read 4% of the index, dropping afterwards leaves 2 or 3 of the best 50. And a '
@@ -228,7 +242,14 @@ def body(fig):
          'Models write plausible links that do not exist, or attach a real document to a sentence it does '
          'not support.',
          'Let a citation name only a chunk we sent; a <b>citation checker</b> checks each sentence before '
-         'its citation is shown; abstain when the reranker\'s best score is too low (Part 2).'],
+         'its citation is shown; abstain when the reranker\'s best score is too low (Part 2).'
+         + vs('<b>An entailment model, not a second large-model call, to check citations.</b> A second call '
+              'judges support a little better, but it doubles the cost of every answer and adds seconds; the '
+              'entailment model, which says whether one text supports another, takes about 15 ms a sentence.')
+         + vs('<b>A score check before the call, not the model\'s own "I don\'t know".</b> A model told to '
+              'refuse still answers from chunks only near the subject, and each such call costs 2.4 cents; '
+              'the reranker\'s score refuses before any token is paid for, at the cost of some answerable '
+              'questions refused.')],
         ['<b>F8. Notice every change in the sources</b>',
          'Re-crawl every document every night.',
          'Answers are up to a day old, 10 million fetches a night hit every source\'s API limits, and a '
@@ -289,8 +310,7 @@ def body(fig):
         ['<b>N6. 100 million chunks, 50 questions a second, and a machine or zone failing</b>',
          'Shard full-precision vectors across enough nodes to hold them in RAM, one copy of each.',
          'About 465 GB fills 6 nodes for one copy, and losing a zone loses all of it.',
-         'One byte per number in RAM, full vectors on SSD for rescoring; 4 shards by document id, 3 copies, '
-         'one per zone.'
+         'As in the requirements table: one byte a number in RAM, 4 shards × 3 copies.'
          + vs('<b>HNSW at one byte, not four bytes and not IVF-PQ.</b> Four bytes need 18 nodes, not 12. '
               'IVF-PQ compresses vectors into clusters and fits one machine, but loses more recall and its '
               'clusters go stale until a rebuild; HNSW takes inserts and deletes as they come.')],
@@ -323,6 +343,7 @@ def body(fig):
                 '(SSE) on the same connection: one response that stays open while the server writes small '
                 'named events into it. Buffering is off for this path, so no proxy delivers the stream in '
                 'lumps.'))
+    B.append(tx('Three rules hold for every call:'))
     B.append(how(
         '<b>Who she is.</b> She signs in through the company\'s single sign-on, and every call carries her '
         'session. Her principals come from our records, never from the request. Once the identity provider '
@@ -354,15 +375,16 @@ event: done       data: {"mode": "answer", "usage": {"input_tokens": 5187, "outp
                 'change log, and every night we re-read every group.'))
     B.append(fu(
         ('The connection drops after 60 words. What happens to the turn, and what does the browser do?',
-         'The turn runs on and is saved. Since an answer lasts only about 6.6 seconds, the browser does not '
-         'resume the stream but asks <code>GET .../messages/m_77</code> every 2 seconds until the turn\'s '
+         'The turn runs on and is saved. The browser does not resume the stream; it asks <code>GET .../messages/m_77</code> every 2 seconds until the turn\'s '
          'status leaves <code>generating</code>. A turn has 60 seconds; at the deadline it is saved as '
          'failed.'),
         ('She presses stop, or closes the tab. What happens to the bill?',
          'Stop cancels the model call, and output tokens are billed as they are produced, so the bill stops '
          'there. A closed tab looks like a dropped connection, so that turn runs on: at most 1.5 cents more.')))
     B.append(tx('Each source has its quirks. A deleted wiki page or ticket never appears in its change '
-                'list, so a delete webhook is confirmed with the source at once; the drive has a change list '
+                'list, so a delete webhook is confirmed with the source at once, and those change lists are also '
+                'read every 3 minutes, from 10 minutes before the cursor, in case the list lags a save. The '
+                'drive has a change list '
                 'per user and per shared drive, about 100,000, too many to read on a timer, so a lost doorbell '
                 'there waits for the <b>daily sweep</b>, which re-reads every container\'s permissions and '
                 'every live document id. A <b>weekly crawl</b> compares every document\'s version and checksum '
@@ -418,7 +440,8 @@ event: done       data: {"mode": "answer", "usage": {"input_tokens": 5187, "outp
          'which its two other copies cover.'),
         ('How are small companies packed?',
          'A shared cell has the same 12 nodes and holds about 10 million documents: say, a hundred companies '
-         'of 100,000 documents each, each with its own one-shard index and its share of the ingest workers. A '
+         'of 100,000 documents each, each with its own one-shard index, which can be moved, rebuilt or deleted '
+         'alone and which no filter bug can mix with another\'s, and its share of the ingest workers. A '
          'company that passes about a million documents moves to its own cell.')))
 
     # ================================================================ Part 2
@@ -493,7 +516,9 @@ WHERE c.chunk_id = ANY(:top20) AND d.state = 'LIVE' AND d.allow_sets &gt;= 1
                 'that no fetch commits over one that started later. The database commit checks it, and on the '
                 'index every write carries the ticket as its version, so the index itself refuses a write whose '
                 'number is not higher than the record\'s. Worker A holds ticket 41 and B ticket 42, so A\'s late '
-                'write is refused in both places.'))
+                'write is refused in both places. <b>A ticket we take, not the source\'s version:</b> the '
+                'source\'s version is free, but a permission change often does not raise it, and each source '
+                'writes its versions in its own form, so no one rule could order them.'))
     B.append(fig(4, 'The middle lane is a wiki page\'s worst case, a lost doorbell: still under 5 minutes.'))
     B.append(fold('The fetch ticket as SQL', 'if they push deeper', sql('''-- before fetching doc_91: take a ticket
 UPDATE docs SET fetch_next = fetch_next + 1, fetched_at = now()
@@ -511,9 +536,10 @@ WHERE doc_id = 'doc_91' AND applied_fetch &lt; 42;                    -- 0 rows:
                 'writes at its next <b>refresh</b>, every 10 seconds; meanwhile the old step 3 cannot appear, '
                 'because its chunk rows are gone and the final check drops them: missing, never wrong. When only '
                 'a document\'s sharing changes, its chunk records are rewritten from object storage without '
-                'embedding.'))
-    B.append(tx('A document fetched less than 30 seconds ago waits on a <b>delay topic</b>, so a busy page '
-                'never holds up the queue; long scans have a <b>large-file topic</b>, and a new company\'s bulk '
+                'embedding. A delete is immediate at the gate: one transaction marks the document deleted and '
+                'removes its chunk rows, so the final check drops them that second, and the index deletes '
+                'follow within seconds.'))
+    B.append(tx('A document fetched less than 30 seconds ago waits on a <b>delay topic</b>; long scans have a <b>large-file topic</b>, and a new company\'s bulk '
                 'load a <b>backfill topic</b>. A change event is dropped when a fetch that began after it has '
                 'already finished.'))
     B.append(wl('a worker that commits, then pauses before its index writes, can still land a write late, on '
@@ -577,13 +603,14 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
     # ---------------------------------------------------------------- turn four
     B.append(h2('s-turn', 'Turn four: understanding the question, packing the prompt, and what runs beside what'))
     B.append(tx('<b>The problem.</b> At 14:23:40 Asha sends turn 4: "and for admin keys?". Searched as typed, '
-                'it has no subject. Her conversation holds about 1,300 tokens after three turns and grows about '
+                'it has no subject, and finds the admin console guide and an onboarding page. Her conversation holds about 1,300 tokens after three turns and grows about '
                 '420 a turn, to about 4,700 by turn 12, so sending all of it would keep inflating the prompt. And '
                 'every step before the model adds to her wait for the first word.'))
     B.append(tx('<b>The fix</b> is conversational query rewriting: the rewrite model turns the new turn plus '
                 'the conversation into a standalone question, "How do I rotate admin API signing keys?", which '
                 'the chat page shows as "Searched for: ...". A rolling summary keeps the conversation at a fixed '
-                'size, and the prompt is packed to a fixed budget in a fixed order. Only the searches wait for '
+                'size, and the prompt is packed to a fixed budget in a fixed order; after each answer, the rewrite '
+                'model folds the turn before it into the summary. Only the searches wait for '
                 'the rewrite; everything else runs beside it.'))
     B.append(fig(6))
     B.append(fig(7, 'Widths are drawn to scale. Over budget, cut in this order: shrink the summary, drop the '
@@ -596,9 +623,7 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
                 'keyword search.'))
     B.append(tx('The conversation is permission-checked too: before the rewrite model reads it, every document '
                 'the previous turn or the summary held is checked against her permissions again, and a turn '
-                'that held one she may no longer read is left out. The summary and the previous turn enter the '
-                'prompt inside a <code>&lt;history&gt;</code> tag, escaped like the chunks, because an answer '
-                'can repeat an instruction hidden in a document. The rewrite answers in about 400 ms; after a '
+                'that held one she may no longer read is left out. The rewrite answers in about 400 ms; after a '
                 '900 ms timeout, the search uses the new turn joined to the previous rewritten question.'))
     B.append(wl('a wrong rewrite retrieves the wrong documents, confidently. She sees what was searched and can '
                 'rephrase, and wrong rewrites are counted from thumbs-down. The summary is lossy too: "the '
@@ -625,7 +650,8 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
                 'days"). The model writes "The old key keeps working for 7 days [1]", marking the runbook, which '
                 'does not say it.'))
     B.append(tx('<b>The fix</b> is grounded generation with checked citations. The chunks are numbered in the '
-                'prompt, and the model marks every factual sentence with the number of the chunk it used. As '
+                'prompt, and the model marks every factual sentence with the number of the chunk it used, or two numbers when it '
+                'joins two chunks. As '
                 'each sentence ends, the orchestrator strips its markers and asks the citation checker whether '
                 'those chunks support it.'))
     B.append(fig(8, 'Times from her question at 14:24:48; a follow-up, so the rewrite adds about 0.4 s before '
@@ -641,7 +667,9 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
                 'Before calling the model, the assistant can also <b>abstain</b>: if the best raw reranker score '
                 'among the chunks that passed the final check is below 0.30, the model is not called, and she '
                 'is told "I couldn\'t find this in documents you can access", with the three closest matches '
-                'as links.'))
+                'as links. An answer from the answer cache keeps only its citations\' chunk ids; an unchanged '
+                'chunk keeps its id across versions, so each cited id is one this question\'s final check has '
+                'just returned, with its current version and span.'))
     B.append(wl('the check says only that a chunk supports the sentence, not that the chunk is right. Here the '
                 're-attribution works: "7 days" goes to the 2023 guide, with its date, so the answer is honestly '
                 'sourced and still out of date. The model, shown each chunk\'s date, is told to prefer the newer '
@@ -649,7 +677,9 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
     B.append(fu(
         ('How is the 0.30 threshold set, and what if it refuses too often?',
          'On the golden set\'s answerable and unanswerable questions: 0.30 is the lowest score that refuses '
-         'most unanswerable ones while answering about 95 in 100 answerable ones. A jump in abstains usually '
+         'most unanswerable ones while answering about 95 in 100 answerable ones. The 0.5 citation threshold, '
+         'set the same way, passes about 2 in 100 unsupported sentences and rejects about 5 in 100 supported '
+         'ones. A jump in abstains usually '
          'means retrieval broke, and every abstained question is logged as a gap in the documents.'),
         ('A sentence carries no marker at all. What happens?',
          'The checker also marks which sentences make a claim, so greetings and "here are the steps" need no '
@@ -701,7 +731,9 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
                 'in 100 to 8, while the other 95% stay at 3. Nothing errors anywhere.'))
     B.append(tx('<b>The fix</b> is an evaluation in three checks. First, the old and new versions answer the '
                 '<b>golden set</b>\'s labelled questions offline, in pairs. Second, a change that needs a new '
-                'index gets a <b>shadow run</b>: 5% of real questions are also answered on it, unseen. Third, a <b>canary</b> gives the '
+                'index gets a <b>shadow run</b>: 5% of real questions are also answered on it, unseen, for two days, and compared on citation '
+                'failures, abstains, first word and cost. The new chunker passed that too: a shadow run collects '
+                'no thumbs-down, and the cut code blocks moved none of the signals it compares. Third, a <b>canary</b> gives the '
                 'change to 5% of conversations for a day and rolls it back automatically when a signal passes '
                 'its limit, overall or in any tracked slice, as it did to this chunker at 16:00.'))
     B.append(fig(10))
@@ -752,15 +784,15 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
                 'its zones sit about a millisecond apart. Each company chooses a wider area for its data, such '
                 'as the EU. Its cell runs across three zones of one region in that area and keeps its backups in '
                 'a second region there, such as Paris, so its text never leaves the area, not even in a prompt '
-                'to the fallback provider. One region is enough at 99.9%: a second live region would double the '
+                'to the fallback provider. Those area-pinned endpoints cost about a tenth more per token, so an '
+                'answer costs about 2.3 cents after caching, not 2.1. One region is enough at 99.9%: a second live region would double the '
                 'cost to save hours in a rare regional outage.'))
     B.append(tx('A commit to the metadata database waits until one of its two copies has it. The identity '
                 'provider is the reason: we answer its SCIM call only after the commit, and after our answer it '
                 'never sends that change again, so the commit must survive the loss of the primary.'))
     B.append(fig(12))
     B.append('<h3 class="sub">In a network split: only the final check refuses</h3>')
-    B.append(tx('Sometimes the network splits and two groups of machines cannot reach each other: a <b>network '
-                'partition</b>. The CAP theorem says that during one, each part must choose <b>consistency</b>, '
+    B.append(tx('In a <b>network partition</b>, two groups of machines cannot reach each other. The CAP theorem says that during one, each part must choose <b>consistency</b>, '
                 'where every read sees the latest committed truth, or <b>availability</b>, where every request '
                 'gets an answer, perhaps a stale one.'))
     B.append(table(['part', 'chooses', 'what employees see when only this part is cut off'], [
@@ -796,14 +828,13 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
         ['the GPU pool, or one of its models', 'No embedding model: keyword search only. No reranker: fusion '
          'order, and no abstaining. No citation checker: citations marked "not checked".', 'minutes'],
         ['one index node', 'nothing; two other copies answer', 'about 35 minutes to copy the shard from a peer'],
-        ['the whole index, corrupted', 'no answers', '1 to 1.5 hours from the last snapshot and the stored '
-         'vectors'],
+        ['the whole index, corrupted', 'no answers', '1 to 1.5 hours: restore the 6-hourly snapshot, then '
+         'rewrite what changed since from the stored vectors'],
         ['the metadata database\'s primary', 'about 30 s of "I can\'t check permissions right now"', 'about '
          '30 s, promoting the copy that holds every acknowledged commit'],
         ['Redis', 'principal lists come from the database; no answer cache', 'seconds'],
         ['a source\'s API, or the identity provider', 'that source\'s edits wait; without the identity '
          'provider, no one can sign in, but signed-in employees keep asking', 'when it recovers'],
-        ['a whole zone', 'seconds of retries', 'seconds to 30 s'],
         ['the cell\'s whole region', 'no answers; employees open documents in their sources', 'hours: restore '
          'in the second region and build the index from the stored vectors'],
     ]))
@@ -912,7 +943,8 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
            'each company\'s work in turn.'),
         qa('An employee loses access to a document an old answer of hers cited. What does she see?',
            'The text stays in her history, but each citation is checked again when the conversation is shown: '
-           'one she may no longer read loses its link and says "source no longer available to you", and that '
+           'one she may no longer read loses its link and says "source no longer available to you", one edited '
+           'since still links, marked "changed since", and that '
            'turn is never carried into a new prompt. A legal delete redacts the text itself.'),
     ])))
     return ''.join(B)
