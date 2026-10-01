@@ -2,7 +2,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 // The 15-minute version everybody writes first: one class does everything. It works for one
-// rule on one server. The design on this page is what each interviewer push turns it into.
+// rule on one server. The design on this page is what eight hard questions about it turn it into.
 class FirstCutLimiter {
     private final Map<String, double[]> buckets = new HashMap<>();   // client -> {tokens, last}
 
