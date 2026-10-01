@@ -19,50 +19,46 @@ def step(id_, group, nav, title, body, minutes=None, opt=False, stage=None):
     return d
 
 
-def thinking(w, text):
-    """Why this step's code is written the way it is, in a short paragraph."""
-    return w.md('**The thinking.** ' + text)
-
-
 def hour(w, text):
     """What of this step to type in a 60-minute round."""
     return w.md('*In the hour:* ' + text)
 
 
 CONFIG_YAML = '''
-plans:                          # a plan belongs to the customer and carries its limits
-  FREE: { rate: 5 per second,  daily: 10,000 }
-  PRO:  { rate: 50 per second, daily: 1,000,000 }
+plans:                                # a plan belongs to the customer and carries its limits
+  FREE: { rate: 5 per second,  daily: 10000 per day }
+  PRO:  { rate: 50 per second, daily: 1000000 per day }
 
-rules:                          # checked in this order; a request needs every rule that covers it
-  - name: rate                  # each customer's speed
-    covers: requests with an API key
+rules:                                # checked in this order; a request must pass every rule
+                                      # that matches it
+  - name: rate                        # each customer's speed
+    match:     { caller: customer, endpoint: "*" }
     count_per: customer
-    limit: plan.rate
-    algorithm: token_bucket     # a burst, then a steady rate
+    limit:     { from_plan: rate }
+    algorithm: token_bucket           # a burst, then a steady rate
 
-  - name: daily                 # each customer's allowance for the day
-    covers: requests with an API key
+  - name: daily                       # each customer's allowance for the calendar day
+    match:     { caller: customer, endpoint: "*" }
     count_per: customer
-    limit: plan.daily
-    algorithm: fixed_window     # a calendar day (UTC)
+    limit:     { from_plan: daily }
+    algorithm: fixed_window
 
-  - name: search                # search is expensive
-    covers: /search, with an API key
-    count_per: customer + endpoint
-    limit: 2 per second
+  - name: search                      # search is expensive: its own budget
+    match:     { caller: customer, endpoint: /search }
+    count_per: customer_and_endpoint
+    limit:     { fixed: 2 per second }
     algorithm: token_bucket
 
-  - name: login                 # stops password guessing
-    covers: /login              # no API key yet: the user is signing in
+  - name: login                       # stops password guessing
+    match:     { caller: any, endpoint: /login }   # no API key yet when signing in
     count_per: ip
-    limit: 5 per minute
-    algorithm: sliding_window_log   # exact: never 6 in any 60 seconds
+    limit:     { fixed: 5 per minute }
+    algorithm: sliding_window_log     # exact: never 6 in any 60 seconds
 
-  - name: global                # protects the servers
-    covers: every request
+  - name: global                      # protects the servers
+    match:     { caller: any, endpoint: "*" }
     count_per: everyone
-    limit: 1,000 per second
+    limit:     { fixed: 1000 per second }
     algorithm: token_bucket
 '''
 
@@ -115,8 +111,11 @@ def problem(w):
         ''')
         + w.snippet(CONFIG_YAML, label='rate-limits.yaml', kind='yaml')
         + w.md('''
-        A request passes only if **every rule that covers it** allows it, and a refused request
-        spends nothing anywhere. The design must take a new rule as a new config line.
+        Each rule is four answers: **which requests** it matches (the kind of caller, and an
+        endpoint or `"*"` for all), **whose budget** they spend, **how much** (fixed, or from the
+        customer's plan), and **how** they are counted. A request passes only if every rule that
+        matches it allows it, and a refused request spends nothing anywhere. A new limit must be a
+        new entry here, with no code changed.
 
         ## What the hour holds
 
@@ -369,174 +368,171 @@ def counting(w):
 
 
 # ==================================================================================== design
-# The design is thought through in branches: start at the door, list what the limiter needs
-# (breadth first), then take each branch down (depth first) and come back. Each branch is a piece
-# of text used by both variants: whole in the merged walk, and in the design step of the other.
+# The design is thought through in branches, and each branch is typed as soon as it is decided:
+# start at the door, list what the limiter needs (breadth first), take each branch down (depth
+# first) and come back. Every branch reads the same way: the question, the options weighed, the
+# decision, the diagram so far, then the code, explained in its comments.
+def branch(w, question, options, decision):
+    """The thinking for one branch: the question, the options weighed, what we choose."""
+    opts = '\n'.join('- ' + ' '.join(o.split()) for o in options)
+    return (w.md('**The question.** ' + question)
+            + w.md('**The options.**\n\n' + opts)
+            + w.md('**The decision.** ' + decision))
+
+
 def think_door(w):
-    return w.md('''
-        A request arrives at the score API: fantasy-app's `GET /search?q=kohli`. Before any work,
-        something must decide: go ahead, or answer 429 now.
-
-        **Where does the check live?** Inside each endpoint, every endpoint must remember to call
-        it. In one filter in front of all of them, none can forget. → a filter, `RateLimitFilter`.
-
-        **What does the filter need back?** A yes or no is not enough: a refused customer must hear
-        when to retry, and which limit it hit. → a small record, `RateLimitResult`.
-
-        **What does it pass in?** Everything any limit could depend on: the customer
-        (authentication has already turned the API key into an id; there is none before sign-in),
-        the IP and the endpoint. → a record, `Request`.
-
-        **Who answers?** The filter should not know how the answer is worked out, so the question
-        is an interface with one method, `RateLimiter.check(request)`. The interviewer's
-        `rateLimit(customerId)` becomes a one-line default on it.
-        ''')
+    return branch(w,
+        '''A request arrives at the score API: fantasy-app's `GET /search?q=kohli`. Before any work,
+        something must decide: go ahead, or 429 now. Where does that check live, what goes in, and
+        what comes out?''',
+        ['**A check inside each endpoint:** simple, but every endpoint must remember it, and one '
+         'that forgets is unprotected.',
+         '**One filter in front of every endpoint:** nothing can forget it. ✓',
+         '**It answers a boolean:** too little. A refused customer must hear when to retry and '
+         'which limit it hit.',
+         '**It answers a small result record:** allowed, retry-after, the rule. ✓'],
+        '''A `RateLimitFilter` at the door asks one question, through an interface it can never see
+        behind: `RateLimiter.check(request)`. The `Request` record carries everything a limit could
+        depend on: the customer (authentication has already turned the API key into an id; none
+        before sign-in), the IP and the endpoint. The answer is a `RateLimitResult` record. The
+        interviewer's `rateLimit(customerId)` stays, as a one-line default.''')
 
 
 def think_limiter(w):
-    return (w.md('''
-        Read the config again. A request is usually covered by **several rules at once**:
-        fantasy-app's search is covered by `rate`, `daily`, `search` and `global`. So the limiter
-        finds the rules that cover the request, asks each, and lets it through only if all agree.
-
-        Before going deep anywhere, list everything it needs, **breadth first**, so nothing is
-        forgotten:
-
-        1. **the rules**: what one is, and which cover a request → branch 1
+    return (branch(w,
+        '''Look at the config: one request is usually matched by **several rules at once**:
+        fantasy-app's search is matched by `rate`, `daily`, `search` and `global`. What must the
+        limiter do with them, and what does it need for that?''',
+        ['**Ask every rule first, then take a token from each:** between the asking and the '
+         'taking, another thread can take the same token.',
+         '**Ask and take all of them under one lock:** correct, but the whole API waits on that '
+         'one lock.',
+         '**Take as you go; if a later rule refuses, give back what the earlier ones took:** '
+         'all or nothing, with a lock only per counter. ✓ (A token given back a moment late may '
+         'already have been refused to someone else: acceptable.)'],
+        '''The limiter walks the rules in order and lets the request through only if every rule that
+        matches it allows it. Before going deeper, list everything that needs, **breadth first**:''')
+        + w.md('''
+        1. **the rules:** what one is, and which ones match a request → branch 1
         2. for each rule, **how much** it allows → branch 1a, under the rules
         3. for each rule, **what has been counted**, and how → branch 2
         4. **where** those counts live, shared by every thread → branch 3
-        5. **the time**, one instant for every rule → handed in: `Clock`
-        6. **a later rule refuses** after earlier ones took a token → decide now
-
-        Two things are decided here. **Item 6:** ask every rule first and take afterwards? Between
-        the asking and the taking, another thread can take the same token. Ask and take under one
-        lock around everything? Then the whole API waits on one lock. So take as you go, and when
-        a rule refuses, **give back** what the earlier ones took: all or nothing. (A token given
-        back a moment late may already have been refused to someone else; that is acceptable.)
-        **The order of the rules:** the `global` counter is shared by every request, the busiest
-        lock in the system, so it goes last, where only requests every other rule allowed reach it.
-        And a request no rule covers simply passes.
+        5. **the time**, one instant for every rule → handed in, as a `Clock`
+        6. **the order** of the rules: `global`'s one counter is shared by every request, the
+           busiest lock in the system, so it goes last, where only requests every other rule
+           allowed reach it
 
         Now write the loop with names that do not exist yet. Each one is a branch to take next:
         ''')
         + w.snippet('''
 for (RateLimitRule rule : rules) {                       // branch 1: the rules
-    if (!rule.covers(request)) continue;
+    if (!rule.matches(request)) continue;
     Limit limit = rule.limits().limitFor(request);        // branch 1a: how much
     Counter counter = counters.counterFor(rule.keyFor(request), limit,   // branch 3: where
                                           rule.algorithm(), now);
     Decision d = counter.tryAcquire(now);                 // branch 2: counting
-    if (!d.allowed()) { refund the earlier counters; return refused; }   // item 6
+    if (!d.allowed()) { refund the earlier counters; return refused; }   // all or nothing
     charged.add(counter);
-}''', label='RuleBasedRateLimiter.check, first draft')
-        + w.md('→ `RuleBasedRateLimiter`, `Clock`.'))
+}''', label='RuleBasedRateLimiter.check, first draft'))
 
 
 def think_rules(w):
-    return w.md('''
-        Take one rule from the config and read off its parts:
-
-        - **what it covers**: an endpoint (or every endpoint), and whether the request must carry
-          an API key. Two plain fields and a `covers(request)` method.
-        - **whose budget it spends**: the customer, the IP, the customer on this endpoint, or
-          everyone. Four fixed answers: a plain **enum**, `CountPer`. The counter's key is the
-          rule's name plus that answer, built with a `switch`: `rate:fantasy-app`,
-          `login:203.0.113.7`.
-        - **how much**: the config has two kinds of answer, so it is the next branch down.
-        - **how it counts**: the config names an algorithm: a plain **enum**, `Algorithm`; its
-          branch comes after.
-
-        **Plain fields, or a lambda per rule?** A `Predicate` would cover anything, but nobody can
-        read it, print it or load it from a file. Plain fields mirror the config line for line. →
-        a **record**, `RateLimitRule`.
-
-        **Where do the five rules come from?** One class that is the config in code, a line per
-        rule, in the order they are checked: `ScoreApiRules`. Loading the YAML file later changes
-        that class and nothing else.
-        ''')
+    return branch(w,
+        '''What is one rule? Read one entry of the config: it has a name, a `match`, a `count_per`,
+        a `limit` and an `algorithm`. How do those become types?''',
+        ['**A `Predicate<Request>` per rule:** matches anything, but nobody can read it, print it '
+         'or load it from the file.',
+         '**Plain values that mirror the config:** ✓ `match` is a small record of the caller kind '
+         '(customer, or anyone) and the endpoint (`"*"` for all); `count_per` is a plain enum with '
+         'four answers.',
+         '**Whose budget as a string field:** typos become silent bugs. **As an enum:** the '
+         'compiler knows every case, and the key is built with a `switch`. ✓'],
+        '''A `RateLimitRule` record holds a `Match` (with a `Caller` enum), a `CountPer` enum, a
+        `LimitPolicy` (branch 1a) and an `Algorithm` (branch 2). The counter's key is the rule's
+        name plus whose budget it is: `rate:fantasy-app`, `login:203.0.113.7`. `ScoreApiRules` is
+        the config in code, an entry per rule in the same order; loading the YAML file later
+        replaces that one class.''')
 
 
 def think_limits(w):
-    return w.md('''
-        The config has two kinds of answer: a fixed number (`search: 2 per second`), or whatever
-        the customer's plan says (`rate: plan.rate`, `daily: plan.daily`).
-
-        **Where do plan limits live?** In each rule (`rate` lists FREE 5 and PRO 50, `daily` lists
-        its own two), or on the plan? A plan is something the customer has, and it carries its
-        limits: a new plan, ENTERPRISE, should be one new line, not an edit to every rule. → an
-        **enum**, `Plan`, with its `rate` and `daily`, and `Customers`: who is on which plan.
-
-        **The rule should not care which kind it has.** One method, "how much for this request?":
-        an **interface**, `LimitPolicy`, with two small classes, `FixedLimit` and `PlanLimit`. A
-        third kind later (per region, or per endpoint and plan) is a third class.
-
-        `Plan` is an enum today; when plans come from the YAML file, it becomes a record loaded at
-        startup, and nothing else changes. **Threads?** `Customers` is written by sign-ups and
-        upgrades while requests read it, so it is a `ConcurrentHashMap`. ↑ Back to the rule: it has its `LimitPolicy`. ↑ Back to the
-        limiter's list.
-        ''')
+    return branch(w,
+        '''How much does a rule allow? The config has two kinds of answer: a fixed number
+        (`search: 2 per second`), or whatever the customer's plan says (`rate: from_plan rate`).
+        Where do plan limits live, and how does a rule hold either kind?''',
+        ['**Plan limits inside each rule** (`rate` lists FREE 5 and PRO 50, `daily` lists its own '
+         'two): a new plan means editing every rule.',
+         '**On the plan:** a plan belongs to the customer and carries its limits; a new plan is '
+         'one line. ✓',
+         '**A flag on the rule, "fixed or from the plan", with an if:** the next kind of limit '
+         'adds another flag and another if.',
+         '**One interface, "how much for this request?", with a class per kind:** the rule never '
+         'knows which it holds (Strategy); a third kind is a third class. ✓'],
+        '''A `Plan` enum carries its `rate` and `daily` limits; `Customers` says who is on which
+        plan. `LimitPolicy` has two small classes: `FixedLimit` and `PlanLimit`. `Customers` is
+        written by sign-ups and upgrades while requests read it, so it is a `ConcurrentHashMap`.
+        ↑ Back to the rule, which now has its policy; ↑ back to the limiter's list.''')
 
 
 def think_counting(w):
-    return w.md('''
-        Each rule names how it counts, and [How to count](#counting) said which fits which: the
-        token bucket for `rate`, `search` and `global` (a burst, then a steady rate), the fixed
-        window for `daily` (a calendar day), the log for `login` (small, and exact).
-
-        The limiter must not care which one it holds: one **interface**, `Counter`, and a class
-        per way of counting (the **Strategy** pattern). It needs `tryAcquire(now)`, answering with
-        a small record `Decision` (allowed, or how long to wait), and, from item 6, `refund(now)`.
-
-        ↓ **Two threads on one counter at once?** Refill, check and take read the numbers, then
-        write them: two threads can both see the last token and both take it. An `AtomicLong`?
-        Two numbers change together (the tokens and the last refill time), and an atomic variable
-        guards one. So each counter's methods are `synchronized`: one lock per counter, so
-        different customers never wait on each other.
-
-        ↑ Back to the rule: its `algorithm` names which class to make. → `Algorithm`.
-        ''')
+    return branch(w,
+        '''How is one budget counted? Each rule names its algorithm, and
+        [How to count](#counting) said which fits which: the token bucket for `rate`, `search` and
+        `global` (a burst, then a steady rate), the fixed window for `daily` (a calendar day), the
+        log for `login` (small, and exact). How does the limiter use three different ones, and
+        what happens when two threads use one at once?''',
+        ['**A switch on the algorithm inside the limiter:** every new way of counting edits the '
+         'limiter.',
+         '**One interface with a class per way of counting:** the limiter only calls '
+         '`tryAcquire` and `refund` (Strategy). ✓ A factory with a plain switch makes the right '
+         'class for a rule\'s `Algorithm`: the one place that knows the list. ✓',
+         '**Two threads, one counter, no lock:** both read "1 token left", both take it.',
+         '**An `AtomicLong`:** guards one number, but two change together (the tokens and the '
+         'last refill time).',
+         '**`synchronized` on each counter:** refill, check and take become one step, and the '
+         'lock is per counter, so different customers never wait on each other. ✓'],
+        '''A `Counter` interface (`tryAcquire`, `refund`), answering with a small `Decision`
+        record; three classes, `TokenBucket`, `FixedWindowCounter` and `SlidingWindowLog`; an
+        `Algorithm` enum and a `CounterFactory`. ↑ Back to the limiter's list.''')
 
 
 def think_store(w):
-    return w.md('''
-        Back at the limiter's list, item 4. Each (rule, whose budget) needs its own counter, kept
-        between requests and shared by every request thread: a map from the key to its counter.
-
-        ↓ **Two threads meet a new customer at the same instant.** With `get`, then `put` if
-        missing, both see nothing, both create a counter, and the customer gets two budgets.
-        `ConcurrentHashMap.computeIfAbsent` finds, creates and stores as one step for that key.
-
-        ↓ **A customer upgrades to PRO.** The map still holds its 5-a-second bucket. Put the limit
-        in the key too, and the next request starts a fresh 50-a-second one; the old one sits
-        until the idle sweep ([Memory](#idle)).
-
-        **Who makes a new counter?** The store, from the rule's `Algorithm`, with a plain `switch`:
-        a simple factory. And the map sits behind an **interface**, `CounterStore`, because this is
-        the one thing that changes when ten servers must share one budget.
-        ''')
+    return branch(w,
+        '''Where do the counts live? Each (rule, whose budget) needs its own counter, kept between
+        requests and shared by every request thread. What holds them, and what goes wrong when two
+        threads meet a new customer, or a customer upgrades?''',
+        ['**A `HashMap` inside the limiter:** not safe for many threads, and the limiter would '
+         'decide where counts live, which is the one thing that changes with many servers.',
+         '**`get`, then `put` if missing:** two threads meeting a new customer both see nothing, '
+         'both create a counter: two budgets.',
+         '**`ConcurrentHashMap.computeIfAbsent`:** finds, creates and stores as one step for that '
+         'key. ✓',
+         '**The limit in the map\'s key:** a customer who upgrades gets a fresh 50-a-second '
+         'counter on the next request, instead of the old 5-a-second one. ✓'],
+        '''A `CounterStore` interface (Redis can replace it), and an `InMemoryCounterStore`
+        with a `ConcurrentHashMap`, which asks the `CounterFactory` for new counters.''')
 
 
 def think_back(w):
     return w.md('''
-        Every name in the loop now exists. Threads, end to end: the rules and the plans' limits are
-        set once and only read; `Customers` and the store are `ConcurrentHashMap`s; each counter
-        has its own lock; the limiter holds nothing that changes, so it needs no lock, and no thread
-        ever holds two locks, so nothing can deadlock.
+        ### ↑ Back to the limiter, then to the door
 
-        ↑ **Back at the door**, a refused result becomes 429 with Retry-After in whole seconds,
-        rounded up (a wait of 200 ms must not say 0), and the rule's name in a header.
+        Every name in the first-draft loop now exists, so the whole core compiles. Threads, end to
+        end: the rules and plans are set once and only read; `Customers` and the store are
+        `ConcurrentHashMap`s; each counter has its own lock; the limiter holds nothing that
+        changes, so it needs no lock, and no thread ever holds two locks, so nothing can deadlock.
         ''')
 
 
-BRANCHES = [  # (step id, heading, thinking); the step id is also the diagram's stage
-    ('door', '1 · A request arrives. What must happen first?', think_door),
-    ('limiter', '2 · ↓ What does the limiter have to do?', think_limiter),
-    ('rules', '3 · ↓ Branch 1: what is one rule?', think_rules),
-    ('limits', '4 · ↓↓ Branch 1a: how much?', think_limits),
-    ('counters', '5 · ↑↓ Branch 2: how is a budget counted?', think_counting),
-    ('store', '6 · ↑↓ Branch 3: where do the counts live?', think_store),
+BRANCHES = [  # (step id = diagram stage, nav, title)
+    ('door', 'The front door', '1 · A request arrives: what must happen first?'),
+    ('limiter', 'The limiter', '2 · ↓ What does the limiter do with many rules?'),
+    ('rules', 'The rules', '3 · ↓ Branch 1: what is one rule?'),
+    ('limits', 'How much', '4 · ↓↓ Branch 1a: how much does a rule allow?'),
+    ('counters', 'Counting', '5 · ↑↓ Branch 2: how is one budget counted?'),
+    ('store', 'Where counts live', '6 · ↑↓ Branch 3: where do the counts live?'),
 ]
+THINK = {'door': think_door, 'limiter': think_limiter, 'rules': think_rules,
+         'limits': think_limits, 'counters': think_counting, 'store': think_store}
 
 
 def grown(w, st):
@@ -549,12 +545,17 @@ def whole_design(w):
         ## The whole design
 
         Read it top to bottom as the questions you asked: **who asks** (the door), **who decides**
-        (the limiter, with what it is handed: the clock and the store), **what each rule checks**
-        (what it covers, whose budget, how much), and **how one budget is counted**. A hollow
+        (the limiter, with the clock and the store it is handed), **what each rule says** (which
+        requests, whose budget, how much, how counted), and **how one budget is counted**. A hollow
         triangle means "implements", a diamond "holds a list of", a plain arrow "uses".
         ''')
         + w.fig(figures.classes(), title='The core')
         + w.md('''
+        **The patterns, where they are:** Strategy twice (`Counter` for how to count,
+        `LimitPolicy` for how much), a simple Factory (`CounterFactory`), and the interfaces the
+        limiter is handed (`CounterStore`, `Clock`), which is what lets Redis or a hand-moved
+        clock drop in.
+
         ## One request through it
 
         fantasy-app, on PRO, sends its third search in the same second. The `rate` and `daily`
@@ -562,64 +563,45 @@ def whole_design(w):
         two tokens already taken, never asks `global`, and the door answers 429.
         ''')
         + w.fig(figures.journey(), title="fantasy-app's third search in one second")
-        + w.md('''
-        ## Where each new requirement will land
-        ''')
+        + w.md('## Where each new requirement will land')
         + w.table(['They add', 'It lands in', 'See'], [
-            ['a new limit, such as exports', 'one line in the config', '[A new rule](#newrule)'],
-            ['another way of counting', 'a new `Counter` class and one `case`',
+            ['a new limit, such as exports', 'one entry in the config', '[A new rule](#newrule)'],
+            ['another way of counting', 'a new `Counter` class and one `case` in the factory',
              '[More ways to count](#windows)'],
             ['a new plan', 'one line in `Plan`', '[Quick ones](#quick)'],
             ['a new way of setting limits', 'a new `LimitPolicy` class', '[Quick ones](#quick)'],
             ['many servers, one budget', 'a `CounterStore` on Redis', '[Many servers](#servers)'],
             ['a million quiet customers', 'a sweep in the store', '[Memory](#idle)'],
-        ])
-        + w.md('''
-        That table is the "extensible" the interviewer asked for: each kind of change has one place
-        to go.
-        '''))
+        ]))
 
 
 # ===================================================================================== build
-# Each build step: the code of one branch, why it is written that way, and what to type in the
-# hour. The merged variant puts the branch's thinking and the growing diagram first.
+# Each branch's code, right after its thinking: whole files, explained in their comments, plus
+# what to type in a 60-minute round.
 def code_door(w):
     return (w.code(['Request.java', 'RateLimitResult.java', 'RateLimiter.java',
                     'RateLimitFilter.java'])
-            + thinking(w, 'The filter depends only on the `RateLimiter` interface and knows nothing '
-                          'about rules; the limiter will know nothing about HTTP.')
             + hour(w, 'the three records and the interface; the filter only if there is time.'))
 
 
 def code_limiter(w):
-    return (w.md('Typed before its parts: it does not compile until the store exists, which is '
-                 'normal in the room.')
+    return (w.md('Typed before its parts, as you would in the room: it compiles once the store '
+                 'exists.')
             + w.code(['RuleBasedRateLimiter.java', 'Clock.java'])
-            + thinking(w, 'The rules, the store and the clock are handed in through the '
-                          'constructor, so a demo can hand in a clock it moves by hand and many '
-                          'servers can hand in a store on Redis, and this class never changes. One '
-                          'clock reading per request, so every rule judges the same instant. The '
-                          'refund loop is item 6: a refused request spends nothing anywhere.')
-            + w.xy([('Our own one-method `Clock`', '`java.time.Clock`', 'either works; ours is a '
-                     'lambda away from a hand-moved clock (`now::get`).')])
             + hour(w, 'all of it: this loop is the heart of the answer.'))
 
 
 def code_rules(w):
-    return (w.code(['RateLimitRule.java', 'CountPer.java', 'ScoreApiRules.java'])
-            + thinking(w, 'Read `ScoreApiRules` next to the YAML: one line per rule, in the same '
-                          'order, `global` last.')
-            + hour(w, 'the rule and `CountPer`; write two of the five config lines and say the rest.'))
+    return (w.code(['RateLimitRule.java', 'Match.java', 'Caller.java', 'CountPer.java',
+                    'ScoreApiRules.java'])
+            + hour(w, 'the rule, `Match`, `Caller` and `CountPer`; two config entries, and say the '
+                      'rest.'))
 
 
 def code_limits(w):
     return (w.code(['Limit.java', 'LimitPolicy.java', 'FixedLimit.java', 'PlanLimit.java',
                     'Plan.java', 'Customers.java'])
-            + thinking(w, 'A plan carries its limits, so a new plan is one enum line. `PlanLimit` '
-                          'says which of them a rule uses: the plan\'s rate or its daily allowance. '
-                          '`Customers` is written while it is read, so it is a '
-                          '`ConcurrentHashMap`; everything else here never changes after startup.')
-            + hour(w, '`Limit`, `LimitPolicy` and `FixedLimit`; say plans unless asked.'))
+            + hour(w, '`Limit`, `LimitPolicy` and `FixedLimit`; plans if there is time.'))
 
 
 def code_counting(w):
@@ -627,6 +609,7 @@ def code_counting(w):
             + w.md('The bucket on its own, told the time by hand: the walk-through from '
                    '[How to count](#counting).')
             + w.run('BucketDemo')
+            + w.md('Why the bucket\'s methods are `synchronized`, with one token left:')
             + w.pair(w.asc('''
 {r}✗ without synchronized{/}
 
@@ -649,21 +632,19 @@ def code_counting(w):
                      refused
   {g}✓ one token, one request{/}
 ''', 'good'))
-            + w.md('The other two ways our rules count, and the enum that names all three:')
-            + w.code(['FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java'])
+            + w.md('The other two ways our rules count, the enum that names all three, and the '
+                   'factory that makes them:')
+            + w.code(['FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java',
+                      'CounterFactory.java'])
             + w.run('CountingDemo')
-            + thinking(w, 'The bucket earns its tokens when a request arrives, not from a timer; '
-                          '`tokens` is a double so 120 ms keeps its 0.6. A lock rather than an '
-                          '`AtomicLong`, because two numbers change together.')
-            + hour(w, '`Counter` and `TokenBucket`; the window and the log only if asked.'))
+            + hour(w, '`Counter`, `TokenBucket`, `Algorithm` and the factory; the window and the '
+                      'log only if asked.'))
 
 
 def code_store(w):
     return (w.code(['CounterStore.java', 'InMemoryCounterStore.java'])
+            + w.md('16 threads meet a new customer at the same instant:')
             + w.run('StoreDemo')
-            + thinking(w, 'The key is a plain string on purpose: a customer today, an IP or a '
-                          'customer and endpoint for other rules. The limit in the key makes an '
-                          'upgrade start a new counter at once.')
             + hour(w, 'all of it.'))
 
 
@@ -676,66 +657,30 @@ def code_run(w):
             + w.code(['Main.java'])
             + w.run('Main')
             + w.md('''
-        The third search is refused by `search`, and the next `/scores` still passes, because the
-        refused search spent nothing. The sixth sign-in hears "retry in 60 seconds" from the exact
-        log. The race lets exactly 50 through.
+        Read it against the config: the third search is refused by `search`, and the next
+        `/scores` still passes, because the refused search spent nothing; the sixth sign-in hears
+        "retry in 60 seconds" from the exact log; the race lets exactly 50 through.
         '''))
 
 
 CODE = {'door': code_door, 'limiter': code_limiter, 'rules': code_rules, 'limits': code_limits,
         'counters': code_counting, 'store': code_store}
-BUILD_NAV = {'door': ('The front door', 'The front door'),
-             'limiter': ('The limiter', 'The limiter: every rule, or none'),
-             'rules': ('The rules', 'One rule, and the config in code'),
-             'limits': ('How much', 'How much: fixed, or from the plan'),
-             'counters': ('Counting', 'Counting: one budget'),
-             'store': ('Where counts live', 'Where the counters live')}
 STRIP_NOW = {b['id']: [f[:-5] for f in b['files']] for b in CONFIG['BUILD']}
 
 
-# --- variant A: design and build in one walk
-def merged_steps(w):
+def design_steps(w):
     out = []
     n = len(BRANCHES) + 1
-    for k, (st, heading, think) in enumerate(BRANCHES):
-        nav, _ = BUILD_NAV[st]
-        out.append(step(st, D, nav, heading.split(' · ', 1)[1], minutes=8,
+    for k, (st, nav, title) in enumerate(BRANCHES):
+        out.append(step(st, D, nav, title.split(' · ', 1)[1], minutes=8,
                         stage=f'Design and build · {k + 1} of {n}', body=
-            w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1]) + think(w) + grown(w, st)
-            + CODE[st](w)
+            w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1])
+            + THINK[st](w) + grown(w, st)
+            + w.md('## The code') + CODE[st](w)
             + (think_back(w) if st == 'store' else '')))
     out.append(step('run', D, 'Run it, and the whole design', 'Run it, and the whole design',
                     minutes=10, stage=f'Design and build · {n} of {n}', body=
         w.strip(now=['Main']) + code_run(w) + whole_design(w)))
-    return out
-
-
-# --- variant B: the design walk, then the build in the same order
-def design_step(w):
-    body = w.md('''
-        Start where a request starts, at the front door, and keep asking "what does this need?".
-        At the limiter, first list everything it needs (breadth first), then take each branch down
-        until it is settled (depth first), and come back up for the next. ↓ marks going deeper, ↑
-        coming back. Each answer is a type, and the diagram grows with it.
-        ''')
-    for st, heading, think in BRANCHES:
-        body += w.md('### ' + heading) + think(w) + grown(w, st)
-    body += w.md('### 7 · ↑ Back to the limiter, then to the door') + think_back(w)
-    body += whole_design(w)
-    return step('design', D, 'The design', 'The design, top-down', minutes=20, body=body)
-
-
-def build_steps(w):
-    out = []
-    n = len(BRANCHES) + 1
-    for k, (st, heading, _) in enumerate(BRANCHES):
-        nav, title = BUILD_NAV[st]
-        out.append(step(st, B, nav, title, minutes=5, stage=f'Build · {k + 1} of {n}', body=
-            w.strip(now=STRIP_NOW[st])
-            + w.md(f'Typed from [the design](#design), section *{heading}*: {title.lower()}.')
-            + CODE[st](w)))
-    out.append(step('run', B, 'Run it', 'Run it', minutes=4, stage=f'Build · {n} of {n}', body=
-        w.strip(now=['Main']) + code_run(w)))
     return out
 
 
@@ -777,8 +722,8 @@ def newrule(w):
         ask='Exports are heavy. Limit /export to 10 a minute per customer.',
         src='The most common follow-up: a new limit, to see whether the design takes it.',
         lands='''
-        One line in the config, and nothing else: the rule's parts already exist (an endpoint, a
-        count-per, a fixed limit, an algorithm). This is what modelling the rules as data buys.
+        One entry in the config, and nothing else: every part of a rule already exists (a match,
+        a count-per, a fixed limit, an algorithm). This is what modelling the rules as data buys.
         ''')
 
 
@@ -876,10 +821,10 @@ def recall(w):
     cards = [
         ('The design, top-down', [
             'door: `RateLimitFilter` asks `RateLimiter.check(Request)`',
-            'limiter: every rule that covers it, or none (refund)',
-            'one rule: covers, `CountPer` key, `LimitPolicy`, `Algorithm`',
+            'limiter: every rule that matches it, or none (refund)',
+            'one rule: `Match`, `CountPer` key, `LimitPolicy`, `Algorithm`',
             'how much: `FixedLimit` or `PlanLimit` (`Plan`, `Customers`)',
-            'counting: `Counter` → token bucket, fixed window, log',
+            'counting: `Counter` → token bucket, fixed window, log; `CounterFactory`',
             'where: `CounterStore` → `InMemoryCounterStore`']),
         ('The token bucket, in numbers', [
             '5 a second = capacity 5, a token every 200 ms',
@@ -908,12 +853,12 @@ def recall(w):
         + grid
         + w.md('The lines to remember exactly:')
         + w.snippet('''
-if (!rule.covers(request)) continue;                                       // which rules
+if (!rule.matches(request)) continue;                                      // which rules
 Counter c = counters.counterFor(rule.keyFor(request), limit, rule.algorithm(), now);
 if (!d.allowed()) { for (Counter s : charged) s.refund(now); return refused; }   // all or nothing
 tokens = Math.min(capacity, tokens + elapsed / millisPerToken);           // refill, capped
 long wait = (long) Math.ceil((1 - tokens) * millisPerToken);              // or say when
-return counters.computeIfAbsent(id, k -> newCounter(algorithm, limit, nowMillis));''',
+return counters.computeIfAbsent(id, k -> CounterFactory.create(algorithm, limit, nowMillis));''',
                     label='six lines'))
 
 
@@ -992,12 +937,12 @@ def check(w):
         + bug(w, 1, '''
 Counter counter = counters.get(id);
 if (counter == null) {
-    counter = newCounter(algorithm, limit, nowMillis);
+    counter = CounterFactory.create(algorithm, limit, nowMillis);
     counters.put(id, counter);
 }
 return counter;''', 'Check, then act: two threads meeting a new customer both see `null` and both '
             'make a counter, so the customer gets two budgets.', '''
-return counters.computeIfAbsent(id, k -> newCounter(algorithm, limit, nowMillis));''')
+return counters.computeIfAbsent(id, k -> CounterFactory.create(algorithm, limit, nowMillis));''')
         + bug(w, 2, '''
 @Override
 public synchronized RateLimitResult check(Request request) {   // on the limiter
@@ -1030,7 +975,7 @@ public Decision tryAcquire(long nowMillis) {   // not synchronized
 public synchronized Decision tryAcquire(long nowMillis) { ... }''')
         + bug(w, 6, '''
 String id = key;                         // the limit left out of the key
-return counters.computeIfAbsent(id, k -> newCounter(algorithm, limit, nowMillis));''',
+return counters.computeIfAbsent(id, k -> CounterFactory.create(algorithm, limit, nowMillis));''',
             'An upgrade from FREE to PRO is ignored: the map keeps returning the 5-a-second bucket '
             'made before the upgrade.', '''
 String id = key + "|" + limit.requests() + "/" + limit.periodMillis();''')
@@ -1114,18 +1059,6 @@ def _assemble(w, middle):
     return out + [allcode(w, by_id)]
 
 
-def pages_merged(w):
-    return _assemble(w, merged_steps)
-
-
-def pages_split(w):
-    return _assemble(w, lambda w_: [design_step(w_)] + build_steps(w_))
-
-
-# The page is built once per variant: rate-limiter-workbench.html is the merged walk,
-# rate-limiter-workbench-b.html the design walk followed by the build steps.
-VARIANTS = {'': pages_merged, '-b': pages_split}
-
-
+# One layout: the design is thought through and typed branch by branch.
 def pages(w):
-    return pages_merged(w)
+    return _assemble(w, design_steps)

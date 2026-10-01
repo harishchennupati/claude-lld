@@ -16,16 +16,19 @@ BUILD = [
     dict(id='door', files=['Request.java', 'RateLimitResult.java', 'RateLimiter.java',
                            'RateLimitFilter.java']),
     dict(id='limiter', files=['RuleBasedRateLimiter.java', 'Clock.java'], compile=False),
-    dict(id='rules', files=['RateLimitRule.java', 'CountPer.java', 'ScoreApiRules.java'],
+    dict(id='rules', files=['RateLimitRule.java', 'Match.java', 'Caller.java', 'CountPer.java',
+                            'ScoreApiRules.java'],
          compile=False),
     dict(id='limits', files=['Limit.java', 'LimitPolicy.java', 'FixedLimit.java', 'PlanLimit.java',
                              'Plan.java', 'Customers.java'],
          alone=['Request.java', 'Limit.java', 'LimitPolicy.java', 'FixedLimit.java',
                 'PlanLimit.java', 'Plan.java', 'Customers.java']),
     dict(id='counters', files=['Decision.java', 'Counter.java', 'TokenBucket.java',
-                               'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java'],
+                               'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java',
+                               'CounterFactory.java'],
          alone=['Limit.java', 'RateLimitResult.java', 'Decision.java', 'Counter.java', 'TokenBucket.java',
-                'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java'],
+                'FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java',
+                'CounterFactory.java'],
          demo='BucketDemo'),
     dict(id='store', files=['CounterStore.java', 'InMemoryCounterStore.java'], demo='StoreDemo'),
     dict(id='run', files=['Main.java'], demo='Main'),
@@ -39,20 +42,21 @@ DEMOS = {'windows': 'WindowsDemo', 'newrule': 'NewRuleDemo', 'credits': 'Credits
 EXTRA = [('QuizDemo', 'core'), ('CountingDemo', 'core')]
 
 CORE_TYPES = ['Request', 'RateLimitResult', 'RateLimiter', 'RateLimitFilter',
-              'RuleBasedRateLimiter', 'Clock', 'RateLimitRule', 'CountPer', 'ScoreApiRules',
+              'RuleBasedRateLimiter', 'Clock', 'RateLimitRule', 'Match', 'Caller', 'CountPer',
+              'ScoreApiRules',
               'Limit', 'LimitPolicy', 'FixedLimit', 'PlanLimit', 'Plan', 'Customers', 'Decision',
               'Counter', 'TokenBucket', 'FixedWindowCounter', 'SlidingWindowLog', 'Algorithm',
-              'CounterStore', 'InMemoryCounterStore', 'Main']
+              'CounterFactory', 'CounterStore', 'InMemoryCounterStore', 'Main']
 FILE_ORDER = [t + '.java' for t in CORE_TYPES] + [t + '.java' for t in [
     'SlidingWindowCounter', 'CreditWindow']]
 
 STRIP = [
     ('the door', ['Request', 'RateLimitResult', 'RateLimiter', 'RateLimitFilter']),
     ('the limiter', ['RuleBasedRateLimiter', 'Clock']),
-    ('the rules', ['RateLimitRule', 'CountPer', 'ScoreApiRules']),
+    ('the rules', ['RateLimitRule', 'Match', 'Caller', 'CountPer', 'ScoreApiRules']),
     ('how much', ['Limit', 'LimitPolicy', 'FixedLimit', 'PlanLimit', 'Plan', 'Customers']),
     ('counting', ['Decision', 'Counter', 'TokenBucket', 'FixedWindowCounter', 'SlidingWindowLog',
-                  'Algorithm']),
+                  'Algorithm', 'CounterFactory']),
     ('where counts live', ['CounterStore', 'InMemoryCounterStore']),
     ('run', ['Main']),
 ]

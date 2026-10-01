@@ -9,8 +9,8 @@ python3 build.py rate-limiter --fresh    # recompile and rerun everything, ignor
 ```
 
 A problem can define `VARIANTS` in `problem.py` (suffix → pages function) to build the same
-content in more than one layout; the rate limiter builds `-workbench.html` (design and build in
-one walk) and `-workbench-b.html` (the design walk, then the build in the same order).
+content in more than one layout. The rate limiter now builds one: design and build in one walk,
+each branch as the question, the options weighed, the decision, the diagram so far, then the code.
 
 ## What the reader gets
 

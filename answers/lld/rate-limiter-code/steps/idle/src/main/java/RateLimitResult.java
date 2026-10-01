@@ -1,4 +1,5 @@
-// The limiter's answer for a whole request: go ahead, or which rule refused and when to retry.
+// The limiter's answer for a whole request. When refused, it says which rule refused and how
+// long to wait, so the front door can send 429 with a Retry-After header.
 record RateLimitResult(boolean allowed, long retryAfterMillis, String refusedBy) {
     static final RateLimitResult ALLOWED = new RateLimitResult(true, 0, null);
 

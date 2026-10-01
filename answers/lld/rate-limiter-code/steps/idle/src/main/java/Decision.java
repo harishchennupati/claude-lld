@@ -1,4 +1,4 @@
-// One counter's answer: go ahead, or not yet and how long to wait.
+// One counter's answer: go ahead, or not yet and how many milliseconds until it would.
 record Decision(boolean allowed, long retryAfterMillis) {
     static Decision allow() {
         return new Decision(true, 0);

@@ -29,7 +29,7 @@ public class Main {
     }
 
     static void send(RateLimitFilter door, AtomicLong now, Request request, int count) {
-        String who = request.hasApiKey() ? request.customerId() : "ip " + request.ip();
+        String who = request.isCustomer() ? request.customerId() : "ip " + request.ip();
         for (int i = 1; i <= count; i++) {
             RateLimitFilter.Response r = door.handle(request,
                     () -> new RateLimitFilter.Response(200, Map.of()));

@@ -1,7 +1,8 @@
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Who is on which plan. Sign-ups and upgrades write while requests read, so a ConcurrentHashMap.
+// Who is on which plan. Sign-ups and upgrades write while request threads read, so the map is a
+// ConcurrentHashMap: readers never see it half-updated, and nobody waits for a lock to read.
 class Customers {
     private final Map<String, Plan> planOf = new ConcurrentHashMap<>();
 
@@ -11,8 +12,8 @@ class Customers {
 
     Plan planOf(String customerId) {
         if (customerId == null) {
-            return Plan.FREE;                 // no API key: no plan of its own
+            return Plan.FREE;                // no API key: no plan of its own
         }
-        return planOf.getOrDefault(customerId, Plan.FREE);
+        return planOf.getOrDefault(customerId, Plan.FREE);   // not signed up for more: FREE
     }
 }

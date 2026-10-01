@@ -1,4 +1,5 @@
-// "limit: plan.rate" or "plan.daily": whatever the customer's plan carries.
+// "limit: { from_plan: rate }": whatever the customer's plan carries. Which of the plan's limits
+// a rule uses (its rate, or its daily allowance) is the field.
 class PlanLimit implements LimitPolicy {
     enum Field { RATE, DAILY }
 
@@ -12,8 +13,8 @@ class PlanLimit implements LimitPolicy {
 
     @Override
     public Limit limitFor(Request request) {
-        Plan plan = customers.planOf(request.customerId());
-        return switch (field) {
+        Plan plan = customers.planOf(request.customerId());     // looked up on every request,
+        return switch (field) {                                  // so an upgrade applies at once
             case RATE -> plan.rate;
             case DAILY -> plan.daily;
         };

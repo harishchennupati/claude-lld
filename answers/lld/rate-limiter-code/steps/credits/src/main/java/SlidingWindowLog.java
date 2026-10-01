@@ -1,8 +1,9 @@
 import java.util.ArrayDeque;
 import java.util.Deque;
 
-// The time of every allowed request in the last period: exact, never more than the limit in ANY
-// period. One timestamp per request, so it is for small limits such as sign-ins.
+// The sliding window log: the time of every allowed request in the last period. "The last
+// minute" moves with now, so it is exact: never more than the limit in ANY minute. The price is
+// one timestamp per request, so it is for small limits that must be exact, such as sign-ins.
 class SlidingWindowLog implements Counter {
     private final int limit;
     private final long periodMillis;
@@ -15,18 +16,20 @@ class SlidingWindowLog implements Counter {
 
     @Override
     public synchronized Decision tryAcquire(long nowMillis) {
+        // Forget the requests that are no longer inside the last period.
         while (!times.isEmpty() && times.peekFirst() <= nowMillis - periodMillis) {
-            times.pollFirst();               // out of the last period: forget it
+            times.pollFirst();
         }
         if (times.size() < limit) {
             times.addLast(nowMillis);
             return Decision.allow();
         }
-        return Decision.deny(times.peekFirst() + periodMillis - nowMillis);   // oldest leaves
+        // Full: there is room again when the oldest request leaves the window.
+        return Decision.deny(times.peekFirst() + periodMillis - nowMillis);
     }
 
     @Override
     public synchronized void refund(long nowMillis) {
-        times.pollLast();                    // forget the newest entry: the count is right
+        times.pollLast();                    // remove the newest entry: the count is right again
     }
 }

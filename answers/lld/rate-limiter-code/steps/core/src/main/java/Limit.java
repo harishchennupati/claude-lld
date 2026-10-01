@@ -1,4 +1,4 @@
-// "X requests every Y": the whole of a limit.
+// "X requests every Y": the whole of a limit, as a value.
 record Limit(int requests, long periodMillis) {
     static Limit perSecond(int requests) {
         return new Limit(requests, 1_000);

@@ -36,8 +36,8 @@ STAGES = ['door', 'limiter', 'rules', 'limits', 'counters', 'store']
 LANES = [  # (label, top, height, stage that first shows it)
     ('1 · the front door: who asks?', 6, 190, 'door'),
     ('2 · the limiter, and what it is handed', 206, 180, 'limiter'),
-    ('3 · one rule: what it covers, whose budget, how much, how it counts', 396, 286, 'rules'),
-    ('4 · counting: how one budget is counted', 692, 210, 'counters'),
+    ('3 · one rule: which requests, whose budget, how much, how it counts', 396, 330, 'rules'),
+    ('4 · counting: how one budget is counted', 736, 270, 'counters'),
 ]
 
 
@@ -79,11 +79,14 @@ def classes(upto=None):
       ('ConcurrentHashMap<key, Counter>',), (), size=11.5)
     # 3 · one rule
     b('rules', 'rule', 20, 424, 300, 'RateLimitRule', 'record',
-      ('name', 'endpoint, needsApiKey → covers()', 'countPer → keyFor()', 'limits: LimitPolicy',
+      ('name', 'match: Match', 'countPer: CountPer → keyFor()', 'limits: LimitPolicy',
        'algorithm: Algorithm'), (), size=11.5)
-    b('rules', 'cfg', 20, 596, 300, 'ScoreApiRules', None, (),
-      ('build(customers): the five rules',), size=11.5)
-    b('rules', 'cp', 350, 424, 250, 'CountPer', 'enum',
+    b('rules', 'cfg', 20, 600, 300, 'ScoreApiRules', None, (),
+      ('build(customers): the rules, in order',), size=11.5)
+    b('rules', 'match', 350, 424, 250, 'Match', 'record', ('caller, endpoint',),
+      ('matches(request)',), size=11.5)
+    b('rules', 'caller', 350, 536, 250, 'Caller', 'enum', ('CUSTOMER, ANY',), (), size=11.5)
+    b('rules', 'cp', 350, 620, 250, 'CountPer', 'enum',
       ('CUSTOMER, IP,', 'CUSTOMER_AND_ENDPOINT, EVERYONE'), (), size=11)
     b('limits', 'lp', 630, 424, 330, 'LimitPolicy', 'interface', (),
       ('limitFor(request): Limit',), size=12)
@@ -92,16 +95,18 @@ def classes(upto=None):
     b('limits', 'plan', 630, 602, 150, 'Plan', 'enum', ('FREE, PRO',), (), size=11.5)
     b('limits', 'cust', 800, 602, 160, 'Customers', None, ('id → Plan',), (), size=11.5)
     # 4 · counting
-    b('counters', 'dec', 20, 720, 280, 'Decision', 'record', ('allowed, retryAfterMillis',), (),
+    b('counters', 'dec', 20, 764, 280, 'Decision', 'record', ('allowed, retryAfterMillis',), (),
       size=11.5)
-    b('counters', 'ctr', 330, 720, 320, 'Counter', 'interface', (),
+    b('counters', 'ctr', 330, 764, 320, 'Counter', 'interface', (),
       ('tryAcquire(now): Decision', 'refund(now)'), size=12)
-    b('counters', 'alg', 680, 720, 280, 'Algorithm', 'enum',
+    b('counters', 'fac', 680, 764, 280, 'CounterFactory', None, (),
+      ('create(algorithm, limit, now)',), size=11.5)
+    b('counters', 'alg', 680, 838, 280, 'Algorithm', 'enum',
       ('TOKEN_BUCKET, FIXED_WINDOW,', 'SLIDING_WINDOW_LOG'), (), size=11)
     for key, name, note, x in (('tb', 'TokenBucket', 'rate, search, global', 20),
                                ('fw', 'FixedWindowCounter', 'daily', 335),
                                ('sl', 'SlidingWindowLog', 'login: exact', 650)):
-        b('counters', key, x, 836, 290, name, None, (note,), (), size=11.5)
+        b('counters', key, x, 936, 290, name, None, (note,), (), size=11.5)
 
     def arrow(a, b_, d, cls='sv-ln', end='m', start=None, label=None, at=None):
         if a in box and b_ in box:
@@ -115,22 +120,25 @@ def classes(upto=None):
     arrow('lim', 'cs', 'M400 318 L620 318 L620 268 L638 268')
     arrow('mem', 'cs', 'M800 318 L800 303', 'sv-ln dash', end='tri')
     arrow('lim', 'rule', 'M170 335 L170 422', start='dia')                    # holds the list
-    arrow('cfg', 'rule', 'M170 596 L170 561', 'sv-ln dash', label='builds', at=(178, 584))
-    arrow('rule', 'cp', 'M320 466 L348 466')
+    arrow('cfg', 'rule', 'M170 600 L170 557', 'sv-ln dash', label='builds', at=(178, 588))
+    arrow('rule', 'match', 'M320 466 L348 466')
+    arrow('match', 'caller', 'M475 518 L475 534')
+    arrow('rule', 'cp', 'M320 540 L335 540 L335 662 L348 662')
     arrow('rule', 'lp', 'M320 526 L615 526 L615 456 L628 456')
     arrow('fixed', 'lp', 'M705 516 L705 493', 'sv-ln dash', end='tri')
     arrow('plim', 'lp', 'M880 516 L880 493', 'sv-ln dash', end='tri')
     arrow('plim', 'cust', 'M880 573 L880 600')
     arrow('cust', 'plan', 'M800 630 L782 630')
-    arrow('ctr', 'dec', 'M330 760 L302 760')
-    for k, x in (('tb', 165), ('fw', 480), ('sl', 795)):
-        arrow(k, 'ctr', f'M{x} 836 L490 806', 'sv-ln dash', end='tri')
-    arrow('mem', 'ctr', 'M960 350 L970 350 L970 816 L665 816 L665 764 L653 764', 'sv-ln dash',
-          label='creates, by Algorithm', at=(676, 830))
+    arrow('ctr', 'dec', 'M330 804 L302 804')
+    arrow('fac', 'ctr', 'M680 792 L652 792', label='creates', at=(654, 784))
+    arrow('fac', 'alg', 'M820 821 L820 836')
+    for k, x in (('tb', 165), ('fw', 480), ('sl', 690)):
+        arrow(k, 'ctr', f'M{x} 936 L490 850', 'sv-ln dash', end='tri')
+    arrow('mem', 'fac', 'M960 350 L970 350 L970 790 L962 790', label='uses', at=(930, 760))
     stage = f'after "{upto}"' if upto else 'the whole core'
     return s.render(f'Class diagram of the rate limiter core, {stage}: the front door, the '
-                    'limiter and what it is handed, one rule and how much it allows, and the '
-                    'counters.')
+                    'limiter and what it is handed, one rule (its match, whose budget, how much) '
+                    'and the counters.')
 
 
 def journey():
