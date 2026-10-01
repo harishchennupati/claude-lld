@@ -7,132 +7,48 @@ SUBTITLE = 'LLD workbench · Java 17 · every class on this page compiles and ru
 
 # Snapshots of the one source tree (see ../snap.py): the core, then one per follow-up, in the
 # order the follow-ups build on each other. Named after their step, never numbered.
-SNAPS = ['core', 'more', 'credits', 'live', 'idle', 'waiting', 'redis', 'lockfree', 'cousins']
+SNAPS = ['core', 'windows', 'tiers', 'door', 'idle', 'credits']
 
-# The core, typed in this order. Each step compiles on its own with the steps before it.
+# The core, in the order it is typed in the room: top-down, from the question the API asks to
+# where the counts live. A step whose parts come later is not compiled on its own
+# (compile=False); `alone` compiles a step with just the files it needs.
 BUILD = [
-    dict(id='answer', files=['RequestContext.java', 'Limit.java', 'Decision.java',
-                             'RateLimitResult.java', 'RateLimiter.java'], demo='AnswerDemo'),
-    dict(id='time', files=['Clock.java', 'SystemClock.java', 'ManualClock.java'], demo='TimeDemo'),
-    dict(id='bucket', files=['Bucket.java', 'TokenBucket.java'], demo='BucketDemo'),
-    dict(id='count', files=['SlidingWindowLog.java', 'FixedWindowCounter.java',
-                            'BucketFactory.java', 'Algorithm.java'], demo='CountDemo'),
-    dict(id='budget', files=['KeyScope.java', 'LimitPolicy.java', 'Plan.java', 'Plans.java',
-                             'PlanLimits.java'], demo='BudgetDemo'),
-    dict(id='book', files=['RateLimitRule.java', 'RuleBook.java', 'ScoreApiRules.java'],
-         demo='RuleBookDemo'),
-    dict(id='store', files=['BucketStore.java', 'InMemoryBucketStore.java'], demo='StoreDemo'),
-    dict(id='limiter', files=['RuleBasedRateLimiter.java', 'RateLimitListener.java',
-                              'RefusalMetrics.java'], demo='LimiterDemo'),
-    dict(id='door', files=['RateLimitFilter.java'], demo='DoorDemo'),
+    dict(id='question', files=['RateLimiter.java', 'Decision.java']),
+    dict(id='limiter', files=['PerKeyRateLimiter.java', 'Clock.java'], compile=False),
+    dict(id='limits', files=['Limit.java', 'LimitPolicy.java', 'CustomerLimits.java'],
+         alone=['Limit.java', 'LimitPolicy.java', 'CustomerLimits.java']),
+    dict(id='bucket', files=['Counter.java', 'TokenBucket.java'],
+         alone=['Decision.java', 'Limit.java', 'Counter.java', 'TokenBucket.java'],
+         demo='BucketDemo'),
+    dict(id='store', files=['Algorithm.java', 'CounterStore.java', 'InMemoryCounterStore.java'],
+         demo='StoreDemo'),
     dict(id='run', files=['Main.java'], demo='Main'),
-    dict(id='tests', files=['RateLimiterTest.java'], demo='RateLimiterTest'),
 ]
 
 # The demo each follow-up runs (it checks its own numbers; see demos/Check.java).
-DEMOS = {'more': 'MoreDemo', 'credits': 'CreditsDemo', 'live': 'LiveDemo', 'idle': 'IdleDemo',
-         'waiting': 'WaitingDemo', 'redis': 'RedisDemo', 'lockfree': 'LockFreeDemo',
-         'cousins': 'CousinsDemo'}
+DEMOS = {'windows': 'WindowsDemo', 'credits': 'CreditsDemo', 'tiers': 'TiersDemo',
+         'door': 'LimitsDemo', 'idle': 'IdleDemo'}
 
 # Extra programs run against a snapshot: their output answers questions elsewhere on the page.
-EXTRA = [('FirstCut', 'core'), ('QuizDemo', 'core'), ('CostDemo', 'core')]
+EXTRA = [('QuizDemo', 'core')]
 
-CORE_TYPES = ['RequestContext', 'Limit', 'Decision', 'RateLimitResult', 'RateLimiter', 'Clock',
-              'SystemClock', 'ManualClock', 'Bucket', 'TokenBucket', 'SlidingWindowLog',
-              'FixedWindowCounter', 'BucketFactory', 'Algorithm', 'KeyScope', 'LimitPolicy',
-              'Plan', 'Plans', 'PlanLimits', 'RateLimitRule', 'RuleBook', 'ScoreApiRules',
-              'BucketStore', 'InMemoryBucketStore', 'RuleBasedRateLimiter', 'RateLimitListener',
-              'RefusalMetrics', 'RateLimitFilter', 'Main', 'RateLimiterTest']
+CORE_TYPES = ['RateLimiter', 'Decision', 'PerKeyRateLimiter', 'Clock', 'Limit', 'LimitPolicy',
+              'CustomerLimits', 'Counter', 'TokenBucket', 'Algorithm', 'CounterStore',
+              'InMemoryCounterStore', 'Main']
 FILE_ORDER = [t + '.java' for t in CORE_TYPES] + [t + '.java' for t in [
-    'SlidingWindowCounter', 'LeakyBucket', 'CreditBucket', 'ShadowRateLimiter', 'Waiting',
-    'RedisBucketStore', 'RedisTokenBucket', 'FakeRedis', 'AtomicTokenBucket', 'HitCounter',
-    'LoggerRateLimiter']]
+    'FixedWindowCounter', 'SlidingWindowLog', 'SlidingWindowCounter', 'CreditWindow', 'Tier',
+    'TierLimits', 'Request', 'ApiLimits']]
 
 STRIP = [
-    ('answer', ['RequestContext', 'Limit', 'Decision', 'RateLimitResult', 'RateLimiter']),
-    ('time', ['Clock', 'SystemClock', 'ManualClock']),
-    ('count', ['Bucket', 'TokenBucket', 'SlidingWindowLog', 'FixedWindowCounter',
-               'BucketFactory', 'Algorithm']),
-    ('budget', ['KeyScope', 'LimitPolicy', 'Plan', 'Plans', 'PlanLimits']),
-    ('rules', ['RateLimitRule', 'RuleBook', 'ScoreApiRules']),
-    ('store', ['BucketStore', 'InMemoryBucketStore']),
-    ('limiter', ['RuleBasedRateLimiter', 'RateLimitListener', 'RefusalMetrics']),
-    ('door', ['RateLimitFilter']),
-    ('proof', ['Main', 'RateLimiterTest']),
+    ('the question', ['RateLimiter', 'Decision']),
+    ('the limiter', ['PerKeyRateLimiter', 'Clock']),
+    ('how much', ['Limit', 'LimitPolicy', 'CustomerLimits']),
+    ('counting', ['Counter', 'TokenBucket']),
+    ('where counts live', ['Algorithm', 'CounterStore', 'InMemoryCounterStore']),
+    ('run', ['Main']),
 ]
 
-# Broken copies of the core. The build makes each change, runs the tests, and stops unless the
-# named test fails on every run (other tests may fail too).
-REFUND = """                for (Bucket spent : charged) {
-                    spent.refund(request.cost(), now);
-                }
-"""
-GUARD = """        if (elapsed <= 0) {
-            return;
-        }
-"""
-ISOLATED = """            try {
-                listener.onDecision(request, result);
-            } catch (RuntimeException broken) {
-                // In production: log it. The request goes on either way.
-            }"""
-REFILL = 'tokens = Math.min(capacity, tokens + elapsed / millisPerToken);'
-
-MUTANTS = [
-    dict(label='no lock',
-         edits=[('TokenBucket.java', 'public synchronized Decision tryConsume',
-                 'public Decision tryConsume')],
-         test='many threads on one client get exactly its limit', runs=10,
-         html='Remove <code>synchronized</code> from <code>TokenBucket.tryConsume</code>'),
-    dict(label='get, then put',
-         edits=[('InMemoryBucketStore.java',
-                 'return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));',
-                 'Bucket bucket = buckets.get(key);\n        if (bucket == null) {\n'
-                 '            bucket = factory.create(limit, nowMillis);\n'
-                 '            buckets.put(key, bucket);\n        }\n        return bucket;')],
-         test='threads that meet a new client share one bucket', runs=10,
-         html='Replace <code>computeIfAbsent</code> with <code>put</code> after the '
-              '<code>get</code> finds nothing'),
-    dict(label='whole tokens',
-         edits=[('TokenBucket.java', 'private double tokens;', 'private long tokens;'),
-                ('TokenBucket.java', REFILL,
-                 'tokens = Math.min(capacity, tokens + (long) (elapsed / millisPerToken));')],
-         test='a refusal says exactly when to retry', runs=1,
-         html='Keep tokens in a <code>long</code>, so 120 ms earns 0 instead of 0.6'),
-    dict(label='no refund',
-         edits=[('RuleBasedRateLimiter.java', REFUND, '')],
-         test='a refused request spends nothing, in any rule', runs=1,
-         html='Drop the refund loop: a later rule refuses, the earlier buckets keep the tokens'),
-    dict(label='refusals spend',
-         edits=[('TokenBucket.java', '        long waitMillis = (long) Math.ceil',
-                 '        tokens -= cost;\n        long waitMillis = (long) Math.ceil')],
-         test='a refused request spends nothing, in any rule', runs=1,
-         html='Let a refusal take tokens too'),
-    dict(label='no cap',
-         edits=[('TokenBucket.java', REFILL, 'tokens = tokens + elapsed / millisPerToken;')],
-         test='quiet time never fills a bucket past its capacity', runs=1,
-         html='Drop <code>Math.min(capacity, ...)</code> from the refill'),
-    dict(label='no time guard',
-         edits=[('TokenBucket.java', GUARD, '')],
-         test='a clock that jumps back neither earns nor takes tokens', runs=1,
-         html='Drop <code>if (elapsed &lt;= 0) return;</code> from the refill'),
-    dict(label='limit not in the key',
-         edits=[('RuleBasedRateLimiter.java',
-                 '\n                + "|" + limit.capacity() + "/" + limit.periodMillis();',
-                 ';')],
-         test="each client gets its plan's budget; an upgrade applies at once", runs=1,
-         html='Leave the limit out of the bucket key'),
-    dict(label='loosest remaining',
-         edits=[('RuleBasedRateLimiter.java', 'remaining = Math.min(remaining, d.remaining());',
-                 'remaining = Math.max(remaining, d.remaining());')],
-         test="the tightest rule's remaining is reported", runs=1,
-         html='Report the <em>largest</em> remaining across the rules, not the smallest'),
-    dict(label='listener not isolated',
-         edits=[('RuleBasedRateLimiter.java', ISOLATED,
-                 '            listener.onDecision(request, result);')],
-         test='a listener that throws does not break a request', runs=1,
-         html='Call listeners without the <code>try</code>/<code>catch</code>'),
-]
+MUTANTS = []
 
 # Written next to the page as rate-limiter-code/README.md, with the runnable projects.
 EXPORT_README = """# Rate limiter: the code, ready to run
@@ -142,13 +58,12 @@ sources, so it always matches the page.
 
 | folder | what is in it |
 |---|---|
-| `core/` | the design from the page's build steps: the rule-based limiter, `Main` and `RateLimiterTest` |
+| `core/` | the core from the page's build steps, with `Main` |
 | `complete/` | the core plus every follow-up, with each follow-up's demo ({demos}) |
-| `practice/` | only `RateLimiterTest.java`: write your own classes next to it, then run the tests |
-| `steps/<step>/` | the code exactly as it is after each follow-up step: start drill 3 from these |
+| `steps/<step>/` | the code exactly as it is after each follow-up: start a follow-up drill here |
 
 Each folder is a plain Maven project (Java 17, no dependencies). In IntelliJ: File > Open, pick
-the folder, then run `Main` or `RateLimiterTest` from the green arrow.
+the folder, then run `Main`.
 
 From a terminal, without Maven:
 
@@ -156,7 +71,6 @@ From a terminal, without Maven:
 cd core
 javac -d out src/main/java/*.java
 java -cp out Main
-java -cp out RateLimiterTest
 ```
 """
 

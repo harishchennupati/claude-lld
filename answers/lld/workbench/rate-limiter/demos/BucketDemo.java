@@ -1,21 +1,25 @@
-// The token bucket on its own: score-widget's bucket (5 a second), driven by times we pick by
-// hand. It needs no clock and no limiter: a bucket is simply told the time.
+// The token bucket on its own: 5 a second, told the time by hand.
 public class BucketDemo {
     public static void main(String[] args) {
-        Bucket widget = new TokenBucket(Limit.perSecond(5), 0);
+        Counter bucket = new TokenBucket(Limit.perSecond(5), 0);
+        StringBuilder log = new StringBuilder();
         for (int i = 1; i <= 6; i++) {
-            Decision d = widget.tryConsume(1, 0);
-            System.out.println("   0 ms  request " + i + "  " + Check.show(d));
+            log.append(String.format("   0 ms  #%d  %s%n", i, Check.show(bucket.tryAcquire(0))));
         }
-        System.out.println(" 120 ms  request 7  " + Check.show(widget.tryConsume(1, 120)));
-        System.out.println(" 200 ms  request 8  " + Check.show(widget.tryConsume(1, 200)));
-        int allowed = 0;
+        Decision at120 = bucket.tryAcquire(120);
+        log.append(String.format(" 120 ms  #7  %s%n", Check.show(at120)));
+        Decision at200 = bucket.tryAcquire(200);
+        log.append(String.format(" 200 ms  #8  %s%n", Check.show(at200)));
+        int later = 0;
         for (int i = 0; i < 7; i++) {
-            if (widget.tryConsume(1, 2_200).allowed()) {
-                allowed++;
+            if (bucket.tryAcquire(3_400).allowed()) {
+                later++;
             }
         }
-        System.out.println("2200 ms  7 at once  " + allowed + " allowed, " + (7 - allowed)
-                + " refused");
+        log.append(String.format("3400 ms  7 at once: %d allowed (filled to 5, never more)%n",
+                later));
+        System.out.print(log);
+        Check.that(!at120.allowed() && at120.retryAfterMillis() == 80, "120 ms: retry in 80");
+        Check.that(at200.allowed() && later == 5, "200 ms allowed; capped at 5");
     }
 }

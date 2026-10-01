@@ -15,1210 +15,753 @@ def step(id_, group, nav, title, body, minutes=None, opt=False, stage=None):
     return d
 
 
+def say(w, text):
+    """Why this step's code is written the way it is: the thinking, in a short paragraph."""
+    return w.md('**The thinking.** ' + text)
+
+
 # ================================================================================ understand
 def problem(w):
-    return step('problem', U, 'The problem', 'A rate limiter for a cricket-score API', minutes=4, body=
+    return step('problem', U, 'The problem', 'A rate limiter for a cricket-score API', minutes=5, body=
         w.ask('Each customer may make X requests every Y seconds. Implement '
               '`rateLimit(customerId)`. Keep the code simple, but extensible: we will add to it.',
-              src="Atlassian's version, as a candidate reported it (2024). Freshworks and Postman "
-                  '(2024) ask it as a machine-coding round, Swiggy (2025) in a bar-raiser round; in '
-                  '2026 OpenAI, Anthropic, Cursor, xAI and Databricks asked versions of it, with '
-                  'the follow-ups at the end of this page.', label='The interviewer')
+              src="Atlassian's version, as candidates report it; Freshworks, Postman, Swiggy, "
+                  'OpenAI and Anthropic ask versions of it, with follow-ups like the ones at the '
+                  'end of this page.', label='The interviewer')
         + w.md('''
         ## The situation
 
-        We run a public API that serves live cricket scores to other apps: a **score widget** that
-        news sites embed, a **fantasy-cricket app** on a paid plan, a few **cricket blogs**, and a
-        developer portal where people **sign in** to get their keys. Last week the widget shipped
-        a bug, a retry loop that sent 2,000 requests a second, and the API slowed down for
-        everyone, including the paying fantasy app.
+        We run a public API that serves live cricket scores to other apps, our **customers**: a
+        score widget that news sites embed, a fantasy-cricket app, a few cricket blogs. Each calls
+        with its API key. Last week the widget shipped a retry loop that sent 2,000 requests a
+        second, and the API slowed down for everyone.
 
-        So before the API does any work for a request, it asks: *may this request go ahead right
-        now?* If yes, the API serves it. If no, it answers at once with **429 Too Many Requests**,
-        a **Retry-After** header and the rule that said no, and spends nothing else on it.
+        So before the API does any work, it asks one question: *may this customer go ahead now?*
+        If not, it answers at once with **429 Too Many Requests** and a **Retry-After** header,
+        and spends nothing else on the request.
         ''')
-        + w.fig(figures.flow(), caption='The limiter sits at the front door, before the real work.')
+        + w.fig(figures.flow())
         + w.md('''
-        **In short:** a list of rules, one counter per client per rule, and one method that lets a
-        request through only if every rule agrees.
-
         ## Ask these first
 
         Each answer changes the code:
         ''')
         + w.table(['You ask', 'Assume they say', 'What it changes'], [
-            ['Limit by what: client, IP, endpoint?', 'By client; searches per client too; sign-ins '
-             'by IP; and one cap for the whole API', 'Whose budget a request spends is part of '
-             'each rule: a key scope.'],
-            ['Same limit for everyone?', 'FREE 5 a second, PRO 50, plus a daily quota',
-             'Limits come from the plan, not from if-statements.'],
-            ['Can a client burst?', 'Yes, up to its limit; sign-ins must be exact',
-             'Each rule names its way of counting.'],
-            ['Several limits apply: which wins?', 'All must allow; a refused request counts '
-             'nowhere', 'All or nothing, with a refund.'],
-            ['What does a refused client get?', '429, when to retry, and which rule',
-             'The answer is a record, not a boolean.'],
-            ['Do some requests cost more?', 'A whole match history costs 5',
-             'The cost travels with the request.'],
-            ['One server or many?', 'One, for now', 'Buckets in memory, behind a store that '
-             'Redis can replace later.'],
-            ['What do ops need to see?', 'Who is throttled, and by which rule',
-             'Listeners hear every decision.'],
-            ['Many requests at once?', 'Yes: a thread pool', 'Thread-safe, and clients never '
-             'wait on each other.'],
+            ['Who is limited?', 'Each customer, by its API key', 'The limiter counts per customer.'],
+            ['Same limit for everyone?', 'A default, and some customers get more',
+             'Limits come from a lookup, not from constants in the code.'],
+            ['Can a customer burst?', 'Yes, up to its limit at once', 'The token bucket, below.'],
+            ['What does a refused customer get?', '429, and when to retry',
+             'The answer says how long to wait, not just no.'],
+            ['One server or many?', 'One, for now', 'Counts in memory, behind an interface that a '
+             'shared store can replace later.'],
+            ['Many requests at once?', 'Yes: a thread pool', 'Thread-safe, and customers never wait '
+             'on each other.'],
         ], cls='qs')
         + w.md('''
-        ## What we build: the product's limits, as rules
-        ''')
-        + w.table(['Rule', 'Covers', 'Counts by', 'Limit', 'Counted with'], [
-            ['plan', 'requests with a key', 'the client', 'FREE 5/s · PRO 50/s', 'token bucket'],
-            ['quota', 'requests with a key', 'the client', 'FREE 10,000/day · PRO 1,000,000/day',
-             'fixed window'],
-            ['search', '`/search`, with a key', 'client + endpoint', '2/s', 'token bucket'],
-            ['login', '`/login` (no key yet)', 'the IP', '5/min, exact', 'sliding window log'],
-            ['global', 'every request', 'everyone', '1,000/s', 'token bucket'],
-        ])
-        + w.md('''
-        A request passes only if every rule that covers it allows it, and a refused request spends
-        nothing anywhere. The answer says how many requests are left (by the tightest rule), when
-        to retry, and which rule refused. It must be correct with many threads, a check must cost
-        a few map lookups, and time is handed in so tests never sleep. Left out on purpose: many
-        servers sharing one budget, and changing rules while running. Both are follow-ups.
+        ## What the hour holds
 
-        ## What they grade
-        ''')
-        + w.table(['', 'SDE-2', 'SDE-3, on top'], [
-            ['Design', 'small classes, one job each; Strategy for counting; limits from config',
-             'the seams: rules as data, a store Redis can replace, all or nothing'],
-            ['Code', 'a correct token bucket; it compiles and runs', 'every algorithm behind one '
-             'interface; clean records; no switch on types'],
-            ['Threads', 'thread safety you can explain', 'the three ways threads break shared data (lost update, check-then-act, stale read), and '
-             'the lock versus lock-free trade-off, measured'],
-            ['Tests', 'a burst, a refill, a race', 'broken copies that prove each test works'],
-            ['Operations', '', 'metrics, a dry run before a change, fail open or closed'],
-        ])
-        + w.md('''
-        ## The hour
+        **Typed in the room:** one limiter, a limit per customer with a default, the token bucket,
+        counts kept in memory, thread-safe, and a `Main` that shows a burst, a refill and a race:
+        about 150 lines. **Said, not typed:** the other ways of counting, tiers, limits per
+        endpoint, many servers. Each lands on a seam the core already has, which is what "simple,
+        but extensible" is grading.
 
-        **A 60-minute LLD round:** 10 minutes on questions and the design on paper, then type the
-        round subset: the values, `Clock` and `ManualClock`, `Bucket` and `TokenBucket`,
-        `Algorithm` with one constant, `KeyScope`, `LimitPolicy`, `Plans`, the rule and the rule
-        book, the store, the limiter, and a `Main` with a burst and the race. Mention the rest;
-        do not type it. **A 90-minute machine-coding round:** all of it, plus the tests. Either
-        way, get the first version running early.
+        **The 60 minutes:** 5 to ask, 10 to walk the design top-down on the board, 35 to type the
+        core, 10 for follow-ups. Get it running early.
         ''')
         + w.box('note', 'How to use this page',
-                '← and → move between steps. The must-read path is about 1 h 45, plus 15 minutes '
-                'of Check yourself; steps marked *later* are optional. Read once in **Read** mode, '
-                'then practise in **Practise** mode (top right), where code and answers stay '
-                'hidden.'))
+                '← and → move between steps. Reading takes about 1 h 45; steps marked *later* are '
+                'optional. Then practise in **Practise** mode (top right), where code and answers '
+                'stay hidden.'))
 
 
 def counting(w):
-    return step('counting', U, 'How to count', 'Five ways to count, and why the token bucket', minutes=6, body=
+    return step('counting', U, 'How to count', 'Five ways to count', minutes=15, body=
         w.md('''
-        Before any classes, decide how to count. The first idea everyone has is a counter per
-        client that resets at every whole second. It is simple, and it has a hole.
+        Before any classes: how do we count "X requests every Y seconds"? Five ways are known, and
+        an interviewer expects you to name them and say why you picked one. All examples use 5 a
+        second.
+
+        ## 1. Fixed window
+
+        **Idea:** cut time into 1-second boxes by the clock, count requests in the current box, and
+        reset the count to 0 when a new box starts. **Keeps per customer:** when the current window
+        started, and a count.
         ''')
         + w.asc('''
-{a}fixed window{/}, 5 a second: one counter per client, reset at every whole second
-
-            second 0                               second 1
-  |-------------------------------------|-------------------------------------|
-                                 ▲▲▲▲▲  ▲▲▲▲▲
-                                995 ms  1001 ms
-
-  second 0's counter: 5 of 5 ✓          second 1's counter: 5 of 5 ✓
-  {r}✗ 10 requests in 6 ms: twice the limit, and each counter says all is well{/}
-''', 'bad')
-        + w.table(['Way to count', 'What it keeps per key', 'Good at', 'The catch'], [
-            ['**Fixed window**', 'a counter, and when its window began', 'the simplest; right '
-             'for calendar quotas', 'twice the limit across a window edge'],
-            ['**Sliding window log**', 'the time of every request in the last period',
-             'exact: never more than the limit in any period', 'one entry per request'],
-            ['**Sliding window counter**', "this window's count and the last window's",
-             'nearly exact, with two numbers', "an estimate: assumes the last window's requests "
-             'were spread evenly'],
-            ['**Token bucket**', 'tokens, and when they were last topped up',
-             'bursts up to a set size, then a steady rate; two numbers', 'not "at most 5 in any '
-             'second" (see below)'],
-            ['**Leaky bucket**', 'a level that drains at a fixed rate', 'as a meter: the token '
-             'bucket in a mirror', 'as a queue it makes callers wait'],
-        ])
-        + w.xy([
-            ('Token bucket', 'fixed window', 'the most that can pass at once is 5, not 10 across a '
-             'window edge.'),
-            ('Token bucket', 'a sliding window log', 'two numbers per key instead of one timestamp '
-             'per request. The log is for small limits that must be exact: sign-ins.'),
-            ('Fixed window for the daily quota', 'a token bucket', 'a quota per calendar day IS a '
-             'fixed window, and the per-second rules already stop bursts.'),
-        ])
-        + w.md('''
-        The core codes three of these; the counter and the leaky bucket come in
-        [More ways to count](#more).
-
-        ## How the token bucket works
-
-        score-widget is on FREE, 5 a second. The bucket holds at most **5 tokens** (its capacity:
-        the biggest burst), and one token comes back every **200 ms**. A request takes a token; if
-        none is there, it is refused, and we know exactly when the next token arrives. No timer
-        adds the tokens: when a request comes in, the bucket works out what it earned since it
-        last looked (a *lazy refill*).
-        ''')
-        + w.asc('''
-  millisPerToken  =  period / capacity                  1,000 ms / 5  =  {a}200 ms{/}
-  earned  =  elapsed / millisPerToken                  120 ms / 200 ms  =  {a}0.6 of a token{/}
-  tokens  =  min(capacity, tokens + earned)            never more than {a}5{/}
-  wait    =  ceil((cost - tokens) × millisPerToken)    (1 - 0.6) × 200  =  {a}80 ms{/}
+   window A (0 – 999 ms)              window B (1000 – 1999 ms)
+ |==================================|==================================|
+   ✓ ✓ ✓ ✓ ✓   ✗   ✗                  ✓ ✓ ✓ ...
+   count: 1 2 3 4 5  (full)           count resets to 0 at 1000 ms
+               ✗ "retry at 1000 ms"
 ''')
-        + w.md("score-widget's bucket through one busy second (the [bucket](#bucket) step runs "
-               'it on the real class):')
-        + w.table(['Time', 'Tokens on arrival (refilled)', 'Request', 'Answer', 'Tokens after'], [
-            ['0 ms', '5', '1 to 5', 'allowed: 4, 3, 2, 1, 0 left', '0'],
-            ['0 ms', '0', '6', '<span class="no">refused, retry in 200 ms</span>', '0'],
-            ['120 ms', '0.6', '7', '<span class="no">refused, retry in 80 ms</span>', '0.6'],
-            ['200 ms', '1.0', '8', 'allowed, 0 left', '0'],
-            ['2,200 ms', '5 (10 earned, capped at 5)', '7 at once', '5 allowed, 2 refused', '0'],
-        ], cls='trace')
-        + w.box('why', 'Is it exact?',
-                'No. In any 200 ms at most 6 requests pass (5 saved, 1 earned), where a fixed '
-                'window lets 10 through across an edge. But over a whole second a client can get '
-                '**10**: a full bucket, then the 5 it earns during that second. A token bucket '
-                'limits the burst and the average rate, not "at most 5 in any second". When the '
-                'rule must be exact, count with a log.')
-        + w.asks([
-            ('Why not the fixed window everywhere? It is simpler.',
-             'It lets twice the limit through across a window edge (the ✗ above). For a daily '
-             'quota that edge does not matter; for a per-second rate it is the whole problem.'),
-            ('How does the sliding window counter estimate?',
-             "Current window's count, plus the previous window's count times the share of it "
-             'still inside the last second: at 300 ms, `current + previous × 0.7`. It is wrong '
-             "only when the previous window's requests were bunched up. Code in "
-             '[More ways to count](#more).'),
-        ]))
+        + w.md('**Retry after:** the end of the current window. **The catch:** the edge between '
+               'two windows.')
+        + w.asc('''
+   window A                          window B
+ |==================================|==================================|
+                          ✓✓✓✓✓     |  ✓✓✓✓✓
+                         at 995 ms  |  at 1001 ms
 
-
-# ==================================================================================== design
-# How to get there, as a train of thought: start from the class everyone writes, look at it, notice
-# what is wrong with it, try the obvious fix, see why that fails, and settle on a few named types.
-# `adds` lists them as (name, kind).
-MOVES = [
-    dict(q='My limiter says no. What does the client do with a no?',
-         think='''
-        The problem says a refused client gets 429, when to retry, and which rule refused. My
-        `allow()` returns `false`, so the client just retries in a loop: the very bug that started
-        this. The input is thin too: the rules also need the endpoint, the IP and the cost.
-        ''',
-         so='''
-        So both ends become **records**, and the limiter an **interface** with one method.
-        ''',
-         adds=[('RequestContext', 'record'), ('Decision', 'record'), ('RateLimitResult', 'record'),
-               ('RateLimiter', 'interface')],
-         code='''
-record RequestContext(String clientId, String ip, String endpoint, int cost) { }
-record Decision(boolean allowed, long remaining, long retryAfterMillis) { }        // one bucket
-record RateLimitResult(boolean allowed, long remaining, long retryAfterMillis,
-                       String refusedBy) { }                                      // the request
-
-interface RateLimiter {
-    RateLimitResult check(RequestContext request);
-}''',
-         xy='Records in and out, not a boolean. The interviewer\'s `rateLimit(customerId)` stays, '
-            'as a one-line default method on top of `check`.'),
-    dict(q='Every answer depends on the time. Where does my code get the time from?',
-         think='''
-        `allow()` calls `System.currentTimeMillis()` inside. Every decision hangs on that hidden
-        number, so to check that 120 ms of quiet earns 0.6 of a token, I would have to sleep and
-        hope the machine is not busy.
-        ''',
-         so='''
-        So the limiter is **handed** a clock: the real one in production, one I move by hand in
-        tests.
-        ''',
-         adds=[('Clock', 'interface'), ('SystemClock', 'class'), ('ManualClock', 'class')],
-         code='''
-interface Clock {
-    long nowMillis();
-}
-
-class ManualClock implements Clock {            // advance(120) is "120 ms later", instantly
-    private volatile long now;
-    public long nowMillis() { return now; }
-    void advance(long millis) { now += millis; }
-}''',
-         xy='Time handed in, not read inside.'),
-    dict(q='Many requests arrive at once. Who waits for whom?',
-         think='''
-        `synchronized allow()` locks the whole limiter, so the widget's 2,000 requests a second
-        queue the paying fantasy app behind them. Yet all that needs guarding is one client's two
-        numbers.
-        ''',
-         so='''
-        So those numbers, their arithmetic and their lock move into a **class** per client.
-        ''',
-         adds=[('TokenBucket', 'class'), ('Limit', 'record')],
-         code='''
-record Limit(int capacity, long periodMillis) { }          // 5 per 1,000 ms
-
-class TokenBucket {
-    private double tokens;                                  // one client's numbers...
-    private long lastRefillMillis;
-
-    synchronized Decision tryConsume(int cost, long nowMillis) { ... }   // ...and their lock
-}''',
-         xy='A lock per bucket, not one lock for everyone.'),
-    dict(q='Does every rule in the problem want a token bucket?',
-         think='''
-        Sign-ins must be exact, and the quota resets at midnight: a token bucket can do neither.
-        The obvious fix, `if (type == LOG) ... else ...` in the limiter, reopens that method for
-        every new way of counting.
-        ''',
-         so='''
-        So each way of counting is a class behind one **interface**, and an **enum** names them
-        for the rules.
-        ''',
-         adds=[('Bucket', 'interface'), ('SlidingWindowLog', 'class'),
-               ('FixedWindowCounter', 'class'), ('BucketFactory', 'interface'),
-               ('Algorithm', 'enum')],
-         code='''
-interface Bucket {                                         // TokenBucket implements it too
-    Decision tryConsume(int cost, long nowMillis);
-}
-
-interface BucketFactory {
-    Bucket create(Limit limit, long nowMillis);
-}
-
-enum Algorithm implements BucketFactory {                 // no switch anywhere
-    TOKEN_BUCKET(TokenBucket::new),
-    SLIDING_WINDOW_LOG(SlidingWindowLog::new),
-    FIXED_WINDOW(FixedWindowCounter::new);
-    ...
-}''',
-         xy='An interface, not a switch. This is the Strategy pattern.'),
-    dict(q='How do the five limits from the problem get into the code?',
-         think='''
-        My hands want `if (plan == PRO)` and `if (endpoint.equals("/search"))`: product decisions
-        welded into the limiter. Side by side, though, all five limits answer the same four
-        questions: which requests, whose budget, how much, counted how.
-        ''',
-         so='''
-        So a limit is a **rule**: a record of those four answers, and the product's rules are a list.
-        ''',
-         adds=[('RateLimitRule', 'record'), ('KeyScope', 'enum'), ('LimitPolicy', 'interface'),
-               ('PlanLimits', 'class'), ('Plans', 'class'), ('Plan', 'enum'),
-               ('RuleBook', 'class'), ('ScoreApiRules', 'class')],
-         code='''
-record RateLimitRule(String name,
-                     Predicate<RequestContext> appliesTo,   // which requests: "/search" only
-                     KeyScope scope,                        // whose budget: CLIENT, IP, EVERYONE
-                     LimitPolicy limits,                    // how much: fixed, or by Plan
-                     Algorithm algorithm) { }               // how to count
-
-// ScoreApiRules, one of the five:
-new RateLimitRule("search", withKey().and(endpoint("/search")), KeyScope.CLIENT_AND_ENDPOINT,
-        LimitPolicy.fixed(Limit.perSecond(2)), Algorithm.TOKEN_BUCKET)''',
-         xy='Rules as data, not if-statements. A new limit is one new line in `ScoreApiRules`.'),
-    dict(q='Each rule needs a bucket per client. Where do they all live?',
-         think='''
-        My map does `get`, then `put` if nothing is there. Two threads meeting a new client both
-        see nothing, both create a bucket, and the client gets two budgets. And where buckets live
-        is exactly what changes on more servers.
-        ''',
-         so='''
-        So buckets live in a **store** behind an interface, found or created in one atomic step.
-        ''',
-         adds=[('BucketStore', 'interface'), ('InMemoryBucketStore', 'class')],
-         code='''
-interface BucketStore {
-    Bucket bucketFor(String key, BucketFactory factory, Limit limit, long nowMillis);
-}
-
-// InMemoryBucketStore: a ConcurrentHashMap, and look-create-store as one step
-return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));''',
-         xy='A store behind an interface, not a map inside the limiter.'),
-    dict(q='A search passes three rules. What if the third one says no?',
-         think='''
-        Plan takes a token, quota takes one, then search refuses: two tokens gone for a request
-        that never ran. Checking every rule first and taking afterwards does not help: another
-        thread can spend the token in between.
-        ''',
-         so='''
-        So the limiter charges rules in order and refunds them all on the first refusal.
-        ''',
-         adds=[('RuleBasedRateLimiter', 'class')],
-         code='''
-for (RateLimitRule rule : rules.matching(request)) {
-    Bucket bucket = bucketFor(rule, request, now);          // key -> store -> bucket
-    Decision d = bucket.tryConsume(request.cost(), now);
-    if (!d.allowed()) {
-        for (Bucket spent : charged) {
-            spent.refund(request.cost(), now);              // all or nothing
-        }
-        return RateLimitResult.refused(d, rule.name());
-    }
-    charged.add(bucket);
-}''',
-         xy='A loop with a refund, not a Chain of Responsibility: a chain stops at the first '
-            'handler that takes the request, and here every rule must agree.'),
-    dict(q='Who turns a refusal into a 429, and how does ops see it?',
-         think='''
-        Putting the 429 and a log line inside `check` ties the limiter to HTTP and our logger, and
-        every new report would edit the class that must never break.
-        ''',
-         so='''
-        So HTTP stays in a filter at the door, and reports are listeners on the side.
-        ''',
-         adds=[('RateLimitFilter', 'class'), ('RateLimitListener', 'interface'),
-               ('RefusalMetrics', 'class')],
-         code='''
-// RateLimitFilter: HTTP in, HTTP out; the limiter never sees a status code
-Response handle(RequestContext request, Function<RequestContext, Response> endpoint)
-
-interface RateLimitListener {                               // RefusalMetrics is one
-    void onDecision(RequestContext request, RateLimitResult result);
-}''',
-         xy='HTTP at the door and listeners on the side, not inside the limiter. The listeners '
-            'are the Observer pattern.'),
-]
-
-KIND_SHORT = {'record': 'record', 'interface': 'interface', 'class': 'class', 'enum': 'enum'}
-
-
-def grown(upto, everything=False):
-    """This push's new types as chips; with everything=True, the whole design at the end."""
-    moves = MOVES if everything else [MOVES[upto]]
-    chips = ''.join(f'<span class="chip {"done" if everything else "now"}">{name} '
-                    f'<small>{KIND_SHORT[kind]}</small></span>'
-                    for m in moves for name, kind in m['adds'])
-    total = sum(len(m['adds']) for m in MOVES[:upto + 1])
-    label = f'all {total} types' if everything else f'new · {total} so far'
-    return (f'<div class="strip grow"><div class="sg"><span class="sl">{label}</span>'
-            + chips + '</div></div>')
-
-
-def derive(w):
-    first = w.runs.demo('FirstCut')
-    cls = first[first.index('class FirstCutLimiter'):first.index('public class FirstCut ')].strip()
-    moves = ''
-    for i, m in enumerate(MOVES):
-        moves += (w.md(f'### {i + 1} · {m["q"]}')
-                  + w.md(m['think']) + w.md(m['so'])
-                  + w.snippet(m['code'])
-                  + w.md(f'**{m["xy"]}**')
-                  + grown(i))
-    return step('derive', D, 'How to get there', 'How the design grows, one question at a time',
-                minutes=7, body=
-        w.md('''
-        Nobody designs twenty classes up front. You write the class that works, then look at it and
-        ask awkward questions, prompted by the problem or by the code. Each answer breaks something,
-        the obvious patch fails, and a few small types fall out. Ask each question yourself before
-        reading on.
-
-        This is the class everyone writes first. It is compiled and run here:
-        ''')
-        + w.snippet(cls, label='FirstCut.java', note='the 15-minute version')
-        + w.run('FirstCut')
+   window A's count: 5 → fine        window B's count: 5 → fine
+   {r}but 10 requests passed in 6 ms  ✗  twice the limit{/}
+''', 'bad')
         + w.md('''
-        It is right for one limit, one kind of client, one server. Now look at it hard.
+        **Still useful for:** a daily quota ("10,000 a day, resets at midnight"). There the
+        calendar day is the rule, and a per-second limit already stops bursts.
+
+        ## 2. Sliding window log
+
+        **Idea:** remember the time of every allowed request. "The last second" moves with now,
+        and you count only the timestamps inside it. **Keeps per customer:** a list of timestamps,
+        oldest first.
         ''')
-        + moves
+        + w.asc('''
+                  ┌───────── the last 1000 ms ─────────┐
+ ─────────────────┼────────────────────────────────────┼────▶ time
+              now − 1000                              now
+   older timestamps          count the ones in here;
+   are thrown away           fewer than 5 → allow
+
+ t = 0..400   allowed at 0, 100, 200, 300, 400       → log [0, 100, 200, 300, 400]
+ t = 995      last 1000 ms = (−5 .. 995]: all 5 inside → ✗ refused
+              retry when the oldest (0) leaves: 0 + 1000 − 995 = 5 ms
+ t = 1001     last 1000 ms = (1 .. 1001]: 0 drops out  → 4 inside
+              ✓ allowed                                → log [100, 200, 300, 400, 1001]
+''')
+        + w.md('**Retry after:** when the oldest timestamp leaves the window. The fixed window\'s '
+               'edge problem cannot happen:')
+        + w.asc('''
+ 5 at 995 ms  → log [995, 995, 995, 995, 995]
+ at 1001 ms   → all 5 still inside the last second → ✗ until 1995 ms
+ {g}never more than 5 in ANY 1000 ms: exact{/}
+''')
+        + w.md('**The catch:** one timestamp per request.')
+        + w.asc('''
+ limit 600 a minute  → up to 600 timestamps per customer
+ 1 million customers → up to 600 million timestamps   {r}✗ memory{/}
+''')
         + w.md('''
-        That is the whole design, grown from one class by eight questions:
+        **Use for:** small limits that must be exact, like sign-in attempts (5 a minute per IP).
+
+        ## 3. Sliding window counter: the log's answer, guessed
+
+        The log asks "how many requests in the last second?" and answers exactly, because it keeps
+        every timestamp. The counter asks the same question but keeps only two numbers, like a
+        fixed window: how many requests came in the **previous** second, and how many have come in
+        **this** second so far.
+
+        To keep the arithmetic easy, take a limit of 10 a second. The previous second had 10
+        requests, this one has 2 so far, and the time is 1300 ms.
+
+        **Step 1: draw "the last 1 second".**
         ''')
-        + grown(len(MOVES) - 1, everything=True)
+        + w.asc('''
+        previous second (10 requests)        current second (2 so far)
+ |────────────────────────────────────|────────────────────────────────────|
+ 0                                  1000                                 2000
+             |◄─────────── last 1 second ───────────►|
+            300                                    1300 = now
+''')
         + w.md('''
-        Patterns you might expect and do not see (Singleton, Builder, an abstract base bucket) are
-        explained in [Principles and patterns](#principles).
+        The last second covers 700 ms of the previous second and the first 300 ms of this one.
+
+        **Step 2:** we do not know where the previous 10 requests fell, so assume they were spread
+        evenly, one per 100 ms.
+        ''')
+        + w.asc('''
+ |  ●  |  ●  |  ●  |  ●  |  ●  |  ●  |  ●  |  ●  |  ●  |  ●  |
+ 0    100   200   300   400   500   600   700   800   900   1000
+ └──── 3 outside ──┘└────────── 7 inside the last second ──────────┘
+''')
+        + w.md('''
+        So 70% of 10 = 7 of them count.
+
+        **Step 3:** add this second's real count. 7 + 2 = 9. The limit is 10, so one more fits ✓.
+        ''')
+        + w.asc('''
+ guess = previous × (share still inside) + current
+       =   10     ×        70%           +    2     = 9
+''')
+        + w.md('''
+        **The catch:** "assumes evenly spread". If all 10 previous requests came at 950 ms, all 10
+        are inside the last second, but the guess still counts 7, so a few extra requests slip
+        through. A small error, and that is the whole catch.
+        ''')
+        + w.asc('''
+ what it guesses:  | ● | ● | ● | ● | ● | ● | ● | ● | ● | ● |   → counts 7
+ what happened:    |   |   |   |   |   |   |   |   |   |●●●●●●●●●●| → really 10
+''')
+        + w.md('''
+        **Why use it:** three numbers per customer instead of one timestamp per request, and
+        almost exact.
+
+        ## 4. Token bucket: a fixed window that refills one ticket at a time
+
+        Think of the fixed window as a jar of 5 tickets. At every clock tick (0 ms, 1000 ms,
+        2000 ms) someone refills it to 5 all at once, and each request takes a ticket. That
+        all-at-once refill is exactly why 10 requests can pass around 1000 ms.
+
+        The token bucket changes one thing: the jar gets **one ticket every 200 ms** (5 a second),
+        and never holds more than 5.
+        ''')
+        + w.asc('''
+     FIXED WINDOW                         TOKEN BUCKET
+     refilled to 5 at each tick           +1 ticket every 200 ms
+     (at 0, 1000, 2000 ms)
+           │                                    │
+           ▼                                    ▼
+       ┌───────┐                            ┌───────┐
+       │ ●●●●● │  max 5                     │ ●●●●● │  max 5
+       └───┬───┘                            └───┬───┘
+           ▼ each request takes 1               ▼ each request takes 1
+       empty → ✗                            empty → ✗
+''')
+        + w.md('Walk through it:')
+        + w.asc('''
+ time      what happens                                    jar after
+ 0 ms      jar starts full                                 ●●●●●
+ 0 ms      5 requests, each takes one        ✓✓✓✓✓         (empty)
+ 0 ms      6th request, no ticket            ✗             (empty)
+ 200 ms    +1 ticket drops in                              ●
+ 200 ms    a request takes it                ✓             (empty)
+ 300 ms    a request; next ticket at 400 ms  ✗ "retry in 100 ms"
+ 400 ms    +1 ticket drops in                              ●
+ ... quiet until 3400 ms: 15 tickets would drop, the jar holds 5
+ 3400 ms                                                   ●●●●●
+''')
+        + w.md('The fixed window\'s edge problem does not happen, because nothing refills all at '
+               'once:')
+        + w.asc('''
+ 995 ms    jar full → 5 requests            ✓✓✓✓✓     jar empty
+ 1001 ms   only 6 ms later, no new ticket   ✗✗✗✗✗     (next ticket at 1195 ms)
+''')
+        + w.md('''
+        There is no machine dropping tickets. When a request arrives, the code works out how many
+        tickets would have dropped since it last looked:
+        ''')
+        + w.asc('''
+ tickets earned = (now − last time) ÷ 200 ms
+ e.g. last looked at 0 ms with 0 tickets, now 600 ms → 600 ÷ 200 = 3 tickets
+''')
+        + w.md('''
+        It keeps parts of a ticket too: 120 ms earns 0.6 of one. That is why a refused request at
+        120 ms hears "retry in 80 ms": the missing 0.4 of a ticket takes 80 ms.
+
+        **What it promises:** at most 5 at once (a full jar), and 5 a second on average (the
+        drip). After a quiet spell a customer can use the full jar and then 1 more every 200 ms:
+        up to 10 within that first second. That is what "not at most 5 in any second" means, and
+        for an API it is fine.
+
+        ## 5. Leaky bucket: the token bucket, counted the other way
+
+        Picture a bucket with a small hole: each request pours in 1 cup, the hole drains 1 cup
+        every 200 ms, the bucket holds 5 cups, and a request whose cup would overflow it is
+        refused ✗.
+        ''')
+        + w.asc('''
+ moment              token bucket          leaky bucket
+ start (quiet)       ●●●●●  5 tickets      empty    0 cups
+ after 3 requests    ●●     2 tickets      ~~~      3 cups
+ after 5 requests    empty  → next ✗       ~~~~~    5 cups, full → next ✗
+ 200 ms later        ●      1 ticket → ✓   ~~~~     4 cups, room → ✓
+''')
+        + w.md('''
+        Same answer every time, because water = 5 − tickets. In the room: "a leaky bucket that
+        answers yes or no is just the token bucket, mirrored."
+
+        Its other use is as a **queue**: a clerk serves one person every 200 ms; a burst stands in
+        line instead of hearing no, and arrivals are turned away only when 5 already wait. Good for
+        calls *we* send (staying under a partner's 5 a second); bad for incoming requests, which
+        want a yes or a no now.
+
+        ## All of them on the same two tests
+
+        **Test 1, the window edge:** 5 requests at 995 ms, then 5 more at 1001 ms.
+        ''')
+        + w.asc('''
+                  at 995 ms   at 1001 ms   passed
+ fixed window     ✓✓✓✓✓       ✓✓✓✓✓        10   ✗ refilled all at once at 1000
+ sliding log      ✓✓✓✓✓       ✗✗✗✗✗         5   all 5 still in the last second
+ sliding counter  ✓✓✓✓✓       ✗✗✗✗✗         5   guess 5 × 99.9% ≈ 5, no room
+ token bucket     ✓✓✓✓✓       ✗✗✗✗✗         5   jar empty, next ticket at 1195
+ leaky bucket     ✓✓✓✓✓       ✗✗✗✗✗         5   bucket full, room at 1195
+''')
+        + w.md('**Test 2, a steady trickle:** 5 at 0 ms, then one every 200 ms. It shows how the '
+               'log and the token bucket differ.')
+        + w.asc('''
+                  0 ms     200   400   600   800   1000
+ sliding log      ✓✓✓✓✓    ✗     ✗     ✗     ✗     ✓    strict: 5 in ANY second
+ token bucket     ✓✓✓✓✓    ✓     ✓     ✓     ✓     ✓    burst of 5, then 1 per 200 ms
+''')
+        + w.md('''
+        In one line each:
+
+        - **Fixed window:** 5 per clock second.
+        - **Log:** never more than 5 in any second, exactly.
+        - **Counter:** the log's answer, guessed from two numbers.
+        - **Token bucket:** a burst of 5, then a steady 5 a second.
+        - **Leaky bucket:** the token bucket mirrored, or a queue served at a steady pace.
+
+        **The core types the token bucket:** two numbers per customer, bursts allowed, a precise
+        Retry-After, and it is what Stripe and AWS API Gateway use. The others are one class
+        each, a follow-up ([More ways to count](#windows)) proves it, and its demo runs both tests
+        above on the real classes.
         '''))
 
 
+# ==================================================================================== design
 def design(w):
-    return step('design', D, 'The design', 'The design in one picture', minutes=5, body=
-        w.md('Here is where the last step ends up. The server wires it once, at startup:')
-        + w.snippet('''
-// At startup:
-RateLimiter limiter = new RuleBasedRateLimiter(ScoreApiRules.build(plans),
-        new InMemoryBucketStore(), new SystemClock());
-RateLimitFilter api = new RateLimitFilter(limiter);
+    return step('design', D, 'The design', 'The design, top-down', minutes=12, body=
+        w.md('''
+        Start where a request starts, at the API's front door, and keep asking "what does this
+        need?". When a question opens a deeper one, follow it down until it is settled, then come
+        back up and carry on. ↓ marks going deeper, ↑ coming back. Each answer is a type.
 
-// For every request:
-RateLimitFilter.Response response = api.handle(request, scores::serve);
-''', label='the server')
-        + w.fig(figures.classes(), title='The classes',
-                caption='Five layers: the front door, the limiter, what it is handed, one rule, '
-                        'and the buckets that count. Dashed boxes are interfaces.')
-        + w.fig(figures.journey(), title="fantasy-app's third search in one second",
-                caption='Plan and quota allow it, search refuses, the earlier tokens come back, '
-                        'the listener hears it, and the client gets 429.')
-        + w.md('## Who does what')
-        + w.table(['Class', 'Its one job', 'It changes when'], [
-            ['`RateLimitFilter`', 'turn a result into HTTP: 429, Retry-After, headers', 'the web '
-             'framework changes'],
-            ['`RateLimiter`', 'the question the API asks', 'rarely: it is the contract'],
-            ['`RuleBasedRateLimiter`', 'charge every matching rule, or none', 'the way rules '
-             'combine changes'],
-            ['`RuleBook`, `RateLimitRule`', 'which rules exist, and what each covers',
-             'the product adds a limit: data, not code'],
-            ['`KeyScope`', 'whose budget a request spends', 'a new kind of key appears'],
-            ['`LimitPolicy`, `PlanLimits`, `Plans`', 'how much, from the plan', 'plans or '
-             'prices change'],
-            ['`Algorithm`, `BucketFactory`', 'how to count, by name', 'a new way of counting'],
-            ['`Bucket` and its classes', "count one key's requests", 'the arithmetic changes'],
-            ['`BucketStore`', 'where buckets live', 'many servers ([Redis](#redis))'],
-            ['`RateLimitListener`', 'hear every decision', 'ops want a new report'],
-            ['`Clock`', 'tell the time', 'never: tests hand in a manual one'],
-            ['the records', 'carry values between the others', 'a new field is needed'],
-        ], cls='who')
+        ### 1 · A request arrives. What must happen before any work?
+
+        Authentication has already turned the API key into a customer id. Then one question,
+        asked by the request handler: *may this customer go ahead now?* The handler
+        should not know how the answer is worked out, so the question is an **interface** with
+        one method. The answer is more than yes or no, because a refused customer must hear when
+        to retry: a small **record**.
+        ''')
+        + w.snippet('''
+// the front door, in the request handler
+Decision d = limiter.check(customerId);
+if (!d.allowed()) {
+    return tooManyRequests(d.retryAfterMillis());   // 429; Retry-After in seconds, rounded up
+}
+return serveScores(request);''', label='the handler')
         + w.md('''
-        The last column is single responsibility: each reason to change lands in one class.
+        → `RateLimiter` (`check`, plus the interviewer's `boolean rateLimit(customerId)` as a
+        one-line default), `Decision`.
+
+        ### 2 · ↓ What does the limiter need to answer?
+
+        Three things: **how much** this customer may do, **what it has done** so far, and **what
+        time it is**. Write the method first, with names that do not exist yet; each name is a
+        question to settle next:
+        ''')
+        + w.snippet('''
+long now = clock.nowMillis();
+Limit limit = limits.limitFor(customerId);                 // how much?
+Counter counter = counters.counterFor(customerId, limit, now);   // what has it done?
+return counter.tryAcquire(now);''', label='PerKeyRateLimiter.check, first draft')
+        + w.md('''
+        All three are **handed in** through the constructor, so each can be swapped without
+        touching this class. Time is handed in too: then a demo can say "200 ms later" without
+        sleeping. → `PerKeyRateLimiter`, `Clock`.
+
+        ### 3 · ↓ How much?
+
+        "X requests every Y seconds" is a value: `Limit(requests, periodMillis)`. Who decides the
+        limit for a customer? Today: a few customers have their own, everyone else a default.
+        Tomorrow ("we will add to it"): perhaps by plan. So that choice sits behind a one-method
+        **interface**, and today's answer is a map with a default. → `Limit`, `LimitPolicy`,
+        `CustomerLimits`. ↑ Tiers later are just another `LimitPolicy`; nothing above changes.
+
+        ### 4 · ↓ What has the customer done?
+
+        Some state per customer, and a rule for updating it: that is the algorithm. One method,
+        "may one more pass now?", so each way of counting is a class behind an **interface** and
+        the limiter never knows which one it holds (the **Strategy** pattern). → `Counter`.
+
+        ↓ **Which one?** The token bucket (see [How to count](#counting)). → `TokenBucket`.
+
+        ↓ **Two threads for the same customer at once?** Refill, check and take must be one step,
+        or both can take the last token. `synchronized` on the bucket: the lock is per customer,
+        so customers never wait on each other. ↑
+
+        ### 5 · ↓ Where does each customer's counter live?
+
+        In a map from customer to counter, shared by every request thread. Two threads meeting a
+        new customer must get the same counter, so finding and creating are one step:
+        `ConcurrentHashMap.computeIfAbsent`. The limit goes into the map's key too, so a customer
+        whose limit changes simply starts a new counter. And this is the one thing that changes when many
+        servers must share one budget, so the map sits behind an **interface** too. Which
+        algorithm to create is a plain **enum** and a `switch` in the store. → `CounterStore`,
+        `InMemoryCounterStore`, `Algorithm`. ↑
+
+        ### 6 · ↑ Back to the limiter, then to the door
+
+        Every name in the first draft now exists. The limiter keeps no state of its own, so it
+        needs no lock, and no thread ever holds two locks, so nothing can deadlock. At startup,
+        `Main` builds the three parts and hands them in.
+
+        ## The whole design
+        ''')
+        + w.asc('''
+ the front door      limiter.check(customer) → 429 + Retry-After, or do the work
+ └─ {a}RateLimiter{/}        the question                       → {a}Decision{/}
+    └─ {a}PerKeyRateLimiter{/}   asks three things, holds no state
+       ├─ how much?          {a}LimitPolicy{/} → {a}Limit{/}         {d}CustomerLimits: own limit, or a default{/}
+       ├─ what has it done?  {a}CounterStore{/} → {a}Counter{/}      {d}one counter per customer{/}
+       │  ├─ counted how?    {a}TokenBucket{/}                 {d}synchronized: one lock per customer{/}
+       │  └─ kept where?     {a}InMemoryCounterStore{/}        {d}computeIfAbsent; Algorithm + switch{/}
+       └─ what time?         {a}Clock{/}                       {d}handed in: System::currentTimeMillis{/}
+''')
+        + w.md('''
+        ## Walk one case before typing
+
+        score-widget, 5 a second, sends 7 requests at 0 ms. Its bucket starts full: 5 pass, the
+        6th and 7th hear "retry in 200 ms". At 120 ms one more: 0.6 of a token earned, refused,
+        "retry in 80 ms". At 200 ms: one whole token, allowed. cricket-blog at 200 ms has its own
+        bucket, full: allowed. [Run it](#run) prints exactly this.
+
+        ## Where each new requirement will land
+        ''')
+        + w.table(['They add', 'It lands in', 'Above it, nothing changes'], [
+            ['another way of counting', 'a new `Counter` class and one `case`',
+             '[More ways to count](#windows)'],
+            ['tiers: FREE 5 a second, PRO 50', 'a new `LimitPolicy`', '[Tiers](#tiers)'],
+            ['search, a daily quota, sign-ins by IP, a global cap', 'more limiters with other '
+             'keys, checked in order at the door', '[Every limit at the door](#door)'],
+            ['many servers, one budget', 'a `CounterStore` on Redis', '[Many servers](#servers)'],
+            ['a million quiet customers', 'a sweep in the store', '[Memory](#idle)'],
+        ])
+        + w.md('''
+        That table is the "extensible" the interviewer asked for, and the SOLID story without the
+        acronym: each class has one reason to change, new behaviour arrives as a new class rather
+        than an edit, and the limiter depends on interfaces it is handed.
         '''))
 
 
 # ===================================================================================== build
-def answer(w):
-    return step('answer', B, 'The answer', 'What goes in, what comes out', minutes=3, stage='Build · the values', body=
-        w.strip(now=['RequestContext', 'Limit', 'Decision', 'RateLimitResult', 'RateLimiter'])
-        + w.md('''
-        Four records and the one interface the API calls; no logic yet.
-        ''')
-        + w.code(['RequestContext.java', 'Limit.java', 'Decision.java', 'RateLimitResult.java',
-                  'RateLimiter.java'])
-        + w.run('AnswerDemo')
-        + w.asks([
-            ('They asked for `boolean rateLimit(customerId)`. Why a record?',
-             'Both: `rateLimit` is a one-line default method over `check`. The record is what lets '
-             'the API send Retry-After and name the rule; a boolean cannot.'),
-            ('Why records at all?',
-             'A record is an immutable class: Java writes the constructor, accessors, `equals`, '
-             '`hashCode` and `toString`. Immutable means any number of threads can share it without '
-             'a lock.'),
-        ]))
-
-
-def time_(w):
-    return step('time', B, 'Time', 'Where time comes from', minutes=3, stage='Build · time', body=
-        w.strip(now=['Clock', 'SystemClock', 'ManualClock'])
-        + w.md('''
-        Time is handed in: the wall clock in production, a clock moved by hand in tests, so no test
-        ever sleeps.
-        ''')
-        + w.code(['Clock.java', 'SystemClock.java', 'ManualClock.java'])
-        + w.run('TimeDemo')
-        + w.md('''
-        ## A thread break: the stale read
-
-        The test thread moves the clock; request threads read it. Without `volatile`, Java does
-        not promise a request thread ever sees the new time: it may keep reading 0 forever, and
-        the bucket never refills. `volatile` makes every write visible to later reads; it does not
-        make `now += millis` one step, which is fine because only the test thread writes. (The
-        other two thread breaks come in [the token bucket](#bucket) and [the store](#store).)
-        ''')
-        + w.asks([
-            ('Why not `nanoTime`?',
-             '`nanoTime` never jumps, but it knows nothing about midnight, and the daily quota '
-             'starts again at midnight. So the wall clock, and buckets that tolerate its jumps: '
-             'a jump back freezes refills until the clock catches up; a jump forward refills '
-             'early, at most one burst per key. The purist answer is two clocks, a monotonic one '
-             'for rates and the wall clock for quotas; one clock is simpler, and the harm is '
-             'bounded.'),
-        ]))
-
-
-def bucket(w):
-    return step('bucket', B, 'The token bucket', 'Counting one key: the token bucket', minutes=7, stage='Build · counting', body=
-        w.strip(now=['Bucket', 'TokenBucket'])
-        + w.md('''
-        A bucket is told the time and the cost, adds what the time earned, then takes the tokens or
-        says how long to wait. `Bucket` is the question every way of counting answers;
-        `TokenBucket` is the first answer.
-        ''')
-        + w.code(['Bucket.java', 'TokenBucket.java'])
-        + w.md('The trace from [How to count](#counting), on the real class:')
-        + w.run('BucketDemo')
-        + w.md('''
-        ## A thread break: the lost update
-
-        Refill, check and take is a read, then a write. If two threads read the same number
-        before either writes, both decide on it, and one update is lost:
-        ''')
-        + w.pair(w.asc('''
-{r}✗ without synchronized{/}
-  one token left, two requests at once
-
-  thread A           thread B
-  refill: 1.0
-  1.0 >= 1? yes      refill: 1.0
-  tokens = 0.0       1.0 >= 1? yes
-  allowed            tokens = 0.0
-                     allowed
-
-  {y}B read 1.0 before A wrote 0.0{/}
-  {r}✗ one token, two requests{/}
-''', 'bad'), w.asc('''
-{g}✓ with synchronized{/}
-  B waits until A leaves the method
-
-  thread A           thread B
-  refill: 1.0        {d}waiting for the{/}
-  1.0 >= 1? yes      {d}bucket's lock{/}
-  tokens = 0.0
-  allowed
-                     refill: 0.0
-                     0.0 >= 1? no
-                     retry in 200 ms
-  {g}✓ one token, one request{/}
-''', 'good'))
-        + w.md('''
-        The lock is the bucket itself, so each key has its own lock and keys never wait for each
-        other.
-        ''')
-        + w.xy([('A lock', 'an `AtomicLong`', 'two fields change together, `tokens` and '
-                 '`lastRefillMillis`, and an atomic variable guards one. The lock-free way keeps '
-                 'both in one immutable object swapped by compare-and-set (CAS); [Lock-free](#lockfree) '
-                 'builds it and measures both.')])
-        + w.asks([
-            ('Why is `tokens` a double?',
-             '120 ms earns 0.6 of a token. A `long` would make that 0, and since '
-             '`lastRefillMillis` moves on anyway, the 0.6 would be lost for good: a client sending '
-             'every 150 ms would get 5 requests and then nothing, ever. The tests catch it.'),
-            ('Why not a background thread that adds tokens?',
-             'A million clients would need a million timers. Working the tokens out when a '
-             'request arrives gives the same number, in O(1), with no threads.'),
-        ]))
-
-
-def count(w):
-    return step('count', B, 'Two more buckets', 'Two more ways to count, chosen by name', minutes=4, stage='Build · counting', body=
-        w.strip(now=['SlidingWindowLog', 'FixedWindowCounter', 'BucketFactory', 'Algorithm'])
-        + w.md('''
-        Each rule counts the way its job needs. Sign-ins must be exact, so they get a log of every
-        attempt; the daily quota is a calendar day, so it gets a fixed window. `Algorithm` names
-        the three for configuration, and each constant holds its bucket's constructor.
-        ''')
-        + w.code(['SlidingWindowLog.java', 'FixedWindowCounter.java', 'BucketFactory.java',
-                  'Algorithm.java'])
-        + w.run('CountDemo')
-        + w.md('''
-        The log holds the line until the first attempt is a minute old, where a token bucket would
-        let a sixth sign-in through at 12 s. Its price is one entry per allowed request, which is
-        why the token bucket stays the default.
-        ''')
-        + w.asks([
-            ('The derivation said "not a switch". Why an enum?',
-             'The enum is a registry of names for configuration: it holds constructors and never '
-             'switches on anything. A new way of counting is a new class and one new line here.'),
-        ]))
-
-
-def budget(w):
-    return step('budget', B, 'Whose budget, how much', 'Whose budget, and how much', minutes=4, stage='Build · rules', body=
-        w.strip(now=['KeyScope', 'LimitPolicy', 'Plan', 'Plans', 'PlanLimits'])
-        + w.md('''
-        Two questions every rule answers. *Whose budget does this request spend?* The client's,
-        the IP's, the client's for this endpoint, or everyone's: a `KeyScope`. *How much?* A fixed
-        limit, or one that depends on the client's plan: a `LimitPolicy`.
-        ''')
-        + w.code(['KeyScope.java', 'LimitPolicy.java', 'Plan.java', 'Plans.java', 'PlanLimits.java'])
-        + w.run('BudgetDemo')
-        + w.md('''
-        `PlanLimits`' map is set once in the constructor, so a `final` field is enough and every
-        thread sees it with no lock; `Plans` changes while requests run, so it is a
-        `ConcurrentHashMap`.
-        ''')
-        + w.asks([
-            ('A third plan?',
-             'One enum constant, and one entry in each rule\'s `PlanLimits`. No code that reads '
-             'limits changes.'),
-        ]))
-
-
-def book(w):
-    return step('book', B, 'The rule book', 'One rule, and the rule book', minutes=3, stage='Build · rules', body=
-        w.strip(now=['RateLimitRule', 'RuleBook', 'ScoreApiRules'])
-        + w.md('''
-        A rule puts the parts together: which requests, whose budget, how much, how to count.
-        `ScoreApiRules` is the product's limits, written once at startup.
-        ''')
-        + w.code(['RateLimitRule.java', 'RuleBook.java', 'ScoreApiRules.java'])
-        + w.run('RuleBookDemo')
-        + w.md('''
-        Search covers only requests with a key: `withKey().and(endpoint("/search"))`, which is
-        why the keyless search above meets only the global rule. Without the `withKey()`, every
-        keyless search would share one `anonymous` bucket, and three strangers would use up each
-        other's searches.
-        ''')
-        + w.asks([
-            ('Why is the global rule last?',
-             'Its one bucket is the busiest lock in the system, so only requests every other rule '
-             'allowed should reach it. Order never changes an answer, only how often that lock is '
-             'taken.'),
-        ]))
-
-
-def store(w):
-    return step('store', B, 'The store', 'Where buckets live', minutes=5, stage='Build · the store', body=
-        w.strip(now=['BucketStore', 'InMemoryBucketStore'])
-        + w.md('''
-        One bucket per key, made on the key's first request. The store decides where buckets live,
-        so [Redis](#redis) can replace it later.
-        ''')
-        + w.code(['BucketStore.java', 'InMemoryBucketStore.java'])
-        + w.md('## A thread break: check, then act')
-        + w.asc('''
-{r}✗ first idea: look, then put{/}
-
-  Bucket b = buckets.get(key);
-  if (b == null) {
-      b = factory.create(limit, now);
-      buckets.put(key, b);
-  }
-
-  thread A: news-app's 1st request       thread B: news-app's 2nd, same instant
-  get → null                             get → null
-  create bucket A: 5 tokens              create bucket B: 5 tokens
-  put A, take 1 from A                   put B {y}(replaces A){/}, take 1 from B
-  {r}✗ A's token came from a bucket the map no longer holds. Two threads: 6 pass where the
-    limit is 5. Sixteen threads racing on the first request: all 16 can pass.{/}
-
-{g}✓ computeIfAbsent: look, create and put are one step for that key. B waits, then gets A.{/}
-''')
-        + w.run('StoreDemo')
-        + w.asks([
-            ('Does `computeIfAbsent` lock the whole map?',
-             'No. At most one bin (a small slice of the table), and only while it creates a new '
-             'bucket. Other keys are never blocked, and a key that already has a bucket is '
-             'usually returned without any lock. Keep the lambda short and never touch the map '
-             'inside it.'),
-            ('Why not `putIfAbsent`?',
-             'Atomic too, but the bucket is built before the call, so one is created and thrown '
-             'away on every hit, and you must use the value it returns, not yours: forgetting that '
-             'is the classic bug.'),
-        ]))
+def question(w):
+    return step('question', B, 'The question', 'The question the API asks', minutes=3,
+                stage='Build · 1 of 6', body=
+        w.strip(now=['RateLimiter', 'Decision'])
+        + w.md('Type in the order of the design: the question first.')
+        + w.code(['RateLimiter.java', 'Decision.java'])
+        + say(w, 'The API depends only on this interface. `check` returns a `Decision` so the '
+                 'API can send Retry-After; the interviewer\'s `boolean rateLimit` is a one-line '
+                 'default on top.'))
 
 
 def limiter(w):
-    return step('limiter', B, 'The limiter', 'The limiter: every rule, or none', minutes=6, stage='Build · the limiter', body=
-        w.strip(now=['RuleBasedRateLimiter', 'RateLimitListener', 'RefusalMetrics'])
+    return step('limiter', B, 'The limiter', 'The limiter, written first', minutes=4,
+                stage='Build · 2 of 6', body=
+        w.strip(now=['PerKeyRateLimiter', 'Clock'])
         + w.md('''
-        The pieces meet: one clock reading, the rules that cover the request, each rule's bucket,
-        charged in order, everything refunded on the first refusal, then listeners told with no
-        lock held.
+        The limiter goes in next, before its parts: write the caller, then make its names exist.
+        It does not compile until the store exists, and that is normal in the room.
         ''')
-        + w.code(['RuleBasedRateLimiter.java', 'RateLimitListener.java', 'RefusalMetrics.java'])
-        + w.run('LimiterDemo')
-        + w.box('hole', 'The catch',
-                'For a few microseconds, between taking a token and giving it back, the token is '
-                'missing, so another request from the same client may be refused when it would '
-                'have fit. Rarely, a refund lands a sliver above what the cap would have left, '
-                'because another thread refilled in between. Both are tiny, and we accept them. The strict fix is to ask every rule '
-                'first and take afterwards, holding all their locks in a fixed order: more locks, '
-                'more waiting.')
-        + w.asks([
-            ('Which "remaining" goes in the header?',
-             'The smallest across the rules: the tightest one decides when the client is next '
-             'refused.'),
-            ('Why read the clock once, at the top?',
-             'So every rule judges the request at the same instant, and the clock is read outside '
-             'every lock.'),
-        ]))
+        + w.code(['PerKeyRateLimiter.java', 'Clock.java'])
+        + say(w, 'Three questions: how much, what has been done, what time. Each is handed in, '
+                 'so the policy can become tiers, the store Redis, and the clock a hand-moved one, '
+                 'and this class never changes. It holds no state, so it needs no lock.')
+        + w.xy([('Our own one-method `Clock`', '`java.time.Clock`', 'either works; ours is a '
+                 'lambda away from a hand-moved clock (`now::get`). With `java.time.Clock` use '
+                 '`Clock.fixed` in tests.')])
+        + w.md('''
+        **Wall clock or `nanoTime`?** `System.currentTimeMillis()` can jump back when the machine
+        syncs its clock; the bucket's `elapsed <= 0` guard makes that earn nothing. Within one JVM,
+        `System.nanoTime()` never jumps and is the better source for elapsed time; the wall clock
+        matters only when servers must agree on a time (Redis).
+        '''))
 
 
-def door(w):
-    return step('door', B, 'The front door', 'The front door: HTTP', minutes=3, stage='Build · the front door', body=
-        w.strip(now=['RateLimitFilter'])
+def limits(w):
+    return step('limits', B, 'How much', 'How much: the limit, and who decides it', minutes=3,
+                stage='Build · 3 of 6', body=
+        w.strip(now=['Limit', 'LimitPolicy', 'CustomerLimits'])
+        + w.code(['Limit.java', 'LimitPolicy.java', 'CustomerLimits.java'])
         + w.md('''
-        The filter turns a result into a response: 429 with Retry-After in whole seconds, rounded
-        up, and the rule's name; otherwise the real work, plus the remaining count.
+        `CustomerLimits` is built once and never changes (`Map.copyOf` makes it read-only), so
+        every thread can read it without a lock.
         ''')
-        + w.code(['RateLimitFilter.java'])
-        + w.run('DoorDemo')
-        + w.asks([
-            ('Why round Retry-After up?',
-             'It is in whole seconds. A wait of 200 ms rounded down would say 0, and the client '
-             'would come straight back and be refused again. Rounded up, it says 1.'),
-            ('What about a request that costs more than the whole bucket?',
-             'It could never pass, and the bucket would still answer "retry in ...": a lie. Refuse '
-             'it before the limiter with 400, or split it (fetch the history in pages).'),
-            ('Which headers does an allowed client get?',
-             '`X-RateLimit-Remaining` here; APIs often add `X-RateLimit-Limit` and '
-             '`X-RateLimit-Reset`, two more fields on the result.'),
-        ]))
+        + say(w, 'A limit is just X per Y. Who gets which limit is a policy: today a map with a '
+                 'default, later tiers, and the limiter never knows the difference.'))
+
+
+def counting_(w):
+    return step('bucket', B, 'Counting', 'Counting: the token bucket', minutes=8,
+                stage='Build · 4 of 6', body=
+        w.strip(now=['Counter', 'TokenBucket'])
+        + w.code(['Counter.java', 'TokenBucket.java'])
+        + w.md('The bucket on its own, told the time by hand: the walk-through from '
+               '[How to count](#counting).')
+        + w.run('BucketDemo')
+        + w.md('''
+        ## Why `synchronized`
+
+        Refill, check and take read the numbers, then write them. Two threads with one token left:
+        ''')
+        + w.pair(w.asc('''
+{r}✗ without synchronized{/}
+
+  thread A           thread B
+  tokens = 1.0
+  1.0 >= 1? yes      tokens = 1.0
+  tokens = 0.0       1.0 >= 1? yes
+  allowed            tokens = 0.0
+                     allowed
+  {r}✗ one token, two requests{/}
+''', 'bad'), w.asc('''
+{g}✓ with synchronized{/}
+
+  thread A           thread B
+  tokens = 1.0       {d}waits for the{/}
+  1.0 >= 1? yes      {d}bucket's lock{/}
+  tokens = 0.0
+  allowed
+                     tokens = 0.0
+                     refused
+  {g}✓ one token, one request{/}
+''', 'good'))
+        + w.md('''
+        The lock is the bucket itself, so each customer has its own lock. A lock rather than an
+        `AtomicLong`: two numbers change together (`tokens` and `lastRefillMillis`), and an atomic
+        variable guards only one.
+        ''')
+        + say(w, 'The limiter only knows `Counter` (Strategy). The bucket earns its tokens when a '
+                 'request arrives, not from a timer; `tokens` is a double so 120 ms keeps its 0.6; '
+                 'and `synchronized` makes refill, check and take one step per customer.'))
+
+
+def store(w):
+    return step('store', B, 'Where counts live', 'Where the counters live', minutes=5,
+                stage='Build · 5 of 6', body=
+        w.strip(now=['Algorithm', 'CounterStore', 'InMemoryCounterStore'])
+        + w.code(['Algorithm.java', 'CounterStore.java', 'InMemoryCounterStore.java'])
+        + w.md('''
+        ## Why `computeIfAbsent`
+
+        The first idea is `get`, and `put` a new counter if there is none. Two threads meeting a
+        new customer at the same instant both see nothing, both create a counter, and the customer
+        gets two budgets. `computeIfAbsent` finds, creates and stores as one step for that key; it
+        locks only that key's slot, and only while a counter is created. The limit is part of the
+        map's key, so a customer whose limit changes starts a new counter.
+        ''')
+        + w.run('StoreDemo')
+        + say(w, 'Counters live behind an interface: this map today, Redis when there are many '
+                 'servers. The key is a plain string on purpose: a customer today, an IP or a '
+                 'customer and endpoint later. Which algorithm is a plain enum and a switch: a new '
+                 'one is one class and one line.'))
 
 
 def run_(w):
-    return step('run', B, 'Run it', 'Run it', minutes=3, stage='Build · run', body=
+    return step('run', B, 'Run it', 'Run it', minutes=4, stage='Build · 6 of 6', body=
         w.strip(now=['Main'])
         + w.md('''
-        `Main` wires the objects as the server would at startup, with a manual clock so every run
-        prints the same, then sends requests from three clients through the front door.
+        `Main` wires the parts as the server would at startup, with a clock moved by hand so every
+        run prints the same: the case from [the design](#design), then 100 threads racing for
+        fantasy-app's 50 a second with the clock frozen, so exactly 50 may pass.
         ''')
-        + '<details class="more"><summary>Main.java: the wiring and the requests</summary>'
-        + w.part('Main.java', r'^import', r'System\.out\.printf\("%4d', plus=4, label='Main.java',
-                 note='wiring, and requests from three clients')
-        + '</details>'
-        + w.md('Then the race: 100 threads send one request each for fantasy-app at the same '
-               'instant, with a frozen clock, so exactly 50 may pass.')
-        + w.part('Main.java', r'^    // 100 threads', None, label='Main.java', note='the race')
+        + w.code(['Main.java'])
         + w.run('Main')
-        + w.md('Each refusal names its rule, the refused search spent nothing (47, not 46), and '
-               'the race lets exactly 50 through, run after run.'))
-
-
-def tests(w):
-    t = 'RateLimiterTest.java'
-    return step('tests', B, 'Tests', 'Prove it: tests, and breaking the code on purpose', minutes=7, stage='Build · prove it', body=
-        w.strip(now=['RateLimiterTest'])
         + w.md('''
-        One test per promise, in plain Java so it runs in any editor, even without JUnit:
-        ''')
-        + w.part(t, r'^import', r'System\.exit\(1\);', plus=2, note='imports and the runner')
-        + w.md('Behaviour, on the real rules, driven by the manual clock:')
-        + w.part(t, r'^    // ---- behaviour', r'"the 6th: refused by plan"', plus=1, note='the first test')
-        + '<details class="more"><summary>The other eleven behaviour tests</summary>'
-        + w.part(t, r'^    static void retryTime', r'"and nothing was earned meanwhile"', plus=1,
-                 note='behaviour', sol=False)
-        + '</details>'
-        + w.md('''
-        Races: a frozen clock and far more requests than tokens. For the store, a factory that takes
-        50 ms holds the race window open so it fails on every run, which is why that test calls the
-        store directly.
-        ''')
-        + w.part(t, r'^    // ---- threads', r'"one bucket for one key, got "', plus=1, note='races')
-        + '<details class="more"><summary>The helpers: limiters, requests, spend, together, check</summary>'
-        + w.part(t, r'^    // ---- helpers', None, note='helpers', sol=False)
-        + '</details>'
-        + w.run('RateLimiterTest')
-        + w.md('''
-        ## Break it on purpose
-
-        A test you have never seen fail proves little. Each row is a real broken copy of the core,
-        and the named test fails against it every time (the race tests were run ten times; other
-        tests may fail too).
-        ''')
-        + w.mutant_table()
-        + w.asks([
-            ('How do you test code that uses threads?',
-             'Many threads, a latch so they start together, a frozen clock so no token comes back, '
-             'and far more requests than tokens; then assert the exact count. When the race window '
-             'is tiny, widen it on purpose, like the slow factory here. Then break the code on '
-             'purpose and watch the test fail.'),
-        ]))
-
-
-def holds(w):
-    cost = w.runs.out['CostDemo'].strip().split('\n')
-    return step('holds', B, 'Why it holds up', 'Why it holds up: threads and cost', minutes=5,
-                stage='Build · done', body=
-        w.md('''
-        ## The three ways two threads break shared data
-
-        Every thread problem in this design is one of three, and each was met where it happens:
-        the lost update in [the token bucket](#bucket), check-then-act in [the store](#store),
-        the stale read in [time](#time).
-        ''')
-        + w.table(['The break', 'What happens', 'The fix here', "The fix's limit"], [
-            ['lost update', 'two threads read 1 token, both write 0: two requests, one token',
-             '`synchronized` on the bucket', 'every method that touches the fields must take the '
-             'same lock'],
-            ['check, then act', 'two threads find no bucket and both create one',
-             '`computeIfAbsent`: look, create and store as one step',
-             'the one step must cover both the check and the act'],
-            ['stale read', 'a thread keeps seeing an old value another thread replaced',
-             '`volatile` on `ManualClock`; a lock also gives it',
-             '`volatile` does not make `now += 200` one step'],
-        ])
-        + w.md('''
-        `synchronized` gives both halves: one thread at a time, and the next thread sees what the
-        last one wrote. `volatile` gives only the second.
-
-        ## What threads share, and what guards it
-        ''')
-        + w.table(['State', 'Who touches it', 'Guarded by', 'Against'], [
-            ["the store's map", 'every request thread', '`ConcurrentHashMap`, `computeIfAbsent`',
-             'check, then act'],
-            ["a bucket's numbers", "requests for that key", '`synchronized` on the bucket',
-             'lost update, stale read'],
-            ['`Plans`\' map', 'requests read, sign-ups write', '`ConcurrentHashMap`',
-             'stale read; a plain `HashMap` can lose entries'],
-            ['rules, `PlanLimits`, `RuleBook`', 'read only', '`final` fields, records',
-             'nothing to guard: set once in the constructor'],
-            ['the listener list', 'read per request', '`CopyOnWriteArrayList`',
-             'a change during a walk'],
-            ['refusal counts', 'every refused request', '`LongAdder` in a `ConcurrentHashMap`',
-             'lost update'],
-        ], cls='kv')
-        + w.md('''
-        ## Why it cannot deadlock
-
-        A deadlock needs a thread that holds one lock while waiting for another. Here a thread
-        holds at most one lock at a time: one bucket's, for a few arithmetic steps, calling
-        nothing outside the bucket. (The store's bin lock is held only while a bucket is built,
-        which takes no lock.) Listeners run after the decision, holding none.
-
-        ## What it costs
-
-        Measured here:
-        ''')
-        + w.asc('\n'.join('  ' + c for c in cost))
-        + w.md('''
-        A check on `/scores` builds three key strings and does three store lookups (one per rule
-        that covers it). That memory is why a later follow-up, [Idle clients](#idle), removes
-        buckets that have filled up again.
-        ''')
-        + w.asks([
-            ('What happens under a flood of made-up client ids?',
-             'Each creates buckets, so memory grows until the idle sweep clears them. Better: the '
-             'API rejects unknown keys before the limiter is asked.'),
-        ]))
-
-
-def principles(w):
-    return step('principles', B, 'Principles and patterns', 'SOLID and patterns, in this code',
-                minutes=5, stage='Build · done', body=
-        w.md('''
-        Most interviewers ask "which patterns?" and "how is this SOLID?". Point at a class and say
-        what breaks without it.
-
-        ## SOLID
-        ''')
-        + w.table(['Principle', 'In one line', 'Here', 'Without it'], [
-            ['**S**ingle responsibility', 'one reason to change', 'counting in buckets, storing in '
-             'the store, HTTP in the filter, the rules in `ScoreApiRules`', 'a new HTTP header '
-             'would edit the class that counts tokens'],
-            ['**O**pen/closed', 'add, do not edit', 'a new way of counting is a new `Bucket` and one '
-             '`Algorithm` line; a new limit is a new rule', 'a switch on the algorithm, edited for '
-             'every new one'],
-            ['**L**iskov substitution', 'any implementation works where the interface is expected',
-             'the limiter never asks which `Bucket` or `BucketStore` it has',
-             '`if (bucket instanceof SlidingWindowLog)` in the limiter'],
-            ['**I**nterface segregation', 'small interfaces, one question each', '`Clock`, '
-             '`LimitPolicy`, `RateLimitListener`, `BucketFactory`: one method each',
-             'a listener forced to implement methods it does not care about'],
-            ['**D**ependency inversion', 'depend on interfaces, handed in', 'the API depends on '
-             '`RateLimiter`; the limiter gets `BucketStore`, `Clock` and the rules in its '
-             'constructor', 'no `ManualClock` in tests, no Redis store later'],
-        ])
-        + w.md('## Patterns used')
-        + w.table(['Pattern', 'Where', 'The problem it solves here'], [
-            ['Strategy', '`Bucket` with three classes', 'each rule counts its own way; the limiter '
-             'does not care which'],
-            ['Factory', '`BucketFactory`, `Algorithm`', 'a rule names its algorithm; the store '
-             'creates the bucket only when a new key arrives'],
-            ['Repository', '`BucketStore`', 'where buckets live is hidden: memory today, Redis '
-             'tomorrow'],
-            ['Observer', '`RateLimitListener`, `RefusalMetrics`', 'reports are added without '
-             'touching the limiter'],
-            ['Facade', '`RuleBasedRateLimiter`, behind `RateLimiter`, over rules, store and buckets',
-             'the API asks one question'],
-            ['Decorator', '`ShadowRateLimiter` ([Live limits](#live))', 'wraps a limiter to add a '
-             'dry run, and is itself a `RateLimiter`'],
-        ])
-        + w.md('''
-        Strategy and Factory work together here: `Algorithm` is the factory that picks a
-        strategy, and `Bucket` is the strategy it produces.
-
-        ## Patterns you might reach for, and why not
-
-        - **Singleton** for the limiter: the server creates one and passes it on anyway. A
-          Singleton would stop each test from making its own, with its own clock.
-        - **Chain of Responsibility** for the rules: a chain passes a request along until one
-          handler takes it. Here every rule must agree, and a refusal undoes the others: a loop
-          with a refund.
-        - **Builder** for the records: five fields, all required; a constructor is clearer.
-        - **State**: a bucket's behaviour does not change by state; its numbers do.
-
-        ## What else they probe
-
-        - **Program to an interface.** Every field that holds a collaborator has an interface
-          type: `BucketStore store`, `Clock clock`, `RateLimiter limiter`.
-        - **Composition over inheritance.** A rule is made of parts (a scope, a policy, an
-          algorithm), not a subclass per kind of rule. Five rules, zero subclasses.
-        - **Immutability.** Records and final fields for everything shared and never changed:
-          `Limit`, `RateLimitRule`, `RequestContext`, the rule book. Nothing to lock.
-        ''')
-        + w.asks([
-            ('`Bucket`: interface or abstract class?',
-             'Interface. The buckets share no fields and no code, only the question; an abstract '
-             'class would force a hierarchy for nothing and block a bucket from extending anything '
-             'else.'),
-        ]))
+        That is the core: twelve small types and `Main`, about 150 lines. In a 60-minute round,
+        this running is the goal; everything after it is talk, unless they ask you to type it.
+        '''))
 
 
 # ================================================================================ follow-ups
-# What each follow-up needs to make sense, and the step whose code it starts from (drill 3 starts
-# from that step's folder in rate-limiter-code/steps/).
-NEEDS = {'more': 'the core', 'credits': 'the core', 'live': 'the core',
-         'idle': 'the core; it also gives the buckets from More ways to count their `isIdle` '
-                 '(the credit bucket keeps the default: never idle)',
-         'waiting': 'the core', 'redis': 'the core',
-         'lockfree': 'the core (its `isIdle` comes from Idle clients)',
-         'cousins': 'nothing: two small classes of their own'}
-PREV = {'more': ('the core', 'tests'), 'credits': ('More ways to count', 'more'),
-        'live': ('Credits', 'credits'), 'idle': ('Live limits', 'live'),
-        'waiting': ('Idle clients', 'idle'), 'redis': ('Waiting', 'waiting'),
-        'lockfree': ('Many servers', 'redis'), 'cousins': ('Lock-free', 'lockfree')}
-
-
-def followup(w, s, id_, nav, title, ask, src, lands, minutes, opt=False, extra='',
-             after_run='', hole=None, javas=(), asks=(), figure=None, before_diff='',
-             first=(), fold=(), fold_note=None):
-    pname, pid = PREV[s]
+def followup(w, s, nav, title, ask, src, lands, minutes, opt=False, after_run='', hole=None,
+             first=(), extra=''):
+    snaps = CONFIG['SNAPS']
     body = (w.ask(ask, src=src, label='Follow-up' if not opt else 'Follow-up · when you have time')
-            + w.md(f'*Needs:* {NEEDS[s]}. Drill 3 starts from '
-                   f'`steps/{CONFIG["SNAPS"][CONFIG["SNAPS"].index(s) - 1]}/`, the code after '
-                   f'[{pname}](#{pid}).')
             + w.strip(snap_=s)
             + w.md(lands)
-            + (figure or '')
-            + before_diff
-            + w.diff(s, first=first, fold=fold, fold_note=fold_note)
+            + w.diff(s, first=first)
             + w.run(CONFIG['DEMOS'][s])
             + (w.md(after_run) if after_run else '')
             + extra
             + (w.box('hole', 'The catch', hole) if hole else '')
-            + ''.join(w.java(a, b) for a, b in javas)
-            + (w.asks(list(asks)) if asks else ''))
-    return step(id_, F, nav, title, body, minutes=minutes, opt=opt,
+            + w.md(f'*Drill:* start from `rate-limiter-code/steps/{snaps[snaps.index(s) - 1]}/`.'))
+    return step(s, F, nav, title, body, minutes=minutes, opt=opt,
                 stage='Follow-up · later' if opt else 'Follow-up')
 
 
-def more(w):
-    return followup(w, 'more', 'more', 'More ways to count', 'More ways to count', minutes=5,
-        ask='Code the sliding window counter and the leaky bucket too, and show me how they behave '
-            'at a window edge.',
+def windows(w):
+    return followup(w, 'windows', 'More ways to count', 'More ways to count', minutes=6,
+        ask='Implement a sliding window instead. Which would you pick, and why?',
         src='Swiggy (2025) asked for a sliding window and a leaky bucket in the same round.',
         lands='''
-        Two more `Bucket` classes and two more `Algorithm` constants: nothing else changes. The demo
-        sends the same traffic through all five ways of counting.
+        Three new `Counter` classes and three new `case` lines; the limiter does not change. The
+        demo runs the two tests from [How to count](#counting) on the real classes.
         ''',
+        first=['Algorithm', 'InMemoryCounterStore'],
         after_run='''
-        Only the fixed window lets 10 through in 6 ms. The counter estimates: 5 hits at 999 ms, and
-        at 1,300 ms 70% of that second still counts, so 3.5 are "in the window" and one more fits.
-        ''',
-        hole='The counter is an estimate: requests bunched at the end of the previous window let a '
-             'few too many through. The leaky bucket here is a meter (refuse when full); as a queue '
-             'it smooths calls you send, not a yes or no.')
+        **Which to pick:** the token bucket for an API (a burst, then a steady rate, two numbers);
+        the log when it must be exact and the limit is small (sign-ins); the fixed window for
+        calendar quotas; the counter when the log would cost too much memory.
+        ''')
 
 
 def credits(w):
-    return followup(w, 'credits', 'credits', 'Credits', 'Unused requests carry over: credits',
-        minutes=5, opt=True,
-        ask='A client that uses less than its limit in one second should keep the unused requests '
-            'as credits, up to a maximum, and spend them later. It must work with many threads.',
-        src='Atlassian (2023 and 2025), as the follow-up in its rate limiter round.',
+    return followup(w, 'credits', 'Credits', 'Unused requests carry over: credits', minutes=5,
+        opt=True,
+        ask='A customer that uses less than its limit in one second should keep the unused '
+            'requests as credits, up to a maximum, and spend them later.',
+        src="Atlassian's rate limiter round, as the follow-up to this exact problem.",
         lands='''
-        Another way of counting, so another `Bucket`: `CreditBucket`. It needs one more number than
-        a `Limit` holds, the most a client may save, so its `Algorithm` constant is a lambda that
-        supplies it. "Many threads" needs nothing new: one bucket per key, and its methods are
-        `synchronized`.
+        Another way of counting, so another `Counter` and one `case`: a fixed window that saves
+        what a window did not use, up to one window's worth here.
         ''',
-        hole='Credits ride on fixed windows, the counting step\'s hole: a quiet second, then 10 '
-             '(5 + 5 credits) at 1,999 ms and 5 more at 2,000 ms is 15 in a millisecond at "5 a '
-             'second".',
-        asks=[('Is this different from a bigger token bucket?',
-               'Barely: a token bucket with capacity 10 that refills 5 a second saves unused tokens '
-               'the same way, without the edge. Credits over fixed windows is how Atlassian '
-               'phrases it; the token bucket is the general idea.')])
+        hole='Credits ride on fixed windows, so the edge comes back bigger: a quiet second, then '
+             '10 at 1,999 ms (5 + 5 credits) and 5 more at 2,000 ms. Say it: a token bucket with '
+             'capacity 10 and 5 a second saves unused requests the same way, without the edge.')
 
 
-def live(w):
-    return followup(w, 'live', 'live', 'Live limits', 'Change the rules while it runs, safely',
-        minutes=7,
-        ask='Ops want to cut FREE from 5 to 3 a second, without a restart. First they want to know '
-            'whom it would hurt.',
-        src="Stripe's engineering blog (2017) describes launching every new limiter this way: a "
-            'dark run that only counts, then the switch.',
+def tiers(w):
+    return followup(w, 'tiers', 'Tiers', 'Tiers: FREE and PRO', minutes=5,
+        ask='FREE customers get 5 a second, PRO 50. Customers can upgrade at any time.',
+        src='The most common extension of this problem.',
         lands='''
-        Two parts. **The dry run:** `ShadowRateLimiter` is a `RateLimiter` wrapping two, the live
-        one that decides and a candidate that is only asked; it counts, per client, what the
-        candidate would have refused. That is the Decorator pattern. **The switch:** the limiter's
-        rule book becomes a `volatile` field that `replaceRules` swaps in one write. Because every
-        bucket key carries its limit, a changed limit simply gets new buckets.
+        A tier is a property of the customer that carries a limit, so it is an `enum` with a
+        `Limit`, and choosing by tier is a new `LimitPolicy`. Two new classes and nothing else:
+        the store already puts the limit in the counter's key, so an upgrade gets a new counter at
+        once. The old 5-a-second counter stays until the idle sweep ([Memory](#idle)).
         ''',
+        first=['Tier', 'TierLimits'],
         after_run='''
-        The dry run finds two of score-widget's requests that the new rules would refuse. After the
-        switch the next second allows 3, because the new limit is part of the bucket key, so a fresh
-        bucket starts full; the 4th waits 334 ms (1,000 / 3, rounded up). The daily quota did not reset: that rule did not
-        change, so its keys and buckets are the same.
+        `TierLimits` is written by sign-ups and upgrades while requests read it, so it is a
+        `ConcurrentHashMap`; `CustomerLimits` never changed, so a plain read-only map was enough.
+        ''')
+
+
+def limits_followup(w):
+    return followup(w, 'door', 'Every limit at the door', 'Search, a daily quota, sign-ins, '
+                    'and a global cap', minutes=8,
+        ask='Searches are expensive: 2 a second per customer. Add a daily quota of 10,000. '
+            'Sign-ins come before any API key: 5 a minute per IP, exactly. And never more than '
+            '1,000 a second for the whole API.',
+        src='Scope grows like this in most rounds: each sentence is one more limit.',
+        lands='''
+        Each new limit is the **same limiter** with a different key, a different limit and the
+        right way of counting: per customer, per IP, or one key for everyone. The core gains only
+        a `Limit.perDay` helper. One new class at the door holds them and checks them in order, and the first
+        refusal is the answer; a `Request` record carries what the door knows. The old per-customer
+        limiter is now one of five. The daily quota uses the fixed window: a token bucket of
+        10,000 would let all 10,000 through in one burst, and "per day" is a calendar rule (UTC
+        days here).
         ''',
-        hole='A replaced bucket starts full, so a client whose limit changes can burst once more. '
-             'The rule book field is `volatile` and the book never changes, so a request sees a '
-             'whole book, old or new, with no lock.',
-        asks=[('Why not change the existing buckets in place?',
-               "A bucket's capacity and rate are final, and its arithmetic assumes one rate. New keys for new "
-               'limits keep `TokenBucket` simple and the switch a single write.')])
+        first=['Request', 'ApiLimits'],
+        after_run='''
+        The third search in a second is refused by the search limit, and the sign-ins are counted
+        by IP with the exact log. The wiring, in `LimitsDemo`:
+        ''',
+        extra=w.snippet('''
+new ApiLimits(
+    limiter(tiers,                           Algorithm.TOKEN_BUCKET,       clock),  // by plan
+    limiter(key -> Limit.perDay(10_000),     Algorithm.FIXED_WINDOW,       clock),  // quota
+    limiter(key -> Limit.perSecond(2),       Algorithm.TOKEN_BUCKET,       clock),  // search
+    limiter(key -> Limit.perMinute(5),       Algorithm.SLIDING_WINDOW_LOG, clock),  // by IP
+    limiter(key -> Limit.perSecond(1_000),   Algorithm.TOKEN_BUCKET,       clock)); // global''',
+            label='LimitsDemo.java'),
+        hole='The refused third search already spent a per-second and a daily token. If that '
+             'matters, give `Counter` a `refund(now)` and hand back what the earlier limits took '
+             'when a later one refuses. In the room, say it; type it only if asked. And the global '
+             'cap is first come, first served: under load, FREE traffic can crowd out PRO; give each '
+             'tier its own share of the cap if that matters.')
+
+
+def servers(w):
+    return step('servers', F, 'Many servers', 'Many servers, one budget', minutes=6,
+                stage='Follow-up', body=
+        w.ask("We now run 10 API servers behind a load balancer. A customer's limit must hold "
+              'across all of them.', src='OpenAI and Anthropic (2026) asked for a distributed '
+              'rate limiter.', label='Follow-up')
+        + w.md('''
+        Each server counts on its own today, so 10 servers grant 10 times the limit. The counts
+        must be shared, and the core already has the seam: `CounterStore`. A `RedisCounterStore`
+        hands out counters whose `tryAcquire` runs **one atomic step inside Redis**: read the
+        tokens and the last refill time, refill, check, take, write back, and set the key to expire
+        once a full refill would have happened. The limiter, the policies and the door do not
+        change.
+        ''')
+        + w.snippet('''
+class RedisCounterStore implements CounterStore {
+    public Counter counterFor(String key, Limit limit, long nowMillis) {
+        // Counter has one abstract method, so a lambda is a Counter
+        return now -> redis.runTokenBucket("rl:" + key, limit, now);   // one atomic step
+    }
+}''', label='the seam (a sketch)')
+        + w.md('''
+        **Why one atomic step:** two servers that read "1 token", decide, and write back both
+        allow: the same race `synchronized` stopped, now between machines. Redis runs one script
+        at a time, so a short Lua script is the fleet's `synchronized`. Say that; nobody types the
+        script in the room.
+
+        **What to say about the trade-offs:**
+
+        - **A round trip per request,** under a millisecond in one data centre, against
+          nanoseconds in memory. Use one script for all of a request's keys, not one call each.
+        - **Redis down or slow:** decide fail open (serve everyone, the API is not protected for a
+          minute) or fail closed (refuse everyone). For an API, open; for sign-ins, closed. Give
+          the call a timeout of a few milliseconds, or a slow Redis stalls every request thread.
+        - **Clocks:** servers disagree by milliseconds, so take the time from Redis, or pass `now`
+          and ignore time that goes backwards, as the bucket already does.
+        - **Cheaper alternatives** when near enough is fine: route each customer to one server, or
+          give each server limit ÷ servers and accept the error.
+        '''))
 
 
 def idle(w):
-    return followup(w, 'idle', 'idle', 'Idle clients', 'A million clients: forget the idle ones',
+    return followup(w, 'idle', 'Memory', 'A million customers: forget the quiet ones',
         minutes=5, opt=True,
-        ask='We have a million clients, and most call once a day. Your store keeps their buckets '
-            'forever.',
-        src='Asked of any design that keeps a map per client.',
+        ask='We have a million customers, and most call once a day. Your store keeps their '
+            'counters forever.',
+        src='Asked of any design that keeps a map per customer.',
         lands='''
-        A bucket that a new one would replace exactly can go. Each bucket says when that is
-        (`isIdle`, a default of "never"), and the store gets `evictIdle`, run by a timer
-        (`sweepEvery`), never by a request.
+        A full token bucket is exactly what a new one would be, so it can go. Each counter says
+        when it is idle (default: never), and the store gets a sweep, run by a timer every minute,
+        never by a request.
         ''',
-        first=['Bucket', 'TokenBucket', 'FixedWindowCounter', 'InMemoryBucketStore'],
-        fold=['SlidingWindowLog', 'SlidingWindowCounter', 'LeakyBucket'],
-        fold_note='`isIdle` in the other buckets',
+        first=['Counter', 'TokenBucket', 'InMemoryCounterStore'],
         after_run='''
-        score-widget called again at 900 ms, so its plan bucket is not full yet and stays; a quota
-        bucket holds today's count until the day is over.
-        ''',
-        hole='A sweep and a request can meet: the request fetches an idle, full bucket, the sweep '
-             'removes it from the map, the request spends from the removed bucket, and the next '
-             'request creates a new full one. One extra burst, for a client returning at exactly '
-             'that microsecond. The strict fix: the sweep marks the bucket retired under its lock, '
-             'and a request that meets a retired bucket looks it up again.',
-        asks=[('In production, would you write this sweep?',
-               'Probably not: a cache library such as Caffeine does it with '
-               '`expireAfterAccess(period)`. In the interview, writing it shows why it is safe.')])
+        Keys made by strangers are the same problem, bigger: a scan from a million IPs makes a
+        million sign-in counters. Bound the map (a cache with a maximum size) as well as sweeping
+        it. In production, a cache library does both (Caffeine's `maximumSize` and
+        `expireAfterAccess`); on Redis, the key's expiry.
+        ''')
 
 
-def waiting(w):
-    return followup(w, 'waiting', 'waiting', 'Waiting', 'Wait instead of refusing', minutes=4,
-        opt=True,
-        ask='Our nightly batch job would rather wait its turn than get a 429. Give it a call that '
-            'blocks until the request is allowed.',
-        src='Plaid (2026): queue requests instead of rejecting them, with a bound on the queue.',
-        lands='''
-        The limiter already says how long to wait. So waiting is a loop around `check`: ask, sleep
-        exactly that long, ask again, until allowed or the sleeps would pass the caller's limit.
-        ''',
-        hole='Waiters are not served in order: when a token arrives, whichever waiter asks first '
-             'gets it. For order, queue the waiters and hand tokens out from the front.',
-        asks=[('Why never for a web request?',
-               'Each waiting request holds a server thread. During a retry storm the threads run '
-               'out and the whole API stops. A web request should get its 429.')])
-
-
-def redis(w):
-    return followup(w, 'redis', 'redis', 'Many servers', 'Many servers, one budget: Redis', minutes=8,
-        ask="We now run 10 API servers behind a load balancer. fantasy-app's 50 a second must hold "
-            'across all of them.',
-        src='OpenAI (2026): implement a distributed rate limiter. Anthropic (2026): design one.',
-        lands='''
-        With a store in each server, each server grants the full 50. The buckets move to Redis
-        behind the same `BucketStore` interface, so the limiter does not change. Refill, check and
-        take must still be one step: a Lua script is the fleet's `synchronized`, because Redis runs
-        one script at a time.
-        ''',
-        figure=w.fig(figures.redis()),
-        before_diff=w.md('''
-        The first answer everyone gives is a fixed window: `INCR` a key per client per second and
-        `EXPIRE` it. It has the window-edge hole, and it is two commands: a crash between them
-        leaves a counter with no expiry. The token bucket needs read, refill and write as one step,
-        which no two commands give:
-        ''') + w.asc('''
-{r}✗ each server reads, decides, and writes back{/}   (one token left)
-
-  server 1                        server 2
-  HGET tokens → 1                 HGET tokens → 1
-  1 >= 1: allow                   1 >= 1: allow
-  HSET tokens 0                   HSET tokens 0
-  {r}✗ both allowed: the lost update, now between machines{/}
-
-{g}✓ one script does all three on the Redis server, which runs one script at a time{/}
-''', 'bad'),
-        first=['RedisBucketStore', 'RedisTokenBucket'],
-        fold=['FakeRedis'], fold_note='`FakeRedis`: the stand-in that plays Redis in the demo',
-        after_run='''
-        Two servers with their own stores grant 60 of 60; with Redis, 50. When Redis is down, the
-        scores API fails open and says the whole budget is left, so polite clients do not slow down;
-        a sign-in limiter fails closed.
-        ''',
-        hole='Every check is now a network round trip, under a millisecond in one data centre '
-             'against nanoseconds in memory. A slow Redis is worse than a dead one: without a call '
-             'timeout of a few ms, every request thread waits on the socket and fail-open never '
-             'triggers, so add a circuit breaker.',
-        asks=[('Three rules, so three round trips?',
-               'Here, yes. One script over all of a request\'s keys makes it one, and makes all or '
-               'nothing atomic too, with no refunds.'),
-              ("Why Redis's clock?",
-               'Ten servers disagree by milliseconds, so a bucket could see time go backwards. '
-               'Calling `TIME` in a script that writes needs Redis 5 or later; on older Redis, '
-               'pass `now` in as an argument, and `if now > last` ignores small skews.'),
-              ('And Redis Cluster?',
-               'Each bucket is one key, so each script runs on one node. A script over several keys '
-               'needs them on one node: a hash tag, as in `rl:{fantasy-app}:plan`.')])
-
-
-def lockfree(w):
-    verdict = timing_verdict(w.runs.out['LockFreeDemo'])
-    return followup(w, 'lockfree', 'lockfree', 'Lock-free', 'Make it faster: a lock-free bucket',
-        minutes=6, opt=True,
-        ask='Profiling shows threads waiting on the bucket lock for our hottest client. Can you '
-            'remove the lock?',
-        src="OpenAI's rate limiter round (2026) hands you slow code to fix and speed up.",
-        lands='''
-        Both numbers go into one immutable `State`, held in an `AtomicReference`. A request reads the
-        state, computes the next one, and swaps it in with `compareAndSet` (CAS) only if nobody changed it
-        meanwhile; otherwise it reads again and redoes the sums. One more `Algorithm` constant, and
-        any rule can use it.
-        ''',
-        after_run='''
-        Same answers, same exact count under the race. Then the timing on the machine that built
-        this page. {verdict} Not a rule: each attempt allocates a `State`, failed CASes redo the
-        sums, and with more runnable threads than cores the retries pile up. Keep the lock until a
-        profile says otherwise.
-        '''.replace('{verdict}', verdict),
-        asks=[('What about ABA?',
-               'ABA is a value changing and changing back, fooling the compare. Not here: every '
-               'state is a new object, so a reference never comes back to an old one.'),
-              ('Does `synchronized` hurt with virtual threads?',
-               'Not here: the lock is held for nanoseconds and nothing blocks inside it. Pinning '
-               'only mattered when a virtual thread blocked while holding a monitor, and it is gone '
-               'since JDK 24 (JEP 491).')])
-
-
-def timing_verdict(out):
-    """One sentence about the demo's own numbers, so the words always match what was printed."""
-    rows = [(int(n), int(lock), int(cas)) for n, lock, cas in re.findall(
-        r'(\d+) threads?\s+on one bucket:\s+synchronized\s+(\d+) ns\s+CAS\s+(\d+) ns', out)]
-    faster = ['the lock' if lock < cas else 'CAS' if cas < lock else None for _, lock, cas in rows]
-    if len(rows) == 2 and faster[0] and faster[0] == faster[1]:
-        return f'Here {faster[0]} was faster both times, with one thread and with {rows[1][0]}.'
-    said = [f'with {"one thread" if n == 1 else f"{n} threads"}, '
-            + (f'{who} was faster' if who else 'a tie') for (n, _, _), who in zip(rows, faster)]
-    return ('Here, ' + '; '.join(said) + '.') if said else ''
-
-
-def cousins(w):
-    return followup(w, 'cousins', 'cousins', 'Hit counter, logger', 'Two cousins: the hit counter and the logger',
-        minutes=5, opt=True,
-        ask='Design a hit counter: `hit(timestamp)`, and `getHits(timestamp)` for the last 5 '
-            'minutes. / Print a message only if it was not printed in the last 10 seconds.',
-        src='Hit counter (LeetCode 362): Intuit (2024), Cloudflare (2025), Uber and Apple (2026). '
-            'Logger (LeetCode 359): Google (2025).',
-        lands='''
-        Both are rate limiters in disguise. The hit counter is a sliding window that only counts:
-        300 slots, one per second, so memory stays the same however heavy the traffic. The logger
-        is a limiter where every message is a key with a limit of 1 per 10 seconds.
-        ''',
-        asks=[('Millions of hits a second, from many threads?',
-               'The `synchronized` methods become the bottleneck: count with a `LongAdder` per '
-               "slot, and guard only the rare reset (a new second landing on an old slot) with that "
-               "slot's lock."),
-              ('The logger with many threads?',
-               'A `ConcurrentHashMap` and one `compute(message, ...)` call for the check and the set, '
-               'so two threads cannot both print.')])
+def quick(w):
+    return step('quick', F, 'Quick ones', 'Questions answered in a sentence', minutes=3,
+                stage='Follow-up', body=
+        w.md('''
+        Not everything needs code. These come up often, and the core answers each in a sentence.
+        ''')
+        + w.asks([
+            ('Some requests cost more: a full match history costs 5.',
+             '`tryAcquire(int cost, long now)`: take `cost` tokens instead of 1. Three lines '
+             'across `Counter`, `TokenBucket` and the limiter.'),
+            ('Change a customer\'s limit while it runs.',
+             'Make the policy writable, as `TierLimits.setTier` is, or swap in a new one. The store '
+             'starts a fresh counter on the next request, because the limit is in its key.'),
+            ('How would you test it?',
+             'A hand-moved clock, as in `Main`: a burst, a refusal with its wait, a refill. Then '
+             '100 threads with a frozen clock: never more than the limit allowed.'),
+            ('Can it be lock-free?',
+             'Yes: keep the tokens and the last refill time in one immutable object and swap it '
+             'with `compareAndSet`, retrying on a clash. Same answers; not worth it while one '
+             'customer\'s lock is held for nanoseconds.'),
+            ('Tell clients how many requests they have left.',
+             'Add `remaining` to `Decision`; the bucket knows its tokens. The API sends it as '
+             '`X-RateLimit-Remaining`.'),
+            ('What should a client do with a 429?',
+             'Wait Retry-After; without one, back off exponentially with jitter so retries do not '
+             'arrive in a wave.'),
+            ('Why not Guava\'s `RateLimiter` or Bucket4j?',
+             'In production, use a library: Bucket4j gives token buckets per key with Redis. Guava '
+             'is one limiter per JVM and only says yes or no. In the room, the hand-written bucket '
+             'shows the thinking.'),
+        ], title='Asked often'))
 
 
 # ================================================================================ remember
 def recall(w):
     cards = [
-        ('The eight questions', [
-            'what does a no tell the client? → records in and out',
-            'where does the time come from? → `Clock` handed in',
-            'who waits for whom? → a lock per bucket',
-            'does every rule want a token bucket? → `Bucket` interface + `Algorithm`',
-            'how do the five limits get in? → rules as data',
-            'where do the buckets live? → `BucketStore`, `computeIfAbsent`',
-            'the third rule says no? → refund: all or nothing',
-            'who sends the 429, who tells ops? → filter at the door, listeners on the side']),
+        ('The design, top-down', [
+            'the door asks one question → `RateLimiter.check` → `Decision`',
+            'the limiter asks three: how much, what done, what time',
+            'how much → `LimitPolicy` → `Limit` (`CustomerLimits`)',
+            'what done → `CounterStore` → `Counter` (`TokenBucket`)',
+            'what time → `Clock`, handed in']),
         ('The token bucket, in numbers', [
             '5 a second = capacity 5, a token every 200 ms',
             '120 ms earns 0.6; the wait for 1 is 0.4 × 200 = 80 ms',
@@ -1226,132 +769,93 @@ def recall(w):
             'not exact per second: up to 10 in one (5 saved + 5 earned)',
             'exact → log (sign-ins); calendar → fixed window (quota)']),
         ('Threads', [
-            'lost update → `synchronized` on the bucket',
-            'check, then act → `computeIfAbsent`',
-            'stale read → `volatile` (or any lock)',
-            'set once → `final` fields and records: no lock',
-            'one lock at a time → no deadlock']),
-        ('Follow-ups: where each lands', [
-            'more ways to count → a `Bucket` + one `Algorithm` line',
-            'credits → a `Bucket`',
-            'live limits → `volatile RuleBook`; shadow = Decorator',
-            'idle clients → `isIdle` + a sweep in the store',
-            'waiting → a loop around `check` + `Semaphore`',
-            'many servers → a `BucketStore` on Redis + Lua',
-            'lock-free → a `Bucket` with compare-and-set']),
-        ('The 14 tests', [
-            'burst 5, then refused; retry 200 ms, then 80 ms',
-            'a refused request spends nothing; never above capacity',
-            "each plan's budget; an upgrade at once; each rule's own key",
-            'sign-ins exact; quota resets at midnight',
-            'tightest remaining; listeners hear refusals; a broken listener is harmless',
-            'clock back earns nothing',
-            'races: one client exact; a new key gets one bucket (slow factory)']),
+            'refill, check, take → `synchronized` on the bucket',
+            'find or create → `computeIfAbsent`',
+            'read-only maps → no lock; written maps → `ConcurrentHashMap`',
+            'the limiter holds no state → no lock, no deadlock']),
+        ('Where each follow-up lands', [
+            'another algorithm → a `Counter` + one `case`',
+            'credits → a `Counter`',
+            'tiers → a `LimitPolicy` (the limit is already in the key)',
+            'search, quota, sign-in, global → more limiters, other keys',
+            'many servers → a `CounterStore` on Redis, one atomic step',
+            'memory → `isIdle` + a sweep']),
     ]
     grid = '<div class="recall">' + ''.join(
         f'<div class="rc"><h4>{t}</h4><ul>' + ''.join(f'<li>{w.inline(i)}</li>' for i in items)
         + '</ul></div>' for t, items in cards) + '</div>'
     return step('recall', R, 'One-screen recall', 'The whole design on one screen', minutes=4, body=
         w.md('''
-        Come back to this a week from now and read it top to bottom. If every line brings back the
-        code behind it, you are ready; if one does not, go back to that step. First, the whole
-        design as signatures, in the order you type it:
+        Come back to this a week from now. If every line brings back the code behind it, you are
+        ready; if one does not, go back to that step. The design as signatures, in typing order:
         ''')
         + w.snippet('''
-// in and out
-record RequestContext(String clientId, String ip, String endpoint, int cost)
-record Decision(boolean allowed, long remaining, long retryAfterMillis)           // one bucket
-record RateLimitResult(boolean allowed, long remaining, long retryAfterMillis, String refusedBy)
-interface RateLimiter { RateLimitResult check(RequestContext request); }
-
-// time
-interface Clock { long nowMillis(); }                  // SystemClock; ManualClock.advance(ms)
-
-// counting
-record Limit(int capacity, long periodMillis)          // perSecond(5): a token per 200 ms
-interface Bucket { Decision tryConsume(int cost, long now); void refund(int cost, long now); }
-class TokenBucket, SlidingWindowLog, FixedWindowCounter implements Bucket   // synchronized
-interface BucketFactory { Bucket create(Limit limit, long now); }
-enum Algorithm implements BucketFactory { TOKEN_BUCKET(TokenBucket::new), ... }
-
-// rules
-record RateLimitRule(String name, Predicate<RequestContext> appliesTo, KeyScope scope,
-                     LimitPolicy limits, Algorithm algorithm)
-enum KeyScope { CLIENT, IP, CLIENT_AND_ENDPOINT, EVERYONE }       // request -> key
-interface LimitPolicy { Limit limitFor(RequestContext r); }       // fixed(limit), PlanLimits
-class Plans { assign(clientId, plan); planOf(clientId); }         // ConcurrentHashMap
-class RuleBook { List<RateLimitRule> matching(RequestContext r); } // ScoreApiRules.build(plans)
-
-// storing, deciding, the edges
-interface BucketStore { Bucket bucketFor(String key, BucketFactory f, Limit l, long now); }
-class InMemoryBucketStore implements BucketStore               // computeIfAbsent
-class RuleBasedRateLimiter(RuleBook, BucketStore, Clock)       // loop, refund, listeners
-interface RateLimitListener { void onDecision(RequestContext r, RateLimitResult result); }
-class RateLimitFilter(RateLimiter)                             // 429 + Retry-After''',
+interface RateLimiter { Decision check(String key); default boolean rateLimit(String id) }
+record Decision(boolean allowed, long retryAfterMillis)
+class PerKeyRateLimiter(LimitPolicy limits, CounterStore counters, Clock clock)
+interface Clock { long nowMillis(); }                  // System::currentTimeMillis
+record Limit(int requests, long periodMillis)          // perSecond(5)
+interface LimitPolicy { Limit limitFor(String key); }
+class CustomerLimits(Map<String, Limit> byCustomer, Limit defaultLimit)
+interface Counter { Decision tryAcquire(long nowMillis); }
+class TokenBucket implements Counter                    // synchronized
+enum Algorithm { TOKEN_BUCKET }
+interface CounterStore { Counter counterFor(String key, Limit limit, long nowMillis); }
+class InMemoryCounterStore(Algorithm algorithm)         // computeIfAbsent; key + limit''',
                     label='the design, as signatures')
         + grid
         + w.md('The lines to remember exactly:')
         + w.snippet('''
 long elapsed = nowMillis - lastRefillMillis;
-if (elapsed <= 0) { return; }                                       // an older time earns nothing
-tokens = Math.min(capacity, tokens + elapsed / millisPerToken);     // refill, capped
-if (tokens >= cost) { tokens -= cost; return Decision.allow((long) tokens); }   // take
-long wait = (long) Math.ceil((cost - tokens) * millisPerToken);     // or say when
-return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));     // one bucket
-for (Bucket spent : charged) { spent.refund(request.cost(), now); } // all or nothing''',
-                    label='seven lines'))
+if (elapsed <= 0) { return; }                                   // an older time earns nothing
+tokens = Math.min(capacity, tokens + elapsed / millisPerToken); // refill, capped
+if (tokens >= 1) { tokens -= 1; return Decision.allow(); }      // take
+long wait = (long) Math.ceil((1 - tokens) * millisPerToken);    // or say when
+return counters.computeIfAbsent(id, k -> newCounter(limit, nowMillis));    // one per key''',
+                    label='six lines'))
 
 
 def practise(w):
-    t = w.t.text('RateLimiterTest.java', 'core')
     return step('practise', R, 'Practise', 'Practise: write it yourself', body=
         w.md('''
-        Close everything else and switch this page to **Practise** mode (top right): code and
-        answers stay hidden until you ask. Write in your own editor, and skip the comments: they are
-        for learning, not for the room.
+        Switch this page to **Practise** mode (top right): code and answers stay hidden until you
+        ask. Write in your own editor, without the comments.
         ''')
-        + w.drill('Drill 0 · The 15-minute version', 15, '''
-        `FirstCutLimiter` from the derivation, from memory, running by minute 10.
+        + w.drill('Drill 1 · The design on paper', 5, '''
+        Draw the top-down tree from [the design](#design) from memory, and say the case: 7 at
+        0 ms, one at 120 ms, one at 200 ms.
         ''')
-        + w.drill('Drill 1 · The round', 45, '''
-        The round subset from the first step. First time, expect 60 minutes; the second time, 45.
-        ''', w.checks('round', [
-            'the records: `RequestContext`, `Limit`, `Decision`, `RateLimitResult`, and `RateLimiter`',
-            '`Clock`, `ManualClock`', '`Bucket`, `TokenBucket`: refill, take, wait',
-            '`Algorithm` (one constant), `KeyScope`, `LimitPolicy`, `Plan`, `Plans`, `PlanLimits`',
-            '`RateLimitRule`, `RuleBook`', '`BucketStore`, `InMemoryBucketStore` with '
-            '`computeIfAbsent`', '`RuleBasedRateLimiter`: the loop and the refund',
-            '`Main`: a burst and the 100-thread race']))
-        + w.drill('Drill 2 · Machine coding', 90, '''
-        Everything, plus the tests. Then run the page's tests against your code: a failing test's
-        name tells you which promise you broke.
-        ''')
-        + w.copybox(t, 'RateLimiterTest.java', 'the test file from the [Tests](#tests) step')
+        + w.drill('Drill 2 · The core', 35, '''
+        Type the core in the build order, top-down, and run `Main`. The first time, expect 50
+        minutes; the second, 35.
+        ''', w.checks('core', [
+            '`RateLimiter`, `Decision`', '`PerKeyRateLimiter`, `Clock`',
+            '`Limit`, `LimitPolicy`, `CustomerLimits`', '`Counter`, `TokenBucket`: refill, take, '
+            'wait', '`Algorithm`, `CounterStore`, `InMemoryCounterStore` with `computeIfAbsent`',
+            '`Main`: the case and the 100-thread race']))
         + w.copybox(w.onefile('core'), 'The whole core in one file',
-                    'for an online editor: every type, only `Main` public')
+                    'to check yours against, or to run in an online editor')
         + w.md('''
         ### Drill 3 · Follow-ups
 
-        Start from the code as it was at the step before (`rate-limiter-code/steps/<step>/`), write
-        the change, then compare with the step.
+        Start from the code before the step (`rate-limiter-code/steps/<step>/`), write the change,
+        then compare.
         ''')
         + w.timed([
-            ('More ways to count: the counter and the leaky bucket', 10, '#more'),
-            ('Credits for unused requests', 10, '#credits'),
-            ('Live limits: the shadow run and the switch', 15, '#live'),
-            ('Idle clients: isIdle and the sweep', 10, '#idle'),
-            ('Waiting instead of refusing', 10, '#waiting'),
-            ('Many servers: the script and the Redis store', 15, '#redis'),
-            ('Lock-free: the compare-and-set bucket', 10, '#lockfree'),
+            ('More ways to count: fixed window, log, counter', 15, '#windows'),
+            ('Tiers, and an upgrade that applies at once', 10, '#tiers'),
+            ('Every limit at the door', 15, '#door'),
+            ('Credits', 10, '#credits'),
+            ('Memory: isIdle and the sweep', 10, '#idle'),
         ])
         + w.drill('Drill 4 · Out loud, one minute each', 5, '''
-        The three thread breaks and their fixes. Why a lock per bucket. Why `computeIfAbsent`. Why
-        the clock is handed in. Is the token bucket exact? Why all or nothing?
+        The design top-down. Why `synchronized` per bucket. Why `computeIfAbsent`. Why the clock
+        is handed in. Is the token bucket exact? Where would Redis go?
         ''')
         + w.md('''
         ## When
 
-        Today: read, then drills 0 and 1. In three days: drill 1 again, plus two follow-ups. In a
+        Today: read, then drills 1 and 2. In three days: drill 2 again, plus two follow-ups. In a
         week: the recall screen, then **Check yourself** without looking.
 
         ## Your miss log
@@ -1359,149 +863,81 @@ def practise(w):
         After each drill, write down what you missed. Next time, read this first. It is kept in this
         browser.
         ''')
-        + w.misslog('misses', 'e.g. forgot the refund loop; used get/put instead of computeIfAbsent'))
+        + w.misslog('misses', 'e.g. forgot computeIfAbsent; refilled before checking elapsed'))
 
 
 def check(w):
     q = w.runs.out['QuizDemo'].strip().split('\n')
-    return step('check', R, 'Check yourself', 'Check yourself', minutes=15, body=
+    return step('check', R, 'Check yourself', 'Check yourself', minutes=12, body=
         w.md('''
-        Answer each one before you open it. OpenAI's rate limiter round (2026) starts from code like
-        the bugs below: find what is wrong, then fix it.
+        Answer each one before you open it. Some rounds start from code like the bugs below: find
+        what is wrong, then fix it.
 
         ## Predict the output
         ''')
-        + w.reveal('score-widget (FREE, 5 a second) sends 5 requests at 0 ms, then 3 more at 450 ms. '
-                   'What are the three answers at 450 ms?',
-                   '450 ms earns 2.25 tokens: the first takes one (1.25 left, shown as 1), the second '
-                   'takes one (0.25), and the third is refused: the missing 0.75 of a token takes '
-                   '150 ms.\n\n<pre class="asc">' + '\n'.join(q[:3]) + '</pre>')
-        + w.reveal('fantasy-app (PRO, 50 a second) makes one request, is quiet for 10 seconds, then '
-                   'sends 60 at once. How many pass?',
+        + w.reveal('score-widget (5 a second) sends 5 requests at 0 ms, then 3 more at 450 ms. What '
+                   'are the three answers at 450 ms?',
+                   '450 ms earns 2.25 tokens: the first takes one (1.25 left), the second takes one '
+                   '(0.25), the third is refused: the missing 0.75 of a token takes 150 ms.\n\n'
+                   '<pre class="asc">' + q[0] + '</pre>')
+        + w.reveal('fantasy-app (50 a second) makes one request, is quiet for 10 seconds, then sends '
+                   '60 at once. How many pass?',
                    '50: ten seconds earn 500 tokens, but the bucket keeps 50.\n\n<pre class="asc">'
-                   + q[3] + '</pre>')
-        + w.reveal('cricket-blog (FREE) asks for a match history that costs 5, twice: at 0 ms and at '
-                   '700 ms. What is the second answer?',
-                   '700 ms earns 3.5 tokens, so 1.5 are missing: 1.5 × 200 ms = 300 ms.\n\n'
-                   '<pre class="asc">' + q[4] + '</pre>')
+                   + q[1] + '</pre>')
         + w.md('## Spot the bug')
         + bug(w, 1, '''
-Bucket bucket = buckets.get(key);
-if (bucket == null) {
-    bucket = factory.create(limit, nowMillis);
-    buckets.put(key, bucket);
+Counter counter = counters.get(key);
+if (counter == null) {
+    counter = newCounter(limit, nowMillis);
+    counters.put(key, counter);
 }
-return bucket;''', 'Check, then act: two threads meeting a new key both see `null` and both build a '
-            'bucket; the client gets more than its limit. The [Tests](#tests) step\'s broken copy '
-            'that replaces `computeIfAbsent` with a put is exactly this change.', '''
-return buckets.computeIfAbsent(key, k -> factory.create(limit, nowMillis));   // one atomic step''')
+return counter;''', 'Check, then act: two threads meeting a new customer both see `null` and both '
+            'make a counter, so the customer gets two budgets.', '''
+return counters.computeIfAbsent(key, k -> newCounter(limit, nowMillis));   // one step''')
         + bug(w, 2, '''
 @Override
-public synchronized RateLimitResult check(RequestContext request) {   // on the limiter
-    // ... the same loop, and TokenBucket.tryConsume is no longer synchronized
-}''', 'Correct, and slow: one lock for the whole API, so fantasy-app waits behind score-widget. '
-            'The lock belongs where the shared numbers are: one per bucket.', '''
-public RateLimitResult check(RequestContext request) { ... }          // no lock here
-public synchronized Decision tryConsume(int cost, long nowMillis)     // one lock per bucket''')
+public synchronized Decision check(String key) {    // on the limiter
+    ...                                            // and TokenBucket is not synchronized
+}''', 'Correct, and slow: one lock for the whole API, so every customer waits behind the busiest '
+            'one. The lock belongs where the shared numbers are: one per bucket.', '''
+public Decision check(String key) { ... }                          // no lock here
+public synchronized Decision tryAcquire(long nowMillis) { ... }    // one lock per bucket''')
         + bug(w, 3, '''
-private void refill(long nowMillis) {
-    long earned = (nowMillis - lastRefillMillis) / (long) millisPerToken;   // whole tokens
-    tokens = Math.min(capacity, tokens + earned);
-    lastRefillMillis = nowMillis;
-}''', 'The division drops the fraction and `lastRefillMillis` moves on anyway, so partial tokens '
-            'are thrown away: a client sending every 150 ms gets 5 requests, then none at all '
-            '(checked: 0 of the next 62 in 10 seconds).', '''
-long elapsed = nowMillis - lastRefillMillis;
-if (elapsed <= 0) { return; }
-tokens = Math.min(capacity, tokens + elapsed / millisPerToken);     // a double: keeps 0.6
-lastRefillMillis = nowMillis;''')
+private long tokens;
+...
+tokens = Math.min(capacity, tokens + (long) (elapsed / millisPerToken));
+lastRefillMillis = nowMillis;''', 'Whole tokens: 120 ms earns 0, and `lastRefillMillis` moves on '
+            'anyway, so the 0.6 is lost for good. A customer sending every 150 ms gets its burst, '
+            'then nothing ever again.', '''
+private double tokens;                                        // keeps 0.6
+tokens = Math.min(capacity, tokens + elapsed / millisPerToken);''')
         + bug(w, 4, '''
-class Plans {
-    private final Map<String, Plan> planOf = new HashMap<>();   // sign-ups write, requests read
-}''', 'A `HashMap` written by one thread while others read it can miss entries, show stale values, '
-            'or, before Java 8, loop forever during a resize.', '''
-private final Map<String, Plan> planOf = new ConcurrentHashMap<>();''')
-        + bug(w, 5, '''
-private volatile double tokens;          // "volatile fixes threads"
+private volatile double tokens;            // "volatile makes it thread-safe"
 
-public Decision tryConsume(int cost, long nowMillis) {   // not synchronized
+public Decision tryAcquire(long nowMillis) {   // not synchronized
     refill(nowMillis);
-    if (tokens >= cost) { tokens -= cost; return Decision.allow((long) tokens); }
-    ...''', '`volatile` fixes the stale read, not the lost update: `tokens -= cost` is still read, '
-            'then write, and two threads can both pass the check.', '''
-public synchronized Decision tryConsume(int cost, long nowMillis) { ... }   // the lock''')
-        + bug(w, 6, '''
-if (!d.allowed()) {
-    result = RateLimitResult.refused(d, rule.name());
-    break;                               // the charged buckets keep their tokens
-}''', 'No refund: a search refused by the search rule still costs a plan token and a quota token. '
-            'The next /scores shows 46 left, not 47; the tests catch it.', '''
-for (Bucket spent : charged) {
-    spent.refund(request.cost(), now);
-}''')
-        + bug(w, 7, '''
-public synchronized Decision tryConsume(int cost, long nowMillis) {
-    ...
-    listener.onDecision(request, result);  // told inside the bucket's lock
-}''', 'A slow listener now stalls every request for that key, and a listener that calls back into '
-            'the limiter could hold two locks: a deadlock becomes possible. Tell listeners after the '
-            'decision, holding no lock.', '''
-RateLimitResult result = ...;             // decided
-tell(request, result);                    // then told, no lock held''')
+    if (tokens >= 1) { tokens -= 1; return Decision.allow(); }
+    ...''', '`volatile` makes each write visible, but `tokens -= 1` is still read, then write: two '
+            'threads can both pass the check and both take the last token.', '''
+public synchronized Decision tryAcquire(long nowMillis) { ... }''')
+        + bug(w, 5, '''
+// in InMemoryCounterStore
+return counters.computeIfAbsent(key, k -> newCounter(limit, nowMillis));''', 'An upgrade from '
+            'FREE to PRO is ignored: the map already has a counter for the customer, built with 5 '
+            'a second, and returns it forever.', '''
+String id = key + "|" + limit.requests() + "/" + limit.periodMillis();   // new limit, new counter
+return counters.computeIfAbsent(id, k -> newCounter(limit, nowMillis));''')
         + w.md('## What would you change if...')
-        + w.reveal('...a new limit: 1,000 an hour per client, on top of the rest?',
-                   'One more rule, no code: ' + w.snippet('''
-new RateLimitRule("hourly", RateLimitRule.withKey(), KeyScope.CLIENT,
-        LimitPolicy.fixed(new Limit(1_000, 3_600_000)), Algorithm.TOKEN_BUCKET)'''))
-        + w.reveal('...one limit per endpoint for everyone together?',
-                   'One new key scope, one line: ' + w.snippet('''
-ENDPOINT(RequestContext::endpoint),                  // "/search" for all clients together'''))
-        + w.reveal('...refused requests should count too, to punish retry storms?',
-                   'In `TokenBucket`, let a refusal take tokens as well, down to minus the capacity, so '
-                   'a client that keeps hammering digs a deeper hole: ' + w.snippet('''
-// in TokenBucket.tryConsume, where it refuses:
-tokens = Math.max(-capacity, tokens - cost);         // each refusal digs deeper, to -capacity
-long waitMillis = (long) Math.ceil((cost - tokens) * millisPerToken);
-return Decision.deny(0, waitMillis);                 // below zero: report 0 left'''))
+        + w.reveal('...each customer also gets 1,000 an hour, on top of the rest?',
+                   'One more limiter, with `key -> new Limit(1_000, 3_600_000)` and the token bucket: '
+                   'a field and one line in `ApiLimits`, the one place the API\'s limits are listed. '
+                   'Nothing in the core changes.')
+        + w.reveal('...a list of partners must never be limited?',
+                   'Skip the limiter for them at the door, before `check`; no limiter code changes.')
         + w.reveal('...no bursts at all, just one request every 200 ms?',
                    'A bucket that holds one token is a steady pace: `new Limit(1, 200)`.')
-        + w.reveal('...a list of partners who must never be limited?',
-                   'Let them past the front door: the filter skips `check` for them, so no rule '
-                   'charges them. No limiter code changes: ' + w.snippet('''
-if (partners.contains(request.clientId())) { return endpoint.apply(request); }   // in the filter'''))
-        + w.md('## The questions they ask')
-        + w.reveal('Why a token bucket?', 'Bursts up to a set size, then a steady rate, with two '
-                   'numbers per key. A fixed window lets twice the limit through at an edge; a log is '
-                   'exact but costs an entry per request. It is not exact per second: up to 10 can pass '
-                   'in one.')
-        + w.reveal('What exactly does `synchronized` protect, and why per bucket?', "Refill, check and "
-                   "take on one key's numbers as one step (the lost update), plus visibility. Per "
-                   'bucket, because that is where the shared state is: keys never wait for each other, '
-                   'and a thread never holds two locks.')
-        + w.reveal('`computeIfAbsent`, `putIfAbsent`, or get-then-put?', 'Get-then-put is the '
-                   'check-then-act break. `putIfAbsent` is atomic but builds a bucket before every '
-                   'call and you must use the value it returns. `computeIfAbsent` builds only on a '
-                   'miss, atomically.')
-        + w.reveal('`ReentrantLock` or `synchronized`?', 'The same guarantees. `ReentrantLock` adds '
-                   '`tryLock` with a timeout, fairness and conditions; none is needed here, so '
-                   '`synchronized`: nothing to allocate, nothing to forget to unlock.')
-        + w.reveal('Why your own `Clock`, not `java.time.Clock`?', 'Either works: '
-                   '`Clock.systemUTC()` in production and `Clock.fixed` in tests. Ours is one method, '
-                   'easy to fake by hand; in a Spring codebase use `java.time.Clock`, and keep the '
-                   '`elapsed <= 0` guard.')
-        + w.reveal('How would it work across 10 servers?', 'The store moves to Redis and a Lua script '
-                   'does refill, check and take as one step. The limiter does not change. Decide fail '
-                   'open or closed per rule; set a short timeout.')
-        + w.reveal('Why not Guava, Bucket4j or Resilience4j?', "Guava's `RateLimiter` is one limiter "
-                   'per JVM, keys are yours to map, and `tryAcquire` says only yes or no: no '
-                   'Retry-After. Bucket4j is token buckets per key with Redis backends, the closest to '
-                   'this page. In the room, the hand-written bucket shows the thinking; in production, '
-                   'a library.')
-        + w.reveal('What should a client do with a 429?', 'Honour Retry-After; otherwise back off '
-                   'exponentially with jitter so retries do not arrive in a wave; cap the retries.')
-        + w.reveal('Which SOLID principles? Point at the code.', 'Say each in one line with a '
-                   'class: S the buckets count, the store stores; O a new `Bucket`; L any bucket '
-                   'drops in; I one-method interfaces; D everything handed in.'))
+        + w.reveal('...one limit per endpoint for everyone together?',
+                   'One more limiter whose key is the endpoint: `check(request.endpoint())`.'))
 
 
 def bug(w, n, code, answer, fix):
@@ -1537,13 +973,11 @@ def allcode(w):
         return (f'<a class="dl" download="{folder}.zip" '
                 f'href="data:application/zip;base64,{_zip(files, folder, pom)}">{label}</a>')
 
-    # the core, in typing order, grouped like the build steps
     groups = ''
     for b in CONFIG['BUILD']:
-        title = next(p['nav'] for p in PAGES_BY_ID.values() if p['id'] == b['id'])
+        title = PAGES_BY_ID[b['id']]['nav']
         groups += (f'<details class="more"><summary>{title}</summary>' + w.code(b['files'])
                    + '</details>')
-    # every file a follow-up adds, in its final form, one fold per follow-up
     later = ''
     for prev, s in zip(snaps, snaps[1:]):
         new = [f for f in CONFIG['FILE_ORDER'] if t.exists(f, s) and not t.exists(f, prev)]
@@ -1554,25 +988,21 @@ def allcode(w):
                       + w.code(new, snap_=last) + '</details>')
     return step('code', R, 'All the code', 'All the code, to read or open in your IDE', body=
         w.md('''
-        Everything on this page, in one place. Download a project, unzip it, and open the folder in
-        IntelliJ (File > Open): it is a plain Maven project, Java 17, no dependencies. Run `Main`
-        or `RateLimiterTest`. The same projects are in the repository under
-        `answers/lld/rate-limiter-code/`.
+        Download a project, unzip it, and open the folder in IntelliJ (File > Open): a plain Maven
+        project, Java 17, no dependencies. Run `Main`. The same projects are in the repository
+        under `answers/lld/rate-limiter-code/`.
         ''')
         + '<div class="dls">'
         + link(core, 'rate-limiter-core', 'Download the core (.zip)')
         + link(complete, 'rate-limiter-complete', 'Download the core + every follow-up (.zip)')
         + '</div>'
-        + w.md('''
-        ## The core, in the order you type it
-        ''')
+        + w.md('## The core, in the order you type it')
         + groups
         + w.md('''
         ## What the follow-ups add
 
-        New files only, as they end up. Follow-ups also change a few core files (for example
-        `isIdle` in the buckets, the `volatile` rule book in the limiter): the complete download
-        has every change.
+        New files only, as they end up. Follow-ups also change a few core files; the complete
+        download has every change.
         ''')
         + later)
 
@@ -1581,9 +1011,8 @@ PAGES_BY_ID = {}
 
 
 def pages(w):
-    out = [p(w) for p in (problem, counting, derive, design, answer, time_, bucket, count,
-                          budget, book, store, limiter, door, run_, tests, holds, principles,
-                          more, credits, live, idle, waiting, redis, lockfree, cousins, recall,
-                          practise, check)]
+    out = [p(w) for p in (problem, counting, design, question, limiter, limits, counting_, store,
+                          run_, windows, tiers, limits_followup, servers, idle, credits, quick,
+                          recall, practise, check)]
     PAGES_BY_ID.update({p['id']: p for p in out})
     return out + [allcode(w)]

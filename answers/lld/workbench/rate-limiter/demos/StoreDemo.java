@@ -5,20 +5,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-// The store: the same key always gets the same bucket, even when 16 threads ask for a new key at
-// the same instant.
+// 16 threads meet a new customer at the same instant: they must all get one counter.
 public class StoreDemo {
     public static void main(String[] args) throws InterruptedException {
-        InMemoryBucketStore store = new InMemoryBucketStore();
-        Limit limit = Limit.perSecond(5);
-        String key = "plan|news-app|5/1000";
-        List<Bucket> seen = new CopyOnWriteArrayList<>();
+        CounterStore store = new InMemoryCounterStore(Algorithm.TOKEN_BUCKET);
+        List<Counter> seen = new CopyOnWriteArrayList<>();
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService pool = Executors.newFixedThreadPool(16);
         for (int t = 0; t < 16; t++) {
             pool.submit(() -> {
                 start.await();
-                seen.add(store.bucketFor(key, Algorithm.TOKEN_BUCKET, limit, 0));
+                seen.add(store.counterFor("news-app", Limit.perSecond(5), 0));
                 return null;
             });
         }
@@ -26,11 +23,7 @@ public class StoreDemo {
         pool.shutdown();
         pool.awaitTermination(10, TimeUnit.SECONDS);
         long distinct = seen.stream().distinct().count();
-        System.out.println("16 threads asked for one new key: " + seen.size() + " answers, "
-                + distinct + " bucket");
-        Bucket other = store.bucketFor("plan|cricket-blog|5/1000", Algorithm.TOKEN_BUCKET,
-                limit, 0);
-        System.out.println("another key, another bucket: " + (other != seen.get(0)));
-        Check.that(distinct == 1 && other != seen.get(0), "one bucket per key");
+        System.out.println("16 threads asked for news-app's counter: " + distinct + " counter");
+        Check.that(distinct == 1, "one counter per key");
     }
 }

@@ -11,7 +11,7 @@ python3 build.py rate-limiter --fresh    # recompile and rerun everything, ignor
 ## What the reader gets
 
 The reader is preparing for SDE-2/3 interviews. They read a page once, then close it and must
-reproduce the reasoning, the classes, the code, the tests and the follow-ups, and answer the
+reproduce the reasoning, the classes, the code and the follow-ups, and answer the
 interviewer's questions. So the page teaches a small design well, with every line compiled.
 
 One step is on screen at a time (the left list and ← → move between steps). **Read** mode shows
@@ -19,20 +19,16 @@ everything; **Practise** mode hides the code and the answers until the reader as
 
 | group | steps | what each step holds |
 |---|---|---|
-| Understand | The problem | the interviewer's line (a real reported wording, with company and year); the situation, with realistic names and numbers; one flow picture; "what this really is" in one sentence; the questions to ask, each with what its answer changes in the code; what we build (the product's rules as a table); what SDE-2 and SDE-3 are graded on; the hour (what to type in a 60-minute round, what in a 90-minute machine-coding round); how to use the page |
-| | The core idea (e.g. how to count) | the first idea, drawn failing (a ✗ text panel); the options as a table; "X, not Y" lines; the chosen mechanism with its formula and a worked trace whose numbers the code prints later |
-| Design | How to get there | the first version everyone writes, compiled and run (the 15-minute version); then one question per move, written as an engineer thinking aloud: what they notice in the problem or the code, the tempting fix and why it fails, the new types (each named as record, interface, class or enum), a short code sketch, a bold "X, not Y" line, and a chip row of the design so far. By the last question every type exists. It comes *before* the finished diagram, so the diagram is the summary |
-| | The design | the caller's code first; the class diagram; one sequence diagram of a real request; who does what, and when each class changes |
-| Build | one step per group of 1-5 types, in typing order | the where-we-are strip; 2-4 sentences of why; the code, whole files, explained in its comments; the output of a tiny program that uses only what exists so far; a ✗/✓ panel where a race or a wrong first idea is the point; a "Java ·" note where a language or library idea is first used; at most two "If the interviewer asks" answers |
-| | Run it | `Main` in parts, its output, and what the output shows |
-| | Tests | the test file in parts (the first test open, the rest folded); its output; the break-it table (real broken copies, each with the test that must fail) |
-| | Why it holds up | the thread breaks met in the build (each is taught in the step where it happens, never in a separate primer) as one table; what threads share and what guards it; why it cannot deadlock; measured cost |
-| | Principles and patterns | SOLID as a table (in one line / here / without it); patterns used, with the problem each solves here; patterns you might reach for and why not; what else they probe (program to an interface, composition, immutability, testability) |
-| Follow-ups | one step each, ordered so each builds on the last; optional ones marked *later* | the ask (a reported wording, company, year); "Builds on:" the step before; the strip with only new and changed types; where it lands in *our* design (which interface absorbs it); the diff (new code with changes highlighted; repeated changes folded); the demo's output; the catch (the one hole left); Java notes; interview answers |
-| Remember and practise | Recall | the whole design as signatures in typing order; cards (the eight questions, the core mechanism in numbers, threads, where each follow-up lands, the tests); the lines to remember exactly |
-| | Practise | drill 0: the 15-minute version; drill 1: the 60-minute round subset with a tick list; drill 2: machine coding, then the page's tests against your code (plus the whole core in one file for an online editor); drill 3: each follow-up with its own time, started from `<slug>-code/steps/<step>/`; drill 4: out loud; when to repeat; a miss log kept in the browser |
-| | Check yourself | predict the output (answers printed by real code); spot the bug (real bugs, each with its fix as code); what would you change if... (answers as code); the questions they ask; everything folded |
-| | All the code | download buttons for the core and complete Maven projects (zips embedded in the page); every core file in typing order; each follow-up's new files, folded |
+| Understand | The problem | the interviewer's line (a real reported wording); the situation, with realistic names; one flow picture; the questions to ask, each with what its answer changes in the code; what the hour holds (typed vs said) and the 60-minute plan; how to use the page |
+| | The core idea (e.g. how to count) | every option explained from scratch with ASCII pictures and worked numbers, its catch, and where it is still the right choice; all options on the same tests; one line each; which one the core uses and why |
+| Design | The design, top-down | start at the front door and keep asking "what does this need?", going deeper (↓) until a question is settled, then back (↑); each answer is a type, with the first-draft code where it helps; the whole design as one tree; one case walked before typing; where each new requirement will land |
+| Build | one step per group of 1-3 types, in the order they are typed in the room (top-down, the caller before its parts) | the where-we-are strip; whole files, explained in their comments; a tiny program's output where it helps; a ✗/✓ panel where a race is the point; "The thinking": why the code is written this way, including the threads, patterns and SOLID point it makes |
+| | Run it | `Main` and its output: the walked case and a race |
+| Follow-ups | one step each, phrased as an interviewer adds scope; optional ones marked *later* | the ask; the strip with new and changed types; where it lands in *our* design; the diff; the demo's output; the catch. A follow-up nobody types in the room (many servers) is explained in prose with the seam as a sketch. A last step answers the quick ones in a sentence each |
+| Remember and practise | Recall | the design as signatures in typing order; cards; the lines to remember exactly |
+| | Practise | the design on paper; the core with a tick list (plus the whole core in one file); each follow-up from `<slug>-code/steps/<step>/`; out loud; when to repeat; a miss log kept in the browser |
+| | Check yourself | predict the output (answers printed by real code); spot the bug; what would you change if...; everything folded |
+| | All the code | download buttons for the core and complete Maven projects; every core file in typing order; each follow-up's new files, folded |
 
 The left list shows minutes per step; the must-do path is the steps without *later*.
 
@@ -48,6 +44,16 @@ These come from the reader's feedback on earlier versions. Break none of them.
 - No "say this" boxes, no scripts of what to tell the interviewer, no "a strong answer contains",
   no walkthrough lists of the same content in other words.
 - Code first. The explanation lives in the code's comments; prose around code is 2-4 sentences.
+- Design top-down, as people think in the room: from the request at the front door to where the
+  state lives, going deep on one question before coming back. Type in that same order.
+- Simple, everyday patterns: plain interfaces, constructor injection, a plain enum with a switch.
+  No enums holding lambdas, no factories implemented by enums, no predicate-built rules.
+- Model the domain, not the example: a tier is a property of the customer that carries a limit;
+  other limits are the same limiter with another key.
+- No tests step, no separate principles or patterns section: say what a pattern or a thread
+  choice is for where the code makes it.
+- Follow-ups as interviewers ask them: new requirements and more scope, not operational stories.
+  Do not type what nobody types in the room (a Redis script): explain it and show the seam.
 - Only code you would type in the room: no validation, no custom `toString`, no edge-case paths
   or helpers that exist only for demos. Mention the edge case in a Q&A instead.
 - Code in digestible pieces: whole files of 10-50 lines; a longer file is shown in labelled parts

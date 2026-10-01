@@ -90,7 +90,10 @@ class Runs:
         have = []
         for step in self.cfg['BUILD']:
             have += step['files']
-            src = {f: t.text(f, 'core') for f in have}
+            if step.get('compile') is False:      # typed top-down: its parts come in later steps
+                print(f"  step {step['id']:8} typed ({len(have)} files); compiles in a later step")
+                continue
+            src = {f: t.text(f, 'core') for f in step.get('alone', have)}
             mains = []
             if step.get('demo'):
                 d = step['demo']
@@ -110,7 +113,7 @@ class Runs:
         for s in self.cfg['SNAPS'][1:]:
             src = {f: t.text(f, s) for f in t.names(s)}
             demo = self.cfg['DEMOS'].get(s)
-            mains = ['RateLimiterTest', 'Main'] if 'RateLimiterTest.java' in src else []
+            mains = ['Main'] if 'Main.java' in src else []
             if demo:
                 src['Check.java'] = self.demo('Check')
                 src[demo + '.java'] = self.demo(demo)
@@ -580,6 +583,8 @@ def export_projects(runs, cfg, out_dir):
     for snap_name in cfg['SNAPS']:
         projects['steps/' + snap_name] = {f: t.text(f, snap_name) for f in t.names(snap_name)}
     for name, files in projects.items():
+        if not files:
+            continue
         src = os.path.join(out_dir, name, 'src', 'main', 'java')
         os.makedirs(src)
         for f, text in files.items():

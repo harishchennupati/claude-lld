@@ -1,1 +1,0 @@
-enum Plan { FREE, PRO }

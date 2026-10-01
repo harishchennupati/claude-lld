@@ -5,13 +5,12 @@ sources, so it always matches the page.
 
 | folder | what is in it |
 |---|---|
-| `core/` | the design from the page's build steps: the rule-based limiter, `Main` and `RateLimiterTest` |
-| `complete/` | the core plus every follow-up, with each follow-up's demo (MoreDemo, CreditsDemo, LiveDemo, IdleDemo, WaitingDemo, RedisDemo, LockFreeDemo, CousinsDemo) |
-| `practice/` | only `RateLimiterTest.java`: write your own classes next to it, then run the tests |
-| `steps/<step>/` | the code exactly as it is after each follow-up step: start drill 3 from these |
+| `core/` | the core from the page's build steps, with `Main` |
+| `complete/` | the core plus every follow-up, with each follow-up's demo (WindowsDemo, CreditsDemo, TiersDemo, LimitsDemo, IdleDemo) |
+| `steps/<step>/` | the code exactly as it is after each follow-up: start a follow-up drill here |
 
 Each folder is a plain Maven project (Java 17, no dependencies). In IntelliJ: File > Open, pick
-the folder, then run `Main` or `RateLimiterTest` from the green arrow.
+the folder, then run `Main`.
 
 From a terminal, without Maven:
 
@@ -19,5 +18,4 @@ From a terminal, without Maven:
 cd core
 javac -d out src/main/java/*.java
 java -cp out Main
-java -cp out RateLimiterTest
 ```

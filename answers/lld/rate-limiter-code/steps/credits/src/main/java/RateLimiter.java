@@ -1,12 +1,11 @@
-// The one question the API asks before it does any work for a request. The API depends on this
-// interface, never on a class behind it: a Redis-backed or a shadow limiter drops in unseen.
+// The one question the API asks before it does any work: may this caller go ahead now?
+// The API depends on this interface, never on the class behind it.
 interface RateLimiter {
-    RateLimitResult check(RequestContext request);
+    // key: who is counted. The customer id here; later an IP, or "customer + endpoint".
+    Decision check(String key);
 
-    // The interviewer's `boolean rateLimit(customerId)`, true meaning "go ahead": one line on
-    // top, for callers that have only a client id. Implementations get it for free.
+    // The interviewer's own signature: just yes or no.
     default boolean rateLimit(String customerId) {
-        // No IP or endpoint is known: the endpoint rules (search, login) never match it.
-        return check(RequestContext.of(customerId, "-", "/")).allowed();
+        return check(customerId).allowed();
     }
 }

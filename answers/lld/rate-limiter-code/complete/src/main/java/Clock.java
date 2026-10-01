@@ -1,4 +1,5 @@
-// Where "now" comes from. The limiter is handed one, so a test can control time.
+// Time, handed in. Production: System::currentTimeMillis. A demo or a test moves its own clock,
+// so "200 ms later" takes no time at all.
 interface Clock {
     long nowMillis();
 }

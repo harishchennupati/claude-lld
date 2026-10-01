@@ -1,26 +1,19 @@
-// 1,000 clients call once and never again; score-widget keeps calling. Sweeps forget what a new
-// bucket would replace exactly: token buckets once they are full again, quota buckets only
-// once their day is over.
+// A million customers who call once a day: forget the counters that a new one would equal.
 public class IdleDemo {
     public static void main(String[] args) {
-        ManualClock clock = new ManualClock(0);
-        InMemoryBucketStore store = new InMemoryBucketStore();
-        RateLimiter limiter = new RuleBasedRateLimiter(ScoreApiRules.build(new Plans()), store,
-                clock);
+        InMemoryCounterStore store = new InMemoryCounterStore(Algorithm.TOKEN_BUCKET);
+        Limit limit = Limit.perSecond(5);
         for (int i = 0; i < 1_000; i++) {
-            limiter.check(RequestContext.of("one-time-" + i, "203.0.113.7", "/scores"));
+            store.counterFor("customer-" + i, limit, 0).tryAcquire(0);   // one call each
         }
-        clock.advance(900);
-        limiter.check(RequestContext.of("score-widget", "203.0.113.7", "/scores"));
-        clock.advance(100);
-        System.out.printf("buckets at 1,000 ms:  %,d  (1,001 clients x a plan and a quota bucket,"
-                + " and one global)%n", store.size());
-        int first = store.evictIdle(clock.nowMillis());
-        System.out.printf("sweep at 1,000 ms:    removed %,d plan buckets that are full again;"
-                + " %,d left%n", first, store.size());
-        clock.advance(86_400_000);                            // the next day
-        int second = store.evictIdle(clock.nowMillis());
-        System.out.printf("sweep the next day:   removed %,d; %,d left%n", second, store.size());
-        Check.that(first == 1_000 && second == 1_003 && store.size() == 0, "1,000 then 1,003");
+        store.counterFor("busy-app", limit, 0).tryAcquire(0);
+        for (int i = 0; i < 5; i++) {
+            store.counterFor("busy-app", limit, 900).tryAcquire(900);   // still busy at 900 ms
+        }
+        System.out.println("counters before the sweep: " + store.size());
+        store.evictIdle(1_000);
+        System.out.println("after the sweep at 1000 ms: " + store.size()
+                + " (busy-app is not full yet)");
+        Check.that(store.size() == 1, "only busy-app stays");
     }
 }

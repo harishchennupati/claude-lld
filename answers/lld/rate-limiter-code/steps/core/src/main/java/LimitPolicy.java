@@ -1,10 +1,5 @@
-// "Which limit applies to this request?" A rule with one limit for everyone uses fixed(...); a
-// rule whose limit depends on the client's plan uses PlanLimits.
-@FunctionalInterface
+// Which limit applies to a key. One method, so how limits are chosen (one for everyone, per
+// customer, by plan) can change without the limiter knowing.
 interface LimitPolicy {
-    Limit limitFor(RequestContext request);
-
-    static LimitPolicy fixed(Limit limit) {
-        return request -> limit;
-    }
+    Limit limitFor(String key);
 }
