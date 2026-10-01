@@ -373,14 +373,6 @@ event: done       data: {"mode": "answer", "usage": {"input_tokens": 5187, "outp
                 'source\'s change list from its <b>cursor</b>, a marker that records how far it has read. '
                 'Not every identity provider resends a failed call, so every 15 minutes we also read Okta\'s '
                 'change log, and every night we re-read every group.'))
-    B.append(fu(
-        ('The connection drops after 60 words. What happens to the turn, and what does the browser do?',
-         'The turn runs on and is saved. The browser does not resume the stream; it asks <code>GET .../messages/m_77</code> every 2 seconds until the turn\'s '
-         'status leaves <code>generating</code>. A turn has 60 seconds; at the deadline it is saved as '
-         'failed.'),
-        ('She presses stop, or closes the tab. What happens to the bill?',
-         'Stop cancels the model call, and output tokens are billed as they are produced, so the bill stops '
-         'there. A closed tab looks like a dropped connection, so that turn runs on: at most 1.5 cents more.')))
     B.append(tx('Each source has its quirks. A deleted wiki page or ticket never appears in its change '
                 'list, so a delete webhook is confirmed with the source at once, and those change lists are also '
                 'read every 3 minutes, from 10 minutes before the cursor, in case the list lags a save. The '
@@ -389,6 +381,15 @@ event: done       data: {"mode": "answer", "usage": {"input_tokens": 5187, "outp
                 'there waits for the <b>daily sweep</b>, which re-reads every container\'s permissions and '
                 'every live document id. A <b>weekly crawl</b> compares every document\'s version and checksum '
                 'with ours.'))
+
+    B.append(fu(
+        ('The connection drops after 60 words. What happens to the turn, and what does the browser do?',
+         'The turn runs on and is saved. The browser does not resume the stream; it asks <code>GET .../messages/m_77</code> every 2 seconds until the turn\'s '
+         'status leaves <code>generating</code>. A turn has 60 seconds; at the deadline it is saved as '
+         'failed.'),
+        ('She presses stop, or closes the tab. What happens to the bill?',
+         'Stop cancels the model call, and output tokens are billed as they are produced, so the bill stops '
+         'there. A closed tab looks like a dropped connection, so that turn runs on: at most 1.5 cents more.')))
 
     # ---------------------------------------------------------------- data
     B.append(h2('s-data', 'The data: what we copy, what we derive, and what we keep'))
@@ -944,8 +945,8 @@ keep the best 100 ──▶ the reranker scores each (question, chunk) pair ─�
         qa('An employee loses access to a document an old answer of hers cited. What does she see?',
            'The text stays in her history, but each citation is checked again when the conversation is shown: '
            'one she may no longer read loses its link and says "source no longer available to you", one edited '
-           'since still links, marked "changed since", and that '
-           'turn is never carried into a new prompt. A legal delete redacts the text itself.'),
+           'since still links, marked "changed since". A turn that cited '
+           'a source she may no longer read is never carried into a new prompt. A legal delete redacts the text itself.'),
     ])))
     return ''.join(B)
 
