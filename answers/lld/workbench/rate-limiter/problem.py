@@ -489,6 +489,8 @@ def think_limits(w):
             - `PlanLimit`: looks up the customer's plan, returns its `rate` or `daily` limit
         - **Pattern:** Strategy. A third kind of limit is a third class, with no `if` added to
           the rule.
+
+        ↑ Back to the rule, which now has its policy. ↑ Back to the limiter's list.
         ''')
 
 
@@ -516,6 +518,8 @@ def think_counting(w):
           both take it (the picture under the code).
         - So each counter's methods are `synchronized`. The lock is per counter, so different
           customers never wait on each other.
+
+        ↑ Back to the limiter's list.
         ''')
 
 
@@ -549,204 +553,73 @@ def think_back(w):
         ''')
 
 
-# The Java behind each branch: every type, the kind of Java type it is, and why that kind.
-JAVA_PRIMER = """
-Four kinds of type, and how to choose:
-
-- **`record`:** a bundle of values that never changes once made, such as a request or an
-  answer. Java writes the constructor, the getters, `equals` and `toString` for you.
-  *Choose it for data.*
-- **`interface`:** a promise of methods, with no state. Code that holds an interface works
-  with any class behind it. *Choose it where something may be swapped later.*
-- **`enum`:** a fixed list of named values known when you compile, such as `FREE, PRO`.
-  The compiler checks every `switch` over it. *Choose it for a closed set of choices.*
-- **`class`:** state that changes, or behaviour that holds other objects. *Choose it when a
-  record is not enough.*
-
-Two words that join them:
-
-- **`implements`:** "this class keeps that interface's promise". `RuleBasedRateLimiter
-  implements RateLimiter`.
-- **`extends`:** "this class inherits that class's code". This design never uses it: see
-  *Why no abstract class* under Counting.
-"""
-
-KINDS = {
-    'door': [
-        ['`Request`', '`record`', 'Just data: customer, IP, endpoint. It never changes on its way '
-         'through, so many threads can read it safely.'],
-        ['`RateLimitResult`', '`record`', 'Just data: allowed, retry-after, the rule that said '
-         'no. A record, not a `boolean`, so it can carry all three.'],
-        ['`RateLimiter`', '`interface`', 'The door depends on the promise "check this request", '
-         'not on how it is done, so the limiter behind it can change and the door does not. Its '
-         '`default` method `rateLimit(customerId)` is code inside an interface, which every '
-         'class behind it gets for free.'],
-        ['`RateLimitFilter`', '`class`', 'It holds another object (the limiter) and has '
-         'behaviour (turn the answer into HTTP). It is handed the limiter in its constructor, so '
-         'it never chooses which limiter it gets.'],
-    ],
-    'limiter': [
-        ['`RuleBasedRateLimiter`', '`class` that `implements RateLimiter`', 'It keeps the '
-         'interface\'s promise. Its fields (the rules, the store, the clock) are `final` and handed '
-         'in through the constructor. That is *dependency injection*: the limiter never builds '
-         'its own parts, so a demo can hand it a clock moved by hand.'],
-        ['`Clock`', '`interface` with one method', 'Time is a dependency, so it is an interface '
-         'too. With one method, a lambda or method reference fits it: '
-         '`System::currentTimeMillis` in production, a hand-moved clock in a demo.'],
-    ],
-    'rules': [
-        ['`RateLimitRule`', '`record`', 'A rule is the config\'s data, fixed at startup: a record. '
-         'Records can still have methods, so `matches` and `keyFor` live on it, next to the data '
-         'they read.'],
-        ['`Match`', '`record`', 'Two values, caller and endpoint, plus a `matches` method.'],
-        ['`Caller`', '`enum`', 'A closed set: `CUSTOMER` or `ANY`.'],
-        ['`CountPer`', '`enum`', 'A closed set of four. `keyFor` is a `switch` over it, and the '
-         'compiler complains if a case is missing.'],
-        ['`ScoreApiRules`', '`final class` with a `static` method', 'No state, just one function '
-         'that builds the list. `static`: you call it without making an object. `final`: nobody '
-         'can extend it.'],
-    ],
-    'limits': [
-        ['`Limit`', '`record`', 'Two numbers: requests and period. Its `static` methods '
-         '`perSecond(5)` and `perDay(10_000)` are *static factory methods*: named ways to build '
-         'one that read better than `new Limit(5, 1000)`.'],
-        ['`Plan`', '`enum` with fields', 'A closed set (FREE, PRO), and each value carries data: '
-         'its `rate` and `daily` limits, set through the enum\'s constructor.'],
-        ['`Customers`', '`class`', 'Its state changes (upgrades), so not a record. The map is '
-         '`private` and reached only through `planOf` and `setPlan`, so nobody can misuse it.'],
-        ['`LimitPolicy`', '`interface`', 'The promise "how much for this request?", so the rule '
-         'never knows which kind of limit it holds (Strategy).'],
-        ['`FixedLimit`', '`record` that `implements LimitPolicy`', 'Just one value, so a record. '
-         'A record can implement an interface like any class.'],
-        ['`PlanLimit`', '`class` that `implements LimitPolicy`', 'It holds a reference to the '
-         'live `Customers` directory and looks the plan up on every call: behaviour, not a value, '
-         'so a class. `Field` is an `enum` nested inside it, because only `PlanLimit` uses it.'],
-    ],
-    'counters': [
-        ['`Decision`', '`record`', 'One counter\'s answer: allowed, and how long to wait. '
-         '`Decision.allow()` and `Decision.deny(ms)` are static factory methods.'],
-        ['`Counter`', '`interface`', 'The promise `tryAcquire` and `refund`, so the limiter can '
-         'hold any way of counting (Strategy).'],
-        ['`TokenBucket`, `FixedWindowCounter`, `SlidingWindowLog`', '`class` that '
-         '`implements Counter`', 'Each has state that changes on every request (tokens, a count, '
-         'a list of times), so classes, with `synchronized` methods guarding that state.'],
-        ['`Algorithm`', '`enum`', 'A closed set of ways to count, named in the config.'],
-        ['`CounterFactory`', '`final class` with a `static` method', 'No state: one `switch` from '
-         '`Algorithm` to a new counter (Factory). The one place that knows every counter class.'],
-    ],
-    'store': [
-        ['`CounterStore`', '`interface`', 'Where counts live will change (memory today, Redis '
-         'with many servers), so the limiter holds the promise, not the place.'],
-        ['`InMemoryCounterStore`', '`class` that `implements CounterStore`', 'It owns changing '
-         'state, a `ConcurrentHashMap`. Swapping it for a Redis class changes no other file.'],
-    ],
+# The reasoning shown above each file as it is written: what kind of Java type it is, and why.
+WHY = {
+    'Request.java': '**`Request`, a `record`:** just data (customer, IP, endpoint). It never '
+        'changes on its way through, so many threads can read it safely.',
+    'RateLimitResult.java': '**`RateLimitResult`, a `record`:** just data. A record, not a '
+        '`boolean`, so it can carry allowed, when to retry, and which rule said no.',
+    'RateLimiter.java': '**`RateLimiter`, an `interface`:** the door depends on the promise '
+        '"check this request", not on how it is done, so the limiter behind it can change and the '
+        'door does not. The `default` method is code inside the interface that every class behind '
+        'it gets for free.',
+    'RateLimitFilter.java': '**`RateLimitFilter`, a `class`:** it holds another object and has '
+        'behaviour. The limiter is handed in through the constructor, so the filter never chooses '
+        'which one it gets.',
+    'RuleBasedRateLimiter.java': '**`RuleBasedRateLimiter`, a `class` that `implements '
+        'RateLimiter`:** it keeps the interface\'s promise. Its parts (rules, store, clock) are '
+        '`final` fields handed in through the constructor (dependency injection), so a demo can '
+        'hand it a clock moved by hand.',
+    'Clock.java': '**`Clock`, an `interface` with one method:** time is swappable too. With one '
+        'method, `System::currentTimeMillis` fits it in production, and a hand-moved clock in a '
+        'demo.',
+    'RateLimitRule.java': '**`RateLimitRule`, a `record`:** a rule is config data, fixed at '
+        'startup. A record can still have methods, so `matches` and `keyFor` sit next to the data '
+        'they read.',
+    'Match.java': '**`Match`, a `record`:** two values, caller and endpoint, and a `matches` '
+        'method.',
+    'Caller.java': '**`Caller`, an `enum`:** a closed set, `CUSTOMER` or `ANY`.',
+    'CountPer.java': '**`CountPer`, an `enum`:** a closed set of four. `keyFor` switches over it, '
+        'and the compiler complains if a case is missing.',
+    'ScoreApiRules.java': '**`ScoreApiRules`, a `final class` with a `static` method:** no state, '
+        'one function that builds the list. `static`: called without making an object. `final`: '
+        'nobody extends it.',
+    'Limit.java': '**`Limit`, a `record`:** two numbers. `perSecond(5)` and `perDay(10_000)` are '
+        'static factory methods: named ways to build one, clearer than `new Limit(5, 1000)`.',
+    'LimitPolicy.java': '**`LimitPolicy`, an `interface`:** the promise "how much for this '
+        'request?", so the rule never knows which kind of limit it holds (Strategy).',
+    'FixedLimit.java': '**`FixedLimit`, a `record` that `implements LimitPolicy`:** just one '
+        'value, so a record. A record can implement an interface like any class.',
+    'PlanLimit.java': '**`PlanLimit`, a `class` that `implements LimitPolicy`:** it holds the live '
+        '`Customers` directory and looks the plan up on every call: behaviour, not a value. '
+        '`Field` is an `enum` nested inside, because only `PlanLimit` uses it.',
+    'Plan.java': '**`Plan`, an `enum` with fields:** a closed set where each value carries data, '
+        'its `rate` and `daily` limits, set through the enum\'s constructor.',
+    'Customers.java': '**`Customers`, a `class`:** its state changes (upgrades), so not a record. '
+        'The map is `private`, reached only through `planOf` and `setPlan`.',
+    'Decision.java': '**`Decision`, a `record`:** one counter\'s answer, allowed and how long to '
+        'wait. `allow()` and `deny(ms)` are static factory methods.',
+    'Counter.java': '**`Counter`, an `interface`, not an abstract class:** the limiter must hold '
+        'any way of counting (Strategy). An abstract class is for shared fields and code, and the '
+        'counters share none. A class can also extend only one class, but implement many '
+        'interfaces.',
+    'TokenBucket.java': '**`TokenBucket`, a `class` that `implements Counter`:** its tokens change '
+        'on every request, so a class, with `synchronized` methods guarding them.',
+    'FixedWindowCounter.java': '**`FixedWindowCounter`, a `class` that `implements Counter`:** a '
+        'count that changes on every request, guarded by `synchronized`.',
+    'SlidingWindowLog.java': '**`SlidingWindowLog`, a `class` that `implements Counter`:** a list '
+        'of times that changes on every request, guarded by `synchronized`.',
+    'Algorithm.java': '**`Algorithm`, an `enum`:** a closed set of ways to count, named in the '
+        'config.',
+    'CounterFactory.java': '**`CounterFactory`, a `final class` with a `static` method:** no '
+        'state, one `switch` from `Algorithm` to a new counter (Factory): the one place that knows '
+        'every counter class.',
+    'CounterStore.java': '**`CounterStore`, an `interface`:** where counts live will change '
+        '(memory today, Redis with many servers), so the limiter holds the promise, not the place.',
+    'InMemoryCounterStore.java': '**`InMemoryCounterStore`, a `class` that `implements '
+        'CounterStore`:** it owns changing state, a `ConcurrentHashMap`. Swapping it for a Redis '
+        'class changes no other file.',
 }
-
-WHY_NO_ABSTRACT = """
-An **abstract class** is a half-built class: it holds shared fields and code, and subclasses
-`extend` it to fill in the rest. It earns its place when the classes **share state or code**.
-
-- Our three counters share **nothing**: a bucket keeps tokens, a window keeps a count, a log
-  keeps a list of times. A base class would have nothing to hold.
-- A class can `extend` only **one** class, but `implement` **many** interfaces. An interface
-  leaves each counter free.
-- Where a little shared code is wanted later (`isIdle`, in the [Memory](#idle) follow-up), an
-  interface's `default` method gives it without a base class.
-
-The rule of thumb to say: **an interface for a role, an abstract class only for shared code.**
-"""
-
-
-def kinds(w, st):
-    """The Java behind one branch, type by type."""
-    return (w.md('### The Java, type by type')
-            + w.table(['Type', 'Java kind', 'Why this kind'], KINDS[st])
-            + (w.java('The four kinds of type', JAVA_PRIMER) if st == 'door' else '')
-            + (w.java('Why no abstract class', WHY_NO_ABSTRACT) if st == 'counters' else ''))
-
-
-# Why each type in a branch is the kind of Java type it is.
-KINDS = {
-    'door': [
-        ['`Request`', '`record`', 'Just data: customer, IP, endpoint. It never changes on its way '
-         'through, so many threads can read it safely.'],
-        ['`RateLimitResult`', '`record`', 'Just data: allowed, retry-after, the rule that said '
-         'no. A record, not a `boolean`, so it can carry all three.'],
-        ['`RateLimiter`', '`interface`', 'The door depends on the promise "check this request", '
-         'not on how it is done, so the limiter behind it can change and the door does not. Its '
-         '`default` method `rateLimit(customerId)` is code inside the interface, which every '
-         'class behind it gets for free.'],
-        ['`RateLimitFilter`', '`class`', 'It holds another object (the limiter) and has '
-         'behaviour (turn the answer into HTTP). The limiter is handed in through its '
-         'constructor, so the filter never chooses which one it gets.'],
-    ],
-    'limiter': [
-        ['`RuleBasedRateLimiter`', '`class`, `implements RateLimiter`', 'It keeps the '
-         'interface\'s promise. Its fields (the rules, the store, the clock) are `final` and '
-         'handed in through the constructor (dependency injection): it never builds its own '
-         'parts, so a demo can hand it a clock moved by hand.'],
-        ['`Clock`', '`interface`, one method', 'Time is a dependency, so it is swappable too. '
-         'With one method, a method reference fits it: `System::currentTimeMillis` in '
-         'production, a hand-moved clock in a demo.'],
-    ],
-    'rules': [
-        ['`RateLimitRule`', '`record`', 'A rule is config data, fixed at startup. Records can '
-         'still have methods, so `matches` and `keyFor` live on it, next to the data they read.'],
-        ['`Match`', '`record`', 'Two values, caller and endpoint, plus a `matches` method.'],
-        ['`Caller`', '`enum`', 'A closed set: `CUSTOMER` or `ANY`.'],
-        ['`CountPer`', '`enum`', 'A closed set of four. `keyFor` is a `switch` over it, and the '
-         'compiler complains if a case is missing.'],
-        ['`ScoreApiRules`', '`final class`, `static` method', 'No state, just one function that '
-         'builds the list. `static`: called without making an object. `final`: nobody extends '
-         'it.'],
-    ],
-    'limits': [
-        ['`Limit`', '`record`', 'Two numbers: requests and period. `perSecond(5)` and '
-         '`perDay(10_000)` are static factory methods: named ways to build one that read better '
-         'than `new Limit(5, 1000)`.'],
-        ['`Plan`', '`enum` with fields', 'A closed set (FREE, PRO) where each value carries data, '
-         'its `rate` and `daily` limits, set through the enum\'s constructor.'],
-        ['`Customers`', '`class`', 'Its state changes (upgrades), so not a record. The map is '
-         '`private`, reached only through `planOf` and `setPlan`.'],
-        ['`LimitPolicy`', '`interface`', 'The promise "how much for this request?", so the rule '
-         'never knows which kind of limit it holds (Strategy).'],
-        ['`FixedLimit`', '`record`, `implements LimitPolicy`', 'Just one value, so a record; a '
-         'record can implement an interface like any class.'],
-        ['`PlanLimit`', '`class`, `implements LimitPolicy`', 'It holds the live `Customers` '
-         'directory and looks the plan up on every call: behaviour, not a value. `Field` is an '
-         '`enum` nested inside it, because only `PlanLimit` uses it.'],
-    ],
-    'counters': [
-        ['`Decision`', '`record`', 'One counter\'s answer: allowed, and how long to wait. '
-         '`Decision.allow()` and `Decision.deny(ms)` are static factory methods.'],
-        ['`Counter`', '`interface`, not an abstract class', 'The limiter must hold any way of '
-         'counting (Strategy). An abstract class is for shared fields and code, and the counters '
-         'share none: tokens, a count, a list of times. A class can also extend only one class '
-         'but implement many interfaces.'],
-        ['`TokenBucket`, `FixedWindowCounter`, `SlidingWindowLog`', '`class`, '
-         '`implements Counter`', 'Each has state that changes on every request, so classes, with '
-         '`synchronized` methods guarding that state.'],
-        ['`Algorithm`', '`enum`', 'A closed set of ways to count, named in the config.'],
-        ['`CounterFactory`', '`final class`, `static` method', 'No state: one `switch` from '
-         '`Algorithm` to a new counter (Factory), the one place that knows every counter class.'],
-    ],
-    'store': [
-        ['`CounterStore`', '`interface`', 'Where counts live will change (memory today, Redis '
-         'with many servers), so the limiter holds the promise, not the place.'],
-        ['`InMemoryCounterStore`', '`class`, `implements CounterStore`', 'It owns changing state, '
-         'a `ConcurrentHashMap`. Swapping it for a Redis class changes no other file.'],
-    ],
-}
-
-
-def kinds(w, st):
-    return (w.md('**Why each type is this kind:**')
-            + w.table(['Type', 'Kind', 'Why'], KINDS[st])
-            + (w.md(BACK[st]) if st in BACK else ''))
-
-
-BACK = {'limits': "↑ Back to the rule, which now has its policy. ↑ Back to the limiter's list.",
-        'counters': "↑ Back to the limiter's list."}
 
 
 BRANCHES = [  # (step id = diagram stage, nav, title)
@@ -816,32 +689,32 @@ def whole_design(w):
 # what to type in a 60-minute round.
 def code_door(w):
     return (w.code(['Request.java', 'RateLimitResult.java', 'RateLimiter.java',
-                    'RateLimitFilter.java'])
+                    'RateLimitFilter.java'], why=WHY)
             + hour(w, 'the three records and the interface; the filter only if there is time.'))
 
 
 def code_limiter(w):
     return (w.md('Typed before its parts, as you would in the room: it compiles once the store '
                  'exists.')
-            + w.code(['RuleBasedRateLimiter.java', 'Clock.java'])
+            + w.code(['RuleBasedRateLimiter.java', 'Clock.java'], why=WHY)
             + hour(w, 'all of it: this loop is the heart of the answer.'))
 
 
 def code_rules(w):
     return (w.code(['RateLimitRule.java', 'Match.java', 'Caller.java', 'CountPer.java',
-                    'ScoreApiRules.java'])
+                    'ScoreApiRules.java'], why=WHY)
             + hour(w, 'the rule, `Match`, `Caller` and `CountPer`; two config entries, and say the '
                       'rest.'))
 
 
 def code_limits(w):
     return (w.code(['Limit.java', 'LimitPolicy.java', 'FixedLimit.java', 'PlanLimit.java',
-                    'Plan.java', 'Customers.java'])
+                    'Plan.java', 'Customers.java'], why=WHY)
             + hour(w, '`Limit`, `LimitPolicy` and `FixedLimit`; plans if there is time.'))
 
 
 def code_counting(w):
-    return (w.code(['Decision.java', 'Counter.java', 'TokenBucket.java'])
+    return (w.code(['Decision.java', 'Counter.java', 'TokenBucket.java'], why=WHY)
             + w.md('The bucket on its own, told the time by hand: the walk-through from '
                    '[How to count](#counting).')
             + w.run('BucketDemo')
@@ -871,14 +744,14 @@ def code_counting(w):
             + w.md('The other two ways our rules count, the enum that names all three, and the '
                    'factory that makes them:')
             + w.code(['FixedWindowCounter.java', 'SlidingWindowLog.java', 'Algorithm.java',
-                      'CounterFactory.java'])
+                      'CounterFactory.java'], why=WHY)
             + w.run('CountingDemo')
             + hour(w, '`Counter`, `TokenBucket`, `Algorithm` and the factory; the window and the '
                       'log only if asked.'))
 
 
 def code_store(w):
-    return (w.code(['CounterStore.java', 'InMemoryCounterStore.java'])
+    return (w.code(['CounterStore.java', 'InMemoryCounterStore.java'], why=WHY)
             + w.md('16 threads meet a new customer at the same instant:')
             + w.run('StoreDemo')
             + hour(w, 'all of it.'))
@@ -895,7 +768,7 @@ def code_run(w):
         - a refill
         - 100 threads racing for fantasy-app's 50 a second, with the clock frozen
         ''')
-            + w.code(['Main.java'])
+            + w.code(['Main.java'], why=WHY)
             + w.run('Main')
             + w.md('''
         Read it against the config:
@@ -919,7 +792,7 @@ def design_steps(w):
         out.append(step(st, D, nav, title.split(' · ', 1)[1], minutes=8,
                         stage=f'Design and build · {k + 1} of {n}', body=
             w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1])
-            + THINK[st](w) + kinds(w, st) + grown(w, st)
+            + THINK[st](w) + grown(w, st)
             + w.md('## The code') + CODE[st](w)
             + (think_back(w) if st == 'store' else '')))
     out.append(step('run', D, 'Run it, and the whole design', 'Run it, and the whole design',

@@ -402,3 +402,5 @@ details.rv :not(pre) > code { white-space: normal; }
 a.dl { display: inline-block; padding: 9px 14px; border: 1px solid var(--acc); border-radius: 8px;
   color: var(--acc); text-decoration: none; font-weight: 600; }
 a.dl:hover { background: var(--sur); }
+
+.why { margin: 22px 0 6px; padding: 6px 12px; border-left: 3px solid var(--t); max-width: 92ch; }

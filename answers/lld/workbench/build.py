@@ -243,10 +243,13 @@ class W:
         safe = text.replace('</', '<\\/')        # a "</script>" inside the code must not end the tag
         return f'<script type="text/plain" class="raw">{safe}</script>'
 
-    def code(self, files, snap_='core', tag=None, sol=True, open_=True, label=None):
-        """Whole files, highlighted, each with a copy button."""
+    def code(self, files, snap_='core', tag=None, sol=True, open_=True, label=None, why=None):
+        """Whole files, highlighted, each with a copy button. `why` maps a file to the reasoning
+        shown just above it: what kind of type it is, and why."""
         blocks = []
         for f in files:
+            if why and f in why:
+                blocks.append(f'<p class="why">{inline(why[f])}</p>')
             text = self.t.text(f, snap_)
             rows = hl.lines_html(text)
             body = ''.join(f'<span class="l">{r or " "}</span>' for r in rows)
