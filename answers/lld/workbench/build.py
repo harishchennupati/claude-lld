@@ -175,7 +175,8 @@ def inline(s):
 
 
 def md(text):
-    """A small, predictable subset of Markdown: paragraphs, ## and ### headings, - and 1. lists.
+    """A small, predictable subset of Markdown: paragraphs, ## and ### headings, - and 1. lists
+    (with one level of "- " sub-items, indented four spaces).
     A block that starts with "<" is HTML and passes through untouched."""
     text = str(text).strip('\n')
     lines = [l.rstrip() for l in text.split('\n')]
@@ -202,15 +203,25 @@ def md(text):
         elif first.startswith('## '):
             out.append(f'<h2>{inline(first[3:])}</h2>' + (md('\n'.join(b[1:])) if b[1:] else ''))
         elif first.startswith('- ') or re.match(r'\d+\. ', first):
+            # one level of nesting: "- " at column 0 is an item, "- " indented is a sub-item,
+            # and any other line continues the last item or sub-item it sits under
             ordered = not first.startswith('- ')
-            items = []
+            items = []  # [text, [sub-item texts]]
             for l in b:
-                if l.startswith('- ') or re.match(r'\d+\. ', l):
-                    items.append(re.sub(r'^(- |\d+\. )', '', l))
+                ind = len(l) - len(l.lstrip())
+                if ind == 0 and (l.startswith('- ') or re.match(r'\d+\. ', l)):
+                    items.append([re.sub(r'^(- |\d+\. )', '', l), []])
+                elif ind > 0 and l.lstrip().startswith('- ') and ind >= 4:
+                    items[-1][1].append(l.lstrip()[2:])
+                elif items[-1][1] and ind >= 6:
+                    items[-1][1][-1] += ' ' + l.strip()
                 else:
-                    items[-1] += ' ' + l.strip()
+                    items[-1][0] += ' ' + l.strip()
             tag = 'ol' if ordered else 'ul'
-            out.append(f'<{tag}>' + ''.join(f'<li>{inline(i)}</li>' for i in items) + f'</{tag}>')
+            out.append(f'<{tag}>' + ''.join(
+                f'<li>{inline(t)}' + ('<ul>' + ''.join(f'<li>{inline(c)}</li>' for c in kids)
+                                      + '</ul>' if kids else '') + '</li>'
+                for t, kids in items) + f'</{tag}>')
         else:
             out.append('<p>' + inline(' '.join(x.strip() for x in b)) + '</p>')
     return '\n'.join(out)
