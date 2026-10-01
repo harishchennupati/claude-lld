@@ -1,5 +1,6 @@
-// How a rule counts: the "algorithm:" line of the config. A plain enum; CounterFactory turns it
-// into a counter.
+// How a rule counts: the "algorithm:" line of the config.
+// Why an enum: a closed set of names, checked by the compiler. CounterFactory turns each one into
+// a counter.
 enum Algorithm {
     //@ until windows
     TOKEN_BUCKET, FIXED_WINDOW, SLIDING_WINDOW_LOG

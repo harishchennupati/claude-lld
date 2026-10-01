@@ -1,6 +1,8 @@
 // One rule from the config: which requests it matches, whose budget they spend, how much is
-// allowed, and how the requests are counted. Built once at startup and never changed, so every
-// request thread reads it without a lock.
+// allowed, and how the requests are counted.
+// Why a record: a rule is config data, built once at startup and never changed, so every request
+// thread reads it without a lock. A record can still have methods, so matches() and keyFor() sit
+// next to the fields they read.
 record RateLimitRule(String name,
                      Match match,              // which requests
                      CountPer countPer,        // whose budget

@@ -2,7 +2,9 @@ import java.util.List;
 
 // The rules section of rate-limits.yaml, in code: one entry per rule, in the order they are
 // checked. Read it next to the YAML. A new limit is a new entry here; no other class changes.
-// (Loading the YAML file at startup would replace this class and nothing else.)
+// Why a final class with a static method: it holds no state, it is just one function that builds
+// the list, so nobody needs an object of it and nobody should extend it. (Loading the YAML file at
+// startup would replace this class and nothing else.)
 final class ScoreApiRules {
     static List<RateLimitRule> build(Customers customers) {
         Match anyCustomerRequest = new Match(Caller.CUSTOMER, Match.ANY_ENDPOINT);

@@ -391,8 +391,8 @@ def counting(w):
 
 # ==================================================================================== design
 # Each branch reads the way an engineer works it: the need; the diagram so far, and how to read it;
-# then the code: the pieces (each type, its kind and why, said once), the traps, the files with
-# the logic in their comments, and what to type in the hour.
+# then the code: the traps, the files (each top comment says what the type is for, why it is a
+# record, interface, enum or class, and the logic is explained line by line), and the hour.
 NEED = {
     'door': '''
         **Need:** fantasy-app's `GET /search?q=kohli` arrives. Before any work, something must
@@ -519,25 +519,9 @@ READ = {
         ''',
 }
 
-# Before the code: each type, its kind and why (said once, here), then the traps the code handles.
-PIECES = {
+# Before the code: the traps it handles. Each type's kind, and why, is in its file's top comment.
+TRAPS = {
     'door': '''
-        **The pieces:**
-
-        - **`RateLimitFilter`, a class:** it sits in front of every endpoint, so none can forget
-          the check.
-            - it counts nothing: it asks the limiter and turns the answer into HTTP
-            - the limiter is passed into its constructor, so the filter never picks which one
-        - **`RateLimiter`, an interface:** one method, `check(request)`.
-            - the filter depends on the promise, so the class behind it can change without
-              touching the door
-            - its `default` method `rateLimit(customerId)` keeps the plain version as one line
-              that every implementation gets for free
-        - **`Request`, a record:** just data: customer id, IP, endpoint. It never changes, so any
-          thread can read it safely.
-        - **`RateLimitResult`, a record, not a `boolean`:** it carries allowed, when to retry,
-          and which rule said no.
-
         **The traps:**
 
         - No API key before sign-in, so the customer id can be `null`.
@@ -545,17 +529,6 @@ PIECES = {
           client retries at once and is refused again.
         ''',
     'limiter': '''
-        **The pieces:**
-
-        - **`RuleBasedRateLimiter`, a class that implements `RateLimiter`:** the work behind the
-          promise.
-            - its parts (rules, store, clock) are `final` fields passed into the constructor
-              (dependency injection)
-            - it never builds them, so a demo can pass a hand-moved clock and Redis can replace
-              the store
-        - **`Clock`, an interface with one method:** time is a dependency too. One method means
-          `System::currentTimeMillis` fits it.
-
         **The traps:**
 
         - Read the time once per request, so every rule judges the same instant.
@@ -563,21 +536,6 @@ PIECES = {
         - Typed before its parts exist, as in the room: it compiles once the store is written.
         ''',
     'rules': '''
-        **The pieces:**
-
-        - **`RateLimitRule`, a record:** one config entry, fixed at startup; its fields are the
-          config's fields. A record can still have methods, so `matches` and `keyFor` sit beside
-          the data they read.
-        - **`Match`, a record:** the kind of caller and the endpoint (`"*"` for all).
-          `matches(request)` is two comparisons.
-        - **`Caller`, an enum:** `CUSTOMER` or `ANY`.
-        - **`CountPer`, an enum:** whose budget a request spends: customer, customer and
-          endpoint, IP, or everyone.
-            - `keyFor` switches over it, and the compiler flags a missing case
-            - an enum, not a string: a typo fails to compile
-        - **`ScoreApiRules`, a final class with a static method:** no state, just one function
-          that builds the list in config order. Loading the YAML later replaces only this class.
-
         **The traps:**
 
         - Keys from different rules must never collide, so the rule's name comes first:
@@ -585,42 +543,12 @@ PIECES = {
         - Sign-in has no customer yet, so `login` matches caller `ANY` and counts per IP.
         ''',
     'limits': '''
-        **The pieces:**
-
-        - **`Limit`, a record:** requests and a period. `perSecond(5)` and `perDay(10_000)` are
-          static factory methods, clearer than `new Limit(5, 1000)`.
-        - **`LimitPolicy`, an interface:** "how much for this request?". A third kind of limit
-          is a third class, with no `if` added to the rule.
-        - **`FixedLimit`, a record that implements `LimitPolicy`:** one value, so a record. A
-          record can implement an interface like any class.
-        - **`PlanLimit`, a class that implements `LimitPolicy`:** it holds the live `Customers`
-          directory and looks the plan up on every call: behaviour, not a value.
-            - its `Field` enum (`RATE` or `DAILY`) is nested inside, because only it uses it
-        - **`Plan`, an enum with fields:** FREE and PRO each carry a `rate` and a `daily` limit.
-          A new plan is one line.
-        - **`Customers`, a class:** who is on which plan. It changes on upgrades, so it keeps a
-          `private` `ConcurrentHashMap` behind `planOf` and `setPlan`.
-
         **The traps:**
 
         - A request with no key has no plan: `planOf(null)` answers FREE, not a crash.
         - The plan is looked up on every request, so an upgrade applies at once.
         ''',
     'counters': '''
-        **The pieces:**
-
-        - **`Decision`, a record:** one counter's answer: allowed, or how long to wait.
-          `allow()` and `deny(ms)` are static factory methods.
-        - **`Counter`, an interface, not an abstract class:** `tryAcquire(now)` and `refund()`.
-            - the limiter holds any way of counting the same way (Strategy)
-            - an abstract class is for shared fields and code, and the counters share none:
-              tokens, a count, a list of times
-        - **`TokenBucket`, `FixedWindowCounter`, `SlidingWindowLog`, classes that implement
-          `Counter`:** each has state that changes on every request.
-        - **`Algorithm`, an enum:** the ways to count, as named in the config.
-        - **`CounterFactory`, a final class with a static method:** one `switch` from
-          `Algorithm` to a new counter (Factory), the one place that knows every counter class.
-
         **The traps:**
 
         - A bucket changes two values together, its tokens and its last refill time, so refill,
@@ -630,13 +558,6 @@ PIECES = {
         - A refund never fills a bucket past its capacity.
         ''',
     'store': '''
-        **The pieces:**
-
-        - **`CounterStore`, an interface:** where counts live will change (memory today, Redis
-          with many servers), so the limiter holds the promise, not the place.
-        - **`InMemoryCounterStore`, a class that implements `CounterStore`:** it owns a
-          `ConcurrentHashMap` from key to counter. Swapping it for Redis changes no other file.
-
         **The traps:**
 
         - "`get`, then `put` if missing" lets two threads meeting a new customer both create a
@@ -837,7 +758,10 @@ def design_steps(w):
                         stage=f'Design and build · {k + 1} of {n}', body=
             w.strip(now=STRIP_NOW[st], groups=CONFIG['STRIP'][:k + 1])
             + think(w, st) + grown(w, st) + w.md(READ[st])
-            + w.md('## The code') + w.md(PIECES[st]) + CODE[st](w)
+            + w.md('## The code')
+            + (w.md('Each file\'s top comment says what it is for, and why it is a record, an '
+                    'interface, an enum or a class.') if st == 'door' else '')
+            + w.md(TRAPS[st]) + CODE[st](w)
             + (think_back(w) if st == 'store' else '')))
     out.append(step('run', D, 'Run it, and the whole design', 'Run it, and the whole design',
                     minutes=10, stage=f'Design and build · {n} of {n}', body=

@@ -4,6 +4,7 @@ import java.util.Deque;
 // The sliding window log: the time of every allowed request in the last period. "The last
 // minute" moves with now, so it is exact: never more than the limit in ANY minute. The price is
 // one timestamp per request, so it is for small limits that must be exact, such as sign-ins.
+// Why a class: its list of times changes on every request, guarded by synchronized.
 class SlidingWindowLog implements Counter {
     private final int limit;
     private final long periodMillis;

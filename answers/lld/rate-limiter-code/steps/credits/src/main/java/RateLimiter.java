@@ -1,6 +1,6 @@
 // The one question the front door asks before any work: may this request go ahead now?
-// The door depends on this interface, never on the class behind it, so the class behind it can
-// change (another limiter, a dry-run wrapper) without the door knowing.
+// Why an interface: the door depends on this promise, never on the class behind it, so that class
+// can change (another limiter, a dry-run wrapper) without the door knowing.
 interface RateLimiter {
     RateLimitResult check(Request request);
 
