@@ -1,5 +1,5 @@
-"""Builds llm-chatbot-rag-v5.html: v3's look and figures, with a text written at about 80% of
-ASD-STE100, rounded numbers, hard parts at interview depth, and a fuller Part 3 on running it.
+"""Builds llm-chatbot-rag-v5.html: v3's structure, look and figures, with the text written at about 80% of
+ASD-STE100, rounded numbers, shorter hard parts, and Part 3 extended within its sections.
 The words are in rag_v5_text.py and rag_v5_a/b/c.py."""
 import os
 import re
@@ -27,8 +27,23 @@ def fig(i, caption=None):
     # the reused drawings carry a few exact numbers; round them like the text
     out = str(f)
     for a, b in [('5,187', '5,200'), ('0.86 s', '0.9 s'), ('0.86', '0.9'), ('6.6 s', '7 s'),
-                 ('so an answer costs about 2.3 cents after caching, not 2.1',
-                  'about 0.2 ¢ an answer')]:
+                 ('so an answer costs about 2.3 cents after caching, not 2.1', 'about 0.2 ¢ an answer'),
+                 ('>465 GB<', '>450 GB<'), ('>127 GB<', '>120 GB<'),
+                 ('>18</tspan><tspan fill="#cdd6f4">M a minute → about $',
+                  '>300,000</tspan><tspan fill="#cdd6f4"> a second → about $'),
+                 ('>2.4</tspan><tspan fill="#cdd6f4"> cents an answer before caching',
+                  '>2.5</tspan><tspan fill="#cdd6f4"> cents an answer'),
+                 ('>150</tspan><tspan fill="#cdd6f4">M input tokens a minute →',
+                  '>3</tspan><tspan fill="#cdd6f4">M input tokens a second →'),
+                 ('(every </tspan><tspan fill="#ffffff" font-weight="700">3 min<',
+                  '(every </tspan><tspan fill="#ffffff" font-weight="700">few min<'),
+                 ('>13 s<', '>15 s<'),
+                 ('= 18 M a minute', '= 300,000 a second'),
+                 ('2.4 cents an answer before caching', '2.5 cents an answer'),
+                 ('(every 3 min', '(every few min'), ('within 13 s', 'within 15 s'),
+                 ('150 M input tokens a minute', '3 M input tokens a second'),
+                 ('late duplicate gets </tspan><tspan fill="#ffffff" font-weight="700">409',
+                  'a dropped stream: poll the turn by </tspan><tspan fill="#ffffff" font-weight="700">id')]:
         out = out.replace(a, b)
     return out
 
