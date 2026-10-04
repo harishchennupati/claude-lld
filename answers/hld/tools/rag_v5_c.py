@@ -20,8 +20,9 @@ def body(fig):
         '''<b>Stateless parts</b> (orchestrators, GPU pool, ingest workers) run in all three zones
         behind a load balancer. A dead zone loses a third of the capacity and nothing else.''',
         '''<b>The metadata database</b> has one primary and a copy in each other zone. A commit waits
-        until one copy has it, because the identity provider sends each change once. A removal lost
-        with a dead primary would let a removed employee read on.''',
+        until one copy has it, because the identity provider never resends a change we have
+        accepted. A removal lost
+        with a dead primary would let a removed employee keep reading.''',
         '''<b>The search index</b> keeps one copy of each shard in each zone. Any copy answers
         reads.''',
         '''<b>Kafka</b> keeps three copies of every message, one per zone.''',
@@ -32,58 +33,83 @@ def body(fig):
 
     # ---------------------------------------------------------------- scaling
     B.append(h2('s-scale', 'How each part scales, and what breaks first'))
-    B.append(tx('''Interviewers ask "what happens at 10 times the load?" Answer part by part. Each part
-        scales in its own way and has its own limit.'''))
+    B.append(tx('''First, how many machines today. Every count follows from the numbers in Start by
+        proportion:'''))
+    B.append(calc('''<b>Answers in progress</b>  (Little's law: in progress = arrivals × seconds each lasts)
+  50 a second × about 7 seconds             = about 350 open streams
+  they mostly wait on the provider          → <b>6 orchestrators</b>, 2 a zone
+
+<b>GPUs</b>
+  50 a second × 100 candidate chunks        = 5,000 pairs a second to rerank
+  one GPU scores about 1,000 pairs a second → 5 GPUs; 100 pairs take about 100 ms
+  checker: 50 answers × 20 sentences        = 1,000 checks a second → 1 GPU
+  embedder and classifier                   → 1 GPU
+  7 GPUs, so <b>12</b>, 4 a zone            → a lost zone still leaves 8
+
+<b>Ingest workers</b>
+  1% of 10 M documents change a day         = 100,000 a day, about 3 a second at work
+  bursts of 20 a second × 5 seconds each    = 100 in progress → <b>about 150 workers</b>
+
+<b>Storage</b>
+  10 M documents × about 20 KB of text      = 200 GB; raw files about 10× → a few TB
+  100 M chunk rows × about 200 bytes        = 20 GB → metadata database about 30 GB'''))
+    B.append(tx('''Then the question interviewers ask: "what happens at 10 times the load?" Ask back: 10
+        times the questions, or 10 times the documents? Then answer part by part. Each part scales
+        in its own way and has its own limit.'''))
     B.append(table(['part', 'how it scales', 'its limit'], [
         ['Orchestrators', '''Stateless. Add servers behind the load balancer. Each holds hundreds of
          open streams, because they mostly wait on the provider.''', '''Never the bottleneck. The
          provider's rate limit is.'''],
         ['Model provider', '''Negotiate a higher token limit. Send simple questions to a smaller,
          cheaper model. Split traffic across two providers.''', '''The token limit, about 300,000
-         tokens a second at today's peak. This is the first wall at 10×.'''],
+         tokens a second at today's peak. This is the first
+         limit at 10 times the questions.'''],
         ['Search index', '''Add copies for more reads. Add shards for more data: build the new index
          beside the old one and switch with one row, because resharding in place blocks writes.''',
-         '''RAM. At 10× the vectors are about 1.2 TB, so 40 shards, or one bit a number in RAM
-         with rescoring from SSD.'''],
+         '''RAM, at 10 times the documents: about 1.2 TB of vectors, so 40 shards, or one bit a
+         number in RAM with rescoring from SSD.'''],
         ['Metadata database', '''One primary, read copies in each zone. The final check is one small
-         query a question, about 50 a second, which is nothing for Postgres.''', '''Write bursts: a
-         folder shared with a new group rewrites many rows. Batch them in transactions of a
-         thousand.'''],
+         query a question, about 50 a second, which is nothing for Postgres.''', '''Write bursts: a new
+         company's first load, or a mass delete, writes millions of rows. Batch them in transactions
+         of a thousand.'''],
         ['Ingest queue and workers', '''Kafka partitions by document id. Add workers up to the
-         partition count. Backfills go on a separate topic, so a new company never delays anyone's
-         edits.''', '''The sources' API quotas, about 30 documents a second each. We cannot read
-         faster than the source allows.'''],
+         partition count. A new company's first load goes on a separate topic, so it never delays
+         anyone's edits.''', '''The sources' API quotas, about 30 documents a second from each source.
+         We cannot read faster than the source allows.'''],
         ['GPU pool', '''Autoscale on queue depth. Under pressure, rerank 50 candidates instead of
          100.''', '''GPU supply and cost. Reranking is the biggest GPU user.'''],
         ['Redis', '''Tiny data: principal lists and token buckets. One cluster per cell.''',
-         '''None in practice. If it dies, everything falls back to the database.'''],
+         '''None in practice. If it dies, principal lists come from the database, and each
+         orchestrator counts its own share of the token limit.'''],
     ]))
-    B.append(tx('''<b>Backpressure.</b> When a part is slow, the parts before it must not pile up work.
+    B.append(tx('''<b>Backpressure.</b> When a part is slow, the parts before it must not queue work without
+        limit.
         Each employee may ask 60 questions an hour. A question whose provider bucket is empty waits
         up to 2 seconds, then goes to the fallback. Ingest workers pull from Kafka at their own pace.
         So a burst of edits waits in the queue instead of overloading the sources or the index.'''))
-    B.append(say('''At 10×, the provider's token limit breaks first, then the index's RAM, then the GPUs.
-        The sources' quotas cap how fast a new company loads. Everything of ours is stateless or
-        sharded, so the fix is more machines, except the index, which needs a new build.'''))
+    B.append(say('''At 10 times the questions, the provider's token limit breaks first, then the reranker
+        GPUs. At 10 times the documents, the index's RAM breaks first. Everything of ours is
+        stateless or sharded, so the fix is more machines. The index needs a new build beside the old
+        one.'''))
     B.append(fu(
         ('A new company connects 10 million documents on Monday. When can its employees ask?',
-         '''After about a day, because the most recently edited documents load first. At about 30
-         documents a second from the source, all 10 million take about 4 days. Embedding them takes
-         only about 2 hours.'''),
-        ('Why not one giant index for all companies, with more shards?',
-         '''Push 12. A filter bug would cross companies, one busy company would slow the rest, and an
-         EU company's text would sit outside the EU.''')))
+         '''After about a day, because the most recently edited documents load first. One source gives
+         about 30 documents a second, about 2.5 million a day. So 10 million in one source take about
+         4 days. Embedding takes only hours.''')))
 
     # ---------------------------------------------------------------- when it breaks
     B.append(h2('s-break', 'When something breaks: the model provider first'))
     B.append(tx('''The provider fails most often, so the model router's <b>circuit breaker</b> is the
-        first story to tell. Its states are named after an electric circuit. <b>Closed:</b> calls
-        pass. <b>Open:</b> calls go to the fallback. <b>Half open:</b> a few trial calls test the
+        first story to tell. <b>Closed:</b> calls pass. <b>Open:</b> calls go to the fallback. <b>Half open:</b> a few trial calls test the
         provider.'''))
     B.append(fig(13, 'A 529 is the provider\'s "overloaded" error.'))
     B.append(table(['what fails', 'what employees see meanwhile', 'back in'], [
-        ['the model provider', '''Nothing. The breaker opens after half of 20 calls fail in 10
-         seconds, and the fallback provider answers.''', 'when it recovers'],
+        ['the model provider', '''A 3-second wait for questions in the first 10 seconds. The breaker
+         opens when more than half the calls in 10 seconds fail, with at least 20 calls. Then the
+         fallback provider answers.''', 'when it recovers'],
+        ['an orchestrator, mid-answer', '''Her stream stops. The turn stops updating, so after 10
+         seconds it is marked failed, and the browser asks again with a new turn id.''',
+         'seconds'],
         ['both providers', '''A search-only answer: the 8 checked chunks as links. Never an
          error.''', 'when one recovers'],
         ['the GPU pool', '''No embeddings: keyword search only. No reranker: fused order, no
@@ -96,25 +122,27 @@ def body(fig):
          counts its own share of each provider limit.''', 'seconds'],
         ['a source, or the identity provider', '''That source's edits wait and an alarm fires.
          Signed-in employees keep asking.''', 'when it recovers'],
-        ['a whole zone', '''Nothing, if the database primary was elsewhere. Otherwise 30 seconds of
-         refused final checks.''', 'minutes'],
+        ['a whole zone', '''Its open answers stop, and the browsers ask again. Add 30 seconds of
+         refused final checks if it held the database primary.''', 'minutes'],
     ]))
     B.append(tx('''<b>Backups and recovery.</b> <b>RPO</b> is the data a failure loses. <b>RTO</b> is the
         time until service returns. For a lost machine or zone, RPO is zero, because the database and
         Kafka confirm a write only once another zone has it. For a lost region or a corrupted index:'''))
     B.append(ul(
-        '''<b>Metadata database:</b> nightly backup plus the write-ahead log, restorable to any
-        second. Then the connectors re-read every change since, and the daily sweep runs at once.
-        RTO about an hour.''',
+        '''<b>Metadata database:</b> nightly backup plus the write-ahead log, restorable to the last
+        minute. Then the connectors re-read every change since, and a full identity sync and the
+        daily sweep run at once. About an hour.''',
         '''<b>Search index:</b> rebuilt from the database and the stored vectors in about 3 hours. No
         GPU needed. Three copies protect against a lost machine, not a bad change, which reaches all
-        three. That is why every change builds a new index beside the old one.''',
+        three. That is why every change builds a new index beside the old one. Nightly index
+        snapshots in the second region would cut this to about an hour.''',
         '''<b>Object storage:</b> versioned and copied to the second region. Nothing to restore.''',
         '''<b>Conversations:</b> same as the metadata database. Losing a day of history is
         acceptable. Losing a day of permissions is not.'''))
     B.append(say('''No first word in 3 seconds moves a question to the fallback. Half of 20 calls failing
         opens the breaker. Both providers down means search-only answers, never an error. RPO zero
-        for a zone. A region is a restore of about an hour.'''))
+        for a zone. A region is a restore of about 4 hours, mostly the index rebuild. That breaks the
+        month's 99.9%, and we accept it as rare.'''))
     B.append(fu(
         ('One index node is slow, not down. What happens to every question?',
          '''Each question asks all 4 shards, so one slow copy would slow them all. A shard still
@@ -125,8 +153,8 @@ def body(fig):
 
     # ---------------------------------------------------------------- CAP
     B.append(h2('s-cap', 'Consistency: what a network split does'))
-    B.append(tx('''In a <b>network partition</b>, two groups of machines cannot reach each other. The
-        <b>CAP theorem</b> says each part must then choose. <b>Consistency</b> means every read sees
+    B.append(tx('''In a <b>network split</b> (a partition), two groups of machines cannot reach each other.
+        The <b>CAP theorem</b> says each part must then choose. <b>Consistency</b> means every read sees
         the latest truth. <b>Availability</b> means every request is answered, perhaps from stale
         data.
         Ask of each part: if it is cut off, what does she see?'''))
@@ -136,8 +164,9 @@ def body(fig):
         '''<b>The search index</b> chooses availability. A cut-off copy answers from what it holds.
         That is safe, because the final check comes after it.''',
         '''<b>Redis</b> chooses availability. A stale principal list only affects recall.''',
-        '''<b>Ingest and the identity sync</b> queue their changes in Kafka until the split heals.
-        Nothing is lost, and nothing is applied out of order.''',
+        '''<b>Ingest</b> waits in Kafka until the split heals. Nothing is lost, and nothing is applied
+        out of order. <b>The identity sync</b> answers an error while it cannot commit. The identity
+        provider retries, and a nightly full sync catches the rest.''',
         '''<b>The conversation store</b> chooses availability. The question is answered as a first
         turn and saved later.'''))
     B.append(say('''In a split, the gate chooses consistency and everything before it chooses
@@ -160,15 +189,19 @@ def body(fig):
         faster model for ordinary questions. Reranking 50 instead of 100 saves only about 50 ms.'''))
     B.append(tx('''Second, the cost. Three quarters of each answer is input tokens, so every lever is
         about fewer input tokens, or cheaper ones:'''))
-    B.append(calc('''one answer     6,000 in × $3 per M = 1.8 ¢   +   400 out × $15 per M = 0.6 ¢   →  about 2.5 ¢
-one day        500,000 answers × 2.5 ¢                                             →  about $12,000
+    B.append(calc('''one answer   6,000 in × $3 per M = 1.8 ¢  +  400 out × $15 per M = 0.6 ¢  → about 2.5 ¢
+one day      500,000 answers × 2.5 ¢                                      → about $12,000
 
 <b>the levers</b>
-  cache the 1,100 instruction tokens at the provider (a tenth of the price)   saves about 0.3 ¢ an answer, $1,500 a day
-  8 chunks after the reranker, not 20                                         saves about $9,000 a day
-  no model call when the best score is below 0.3                              a whole call per unanswerable question
-  a small rewrite model, not the large one                                    saves about $1,000 a day
-  cached first answers, about 1 in 10                                         saves about $500 a day, and those start in 0.2 s'''))
+  cache the 1,100 instruction tokens at the provider     saves 0.3 ¢ an answer, $1,500 a day
+  8 chunks after the reranker, not 20                    saves about $9,000 a day
+  no model call when the best score is below 0.3         a whole call per unanswerable question
+  a small rewrite model, not the large one               saves about $1,000 a day
+  cached first answers, 20,000 a day                     saves about $500 a day, start in 0.2 s
+
+<b>the whole bill</b>
+  our machines, 12 GPUs and about 30 servers             about $1,500 a day
+  tokens are about 90% of the bill                       about $2.50 an employee a month'''))
     B.append(tx('''<b>The answer cache</b> in Redis serves a first turn only when its prompt would repeat an
         earlier one exactly. That means the same question after rewriting, the same 8 chunks after the
         final check, and the same prompt version. That is safe without knowing who asked, because whoever reaches those 8 chunks
@@ -182,8 +215,7 @@ one day        500,000 answers × 2.5 ¢                                        
     B.append(tx('''Permissions are the big one, and Part 2 covered them. Interviewers also ask about the
         rest. Have one line for each:'''))
     B.append(ul(
-        '''<b>Identity.</b> Sign-in is the company's single sign-on. Who she is comes from her
-        session, never from the request. Her principals come from our records.''',
+        '''<b>Identity.</b> The company's single sign-on, and the three API rules in Part 1.''',
         '''<b>In transit and at rest.</b> TLS on every connection, including between our own
         services. Every store is encrypted at rest with a key per company, so leaving a company
         means deleting its key.''',
@@ -198,8 +230,7 @@ one day        500,000 answers × 2.5 ¢                                        
         report lists widely shared documents that match sensitive terms.''',
         '''<b>Abuse.</b> 60 questions an hour per employee. A company has its own token bucket inside
         the cell's. The trace log is kept 30 days with personal details removed.''',
-        '''<b>Injection.</b> Part 2: retrieved text is quoted data, the model has no tools, the page
-        clicks only cited links.'''))
+        '''<b>Injection.</b> Part 2: contain, do not detect.'''))
     B.append(say('''Permissions at the gate. A key per company. Zero retention at the provider. An audit trail of
         chunk ids. No tools for the model.'''))
 
@@ -226,18 +257,21 @@ one day        500,000 answers × 2.5 ¢                                        
          'offline: 2 points lower'],
         ['thumbs-down', 'per 100 answers, canary against the other 95%, overall and per slice',
          'canary: 2 points higher for an hour'],
-        ['first word, cost', 'the guard rails', 'canary: 300 ms slower, 15% dearer'],
+        ['first word, cost', 'the guard rails', 'canary: 300 ms slower, costs 15% more'],
     ]))
     B.append(tx('''<b>The hardest change is a new embedding model.</b> Two models' vectors cannot be
-        compared. So a new index is built beside the old one from the parsed text in object storage,
-        while every live change is written to both. After the shadow run and the canary, one row in
-        the database switches the index and the model together. Both stay live for a week, so going
-        back is the same one-row write. Models are pinned by exact version id, never "latest".'''))
+        compared.  So we build a new index beside the old one from the parsed text, and the workers write every
+        live change to both. After the shadow run and the canary, one row in the database switches
+        the index and the model together. Both stay live for a week, so going back is the same
+        one-row write. We pin each model by its exact version id, never "latest".'''))
+    B.append(tx('''<b>Code ships zone by zone.</b> A server being replaced takes no new questions. It
+        finishes its open streams, which last about 7 seconds, then stops. Schema changes add columns
+        first and drop old ones a release later.'''))
     B.append(say('''Golden set, then shadow, then a 5% canary that rolls itself back. A new embedding
         model means a new index beside the old, switched with one row.'''))
     B.append(fu(
         ('Interviewers name MRR or nDCG. Why gate on recall at 8?',
-         '''Those scores reward putting the right chunk nearer the top. The model reads all 8, so
+         '''Those are ranking scores. They reward putting the right chunk nearer the top. The model reads all 8, so
          what matters is whether the right one got in.'''),
         ('A manager says yesterday\'s answer was wrong. How do you find which step failed?',
          '''Open the turn in the trace log. Was the rewritten question right? Was the right chunk
@@ -252,12 +286,15 @@ one day        500,000 answers × 2.5 ¢                                        
         ['the first word, 95th percentile', 'above 2 seconds for 10 minutes'],
         ['the model router\'s breakers', 'a breaker opens'],
         ['questions refused by the final check', 'more than 1 in 1,000: the primary is slow or unreachable'],
-        ['chunks dropped by the final check', 'more than 2%: the search side lags'],
+                ['chunks dropped by the final check', 'more than 2%: the index or the cached principal lists lag'],
         ['ingest lag, from edit to searchable', 'above 5 minutes for 15 minutes'],
-        ['citations failing the check', 'half again above usual'],
+                ['citations failing the check', '50% above the 7-day average'],
         ['cost per answer', 'above 3 cents'],
         ['thumbs-down per 100 answers', 'up by 2 points for an hour'],
     ]))
+    B.append(tx('''One trace id follows each turn through every service and the provider call. The
+        SLO is: 99.9% of questions get an answer, a search-only answer or "not found" within 10
+        seconds. That leaves about 45 minutes of error budget a month.'''))
     B.append(say('''Four numbers tell the health: time to first word, final-check refusals, ingest lag,
         and thumbs-down. The trace log explains any of them.'''))
 
@@ -275,12 +312,12 @@ one day        500,000 answers × 2.5 ¢                                        
         ('ingest', 'webhook is a doorbell → read the change list → Kafka by document id → fetch '
                    'ticket → only changed chunks embedded'),
         ('permissions', 'groups and folders on the chunk, not people · filter early, check late'),
-        ('freshness', 'latest fetch wins · a delete is one transaction, honoured at the gate that second'),
+        ('freshness', 'latest fetch wins · a delete is one transaction, in effect at the gate that second'),
         ('follow-ups', 'rewrite to a standalone question · rolling summary · fixed prompt, instructions first'),
         ('not found', 'best reranker score below 0.3: no model call, say so'),
         ('injection', 'quoted text, no tools, only cited links clickable, output filter'),
         ('failure', '3 s to first word or fallback · breaker on half of 20 calls · both down → search-only'),
-        ('scale', '10×: provider limit first, then index RAM, then GPUs'),
+        ('scale', '10× questions: provider limit, then GPUs · 10× documents: index RAM'),
         ('change', 'golden set → shadow → 5% canary that rolls back · new embedder = new index beside'),
     ]
     B.append('<div class="map">' + ''.join(f'<p><b>{k}</b> {v}</p>' for k, v in mp) + '</div>')
@@ -293,7 +330,7 @@ one day        500,000 answers × 2.5 ¢                                        
         ('ours', '150 ms before the model'), ('funnel', '50 + 50 → 100 → 20 → 8'),
         ('chunk', '480 tokens, 50 overlap'), ('fusion', '1 / (60 + rank)'),
         ('abstain', 'best score below 0.3'), ('cite', 'checker 0.5 or more'),
-        ('cache', 'principals 60 s'), ('fresh', 'edit 5 min, delete 1 min'),
+        ('cache', 'principals 60 s'), ('fresh', 'edit 5 min · delete in seconds once heard, 5 min at worst'),
         ('breaker', '3 s · half of 20 · probe 30 s'), ('checks', '1,000 golden · 5% canary a day'),
         ('available', '99.9% = 45 min a month'), ('GPUs', '12, 4 a zone'),
         ('servers', '6 orchestrators, 150 ingest workers'),

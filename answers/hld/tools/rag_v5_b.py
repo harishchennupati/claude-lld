@@ -9,8 +9,8 @@ def body(fig):
     # ---------------------------------------------------------------- permissions
     B.append(h2('s-perm', 'Permissions: only what she may read'))
     B.append(tx('''<b>The problem.</b> At 09:40 an HR administrator removes the contractors group from the
-        HR policies folder. Within seconds, one row in our metadata database changes. But Sam, a
-        contractor, asked something at 09:40:20, so Redis cached his principal list then and will
+        HR policies folder. Within seconds, one row in our metadata database changes.'''))
+    B.append(tx('''But Sam, a contractor, asked something at 09:40:20, so Redis cached his principal list then and will
         serve it until 09:41:20. At 09:41:05 he asks about the severance policy. The search, filtered
         by his old list, finds the chunk that answers. What stops him reading it?'''))
     B.append(fig(3, '''The final check reads the database, so the chunk the search found never reaches
@@ -21,53 +21,52 @@ def body(fig):
         ids, group ids, and folder ids. A folder is treated as a group whose members are its readers.
         A chunk whose permissions we could not read carries none, so it matches no one.''',
         '''<b>Filter inside the search.</b> Both searches filter by her principal list while they
-        search. So the best 50 are hers, not 50 she mostly cannot read. The list is cached for 60
-        seconds, because it comes from a database query.''',
+        search. So the best 50 are hers, not 50 she mostly cannot read. Redis caches the list for 60 seconds,
+        because it comes from a database query.''',
         '''<b>The final check, gate 1.</b> The 20 chunks the reranker keeps go to the metadata
         database in one query. The query rebuilds her principals from the database and keeps a chunk
-        only if its document is live and she may still read it. Every permission change is committed
-        to this database first, so the check is exact. If the database cannot answer, the turn fails
-        closed: "I can't check permissions right now".'''))
-    B.append(tx('''So Sam's cached list is never invalidated. It only makes the search fast. The final
+        only if its document is live and she may still read it. We commit every permission change to this
+        database before the index, so the check is exact to what we know, seconds behind the source.
+        If the database cannot answer, the turn stops and says "I can't check permissions right
+        now".'''))
+    B.append(tx('''So we never invalidate Sam's cached list. It only makes the search fast. The final
         check rebuilds his principals from the database on every question, and drops the chunk.'''))
     B.append(say('''Filter early for recall, check late for correctness. The cache may lag, because the
         gate does not.'''))
     B.append(fu(
         ('A contractor may read only 0.4% of the index. Does the vector search still find his best 50?',
          '''Yes. When the filter matches few chunks, the shard scores those one by one instead of
-         walking the graph. It takes tens of milliseconds and misses nothing.'''),
-        ('Why not re-check permissions against the source system on every question?',
-         '''100 calls a question to rate-limited APIs are slow and fragile. Our database is a copy,
-         updated within seconds of a change, and the final check reads it in about 5 ms.''')))
+                  walking the graph. It takes tens of milliseconds and misses nothing.''')))
 
     # ---------------------------------------------------------------- freshness
     B.append(h2('s-fresh', 'Freshness: an edit in minutes, a delete in seconds'))
     B.append(tx('''<b>The problem.</b> An author saves version 8 of the key rotation runbook. Only step 3
         changed. Worker A fetched version 7 a moment earlier, then froze in a long pause, so the
         queue handed the document to worker B. B fetches version 8 and writes it. Then A wakes up and
-        writes version 7, which brings the old step 3 back. Separately, a draft deleted for legal
-        reasons must stop reaching answers within seconds.'''))
+        writes version 7, which brings the old step 3 back.'''))
+    B.append(tx('''Separately, a draft deleted for legal reasons must stop reaching answers within seconds
+        of the source reporting it.'''))
     B.append(tx('<b>The solution</b> has four parts:'))
     B.append(how(
         '''<b>One document, one worker, in order.</b> Every change goes on the Kafka queue keyed by
         document id. So one document's changes reach one worker, in order.''',
         '''<b>The fetch ticket decides who wins.</b> Before each fetch, the worker takes the next
         number for that document from the database. It commits only if its number is higher than
-        the last committed one. The index also refuses a write whose version is lower than the
-        record's. A had ticket 41 and B had 42, so A's write is rejected in both places.''',
+        the last committed one. The index also refuses a write with a lower ticket than the
+        record's. A had ticket 41 and B had 42, so both places reject A's write.''',
         '''<b>A delete is one transaction.</b> It marks the document deleted and removes its chunk rows.
         The final check drops the chunks that second. The index follows at its next refresh, about 10
         seconds later.''',
         '''<b>Only changed chunks are embedded.</b> A chunk's id is a hash of its text. 36 of the 38
-        chunks keep their ids and vectors. Only 2 are embedded again.'''))
+        chunks keep their ids and vectors. The worker embeds only 2 again.'''))
     B.append(fig(4, '''Top: an edit, searchable in about 15 seconds. Middle: a lost webhook, still under
         5 minutes. Bottom: a delete.'''))
     B.append(tx('''<b>Missing, never wrong.</b> New writes become searchable at the index's next refresh.
         Until then, the old chunks still cannot appear, because their rows are gone from the database
         and the final check drops them. A lost webhook costs at most a few minutes, because the
         connector reads the change list on a timer anyway.'''))
-    B.append(say('''The latest fetch wins, by a ticket checked in the database and in the index. A delete is
-        honoured at the gate that second. The index may lag, but it can never show a deleted
+    B.append(say('''The latest fetch wins, by a ticket checked in the database and in the index. A delete takes
+        effect at the gate that second. The index may lag, but it can never show a deleted
         chunk.'''))
     B.append(fu(
         ('Someone deletes a shared drive of 500,000 documents. Does each wait for its own fetch?',
@@ -77,7 +76,8 @@ def body(fig):
          '''No. A worker commits its queue position only after the index acknowledges every write.
          Another worker takes the change and rewrites every record.'''),
         ('Legal wants a document gone everywhere, not only unanswerable. Where do copies live?',
-         '''Object storage deletes at once. The index merges the marked record away that night. Old
+         '''Object storage deletes every version, in both regions. The index merges the marked record
+         away that night. Old
          answers, summaries, cached answers and the trace log are found by the document id and
          redacted.''')))
 
@@ -106,7 +106,8 @@ final check against the metadata database   → the survivors
         a paragraph, else at the end of a sentence. Neighbouring chunks overlap by 50 tokens. A table
         is split by rows with its header repeated. A code block stays whole.'''))
     B.append(tx('''<b>If the reranker is down,</b> the best 20 in fused order go on. There is no score to
-        refuse on, so the model is always called and told to say when the chunks do not answer.'''))
+        abstain on, so the orchestrator always calls the model and tells it to say when the chunks do
+        not answer.'''))
     B.append(say('''Two searches, because meaning blurs codes. Fuse by rank, because the scores do not
         compare. Rerank 100 to keep 8, because every chunk in the prompt is paid for.'''))
     B.append(fu(
@@ -132,16 +133,16 @@ final check against the metadata database   → the survivors
         about the conversation itself, such as "make that shorter", skips the search and reuses the
         previous chunks.''',
         '''<b>Summarise old turns.</b> After each answer, the rewrite model folds the turn before it
-        into a short rolling summary. The prompt carries the summary plus the last few turns word for
-        word, so it stays about the same size.''',
+        into a short rolling summary. The prompt carries the summary plus the previous turn word for word,
+        so it stays about the same size.''',
         '''<b>Pack the prompt in a fixed order.</b> Instructions first, always the same 1,100 tokens.
         Then the summary and recent turns. Then the 8 chunks. Then the question. The provider caches a
         prompt's opening, so the same first bytes cost a tenth of the price.'''))
     B.append(fig(6))
     B.append(fig(7, '''Widths to scale. The dashed answer reserve is not part of the prompt.'''))
     B.append(tx('''<b>The conversation is checked too.</b> Every document the previous turns drew on is
-        checked against her permissions again. A turn that drew on one she may no longer read is left
-        out. If a rewrite takes more than 900 ms, the search uses the new turn joined to the previous
+        checked against her permissions again. A turn or summary that drew on one she may no longer read is
+        left out. If a rewrite takes more than 900 ms, the search uses the new turn joined to the previous
         rewritten question instead.'''))
     B.append(say('''Rewrite the follow-up into a standalone question. Summarise old turns. Pack a fixed
         6,000 tokens in a fixed order, instructions first, so the provider can cache them.'''))
@@ -179,8 +180,8 @@ final check against the metadata database   → the survivors
         agrees, which is scored. A weak best score means no model call and an honest "not found".'''))
     B.append(fu(
         ('How are 0.3 and 0.5 set?',
-         '''On the golden set. 0.3 refuses most unanswerable questions while answering about 95 in 100
-         answerable ones. 0.5 passes about 2 in 100 unsupported sentences.'''),
+         '''On the golden set. 0.3 abstains on most unanswerable questions while answering about 95 in
+         100 answerable ones. 0.5 passes about 2 in 100 unsupported sentences.'''),
         ('Why not ask the large model to check its own citations?',
          '''It doubles the cost of every answer and adds seconds. The small checker takes about 15 ms
          a sentence and agrees with people about 9 times in 10.''')))

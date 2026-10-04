@@ -26,7 +26,9 @@ def fig(i, caption=None):
             f.append(new)
     # the reused drawings carry a few exact numbers; round them like the text
     out = str(f)
-    for a, b in [('5,187', '5,200'), ('0.86 s', '0.9 s'), ('0.86', '0.9'), ('6.6 s', '7 s')]:
+    for a, b in [('5,187', '5,200'), ('0.86 s', '0.9 s'), ('0.86', '0.9'), ('6.6 s', '7 s'),
+                 ('so an answer costs about 2.3 cents after caching, not 2.1',
+                  'about 0.2 ¢ an answer')]:
         out = out.replace(a, b)
     return out
 

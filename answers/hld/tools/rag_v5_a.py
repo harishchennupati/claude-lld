@@ -6,7 +6,7 @@ def body(fig):
     B = []
     # ================================================================ Start
     B.append(band('Start', 'Who is in the room, and what is asked'))
-    B.append(h2('s-who', 'Who is who, and the one idea to hold on to'))
+    B.append(h2('s-who', 'Who is who, and the one idea to remember'))
     B.append(tx('''Five parties take part. Three are on the path of a question. Two feed us from the
         side.'''))
     B.append(how(
@@ -42,18 +42,20 @@ def body(fig):
     B.append(tx('Five jobs, in the order a question meets them:'))
     B.append(how(
         '''<b>Answer</b> an employee's question, and her follow-ups, from the company's documents.''',
-        '''<b>Never retrieve, quote or cite</b> a document that her permissions do not allow.''',
+        '''<b>Never show, quote or cite</b> a document that her permissions do not allow.''',
         '''<b>Cite every claim</b> with the chunk it came from. Say "not in documents you can access"
         instead of guessing.''',
         '''<b>Keep up with the sources.</b> An edit is searchable within 5 minutes. A delete, or a
-        removed permission, takes effect within a minute.''',
+        removed permission, takes effect within seconds of reaching us. A lost webhook delays either
+        by at most 5 minutes.''',
         '''<b>Keep answer quality measured</b> as documents, models and prompts change.'''))
     B.append(tx('What it must survive:'))
     B.append(ul(
         'The first words reach the screen in about a second.',
         '''It keeps answering when the model provider slows down, limits our rate or fails. We do not
         control the provider.''',
-        '''It survives the loss of a <b>zone</b>, one of a cloud region's separate data centres.''',
+        '''It survives the loss of a <b>zone</b>. A <b>region</b> is one cloud location, such as
+        Frankfurt, and its zones are its separate data centres.''',
         '''It needs 99.9% availability, about 45 minutes of downtime a month. Not more, because an
         employee can still open her documents directly.''',
         '''It treats instructions inside documents as text, never as orders.''',
@@ -63,7 +65,7 @@ def body(fig):
         design:'''))
     B.append(calc('''<b>Load</b>
   100,000 employees × 5 questions a day        = 500,000 questions a day
-  a working day is about 30,000 seconds        → about 17 a second, call it 20
+    a working day is about 30,000 seconds        → about 17 a second
   the busiest minutes run at 3× the average    → <b>about 50 a second</b>; size everything for this
 
 <b>Memory for the vectors</b>
@@ -71,66 +73,56 @@ def body(fig):
   1,024 numbers × 1 byte a number              = 1 KB a vector   (4 KB at 4 bytes)
   100 M chunks × 1 KB                          = 100 GB          (400 GB at 4 bytes)
   + the search graph, about 20%                → <b>about 120 GB</b> to keep in RAM
-  4 shards × 30 GB each, 3 copies of each      → <b>12 nodes</b>, 128 GB RAM each
+      4 shards (slices of the index) × 30 GB, 3 copies each   → <b>12 nodes</b>, 128 GB RAM each
 
 <b>Tokens and money</b>
   a prompt is about 6,000 tokens in, 400 out
   50 a second × 6,000                          = <b>300,000 tokens a second</b> into the provider
-  6,000 × $3 per million                       = 1.8 ¢, call it 2 ¢
+    6,000 × $3 per million                       = 1.8 ¢
   400 × $15 per million                        = 0.6 ¢
-  about 2.5 ¢ an answer × 500,000 a day        = <b>about $12,000 a day</b>'''))
+  1.8 ¢ + 0.6 ¢                                = 2.4 ¢ an answer, call it <b>2.5 ¢</b>
+  2.4 ¢ × 500,000 a day                        = <b>about $12,000 a day</b>'''))
     B.append(table(['number', 'what it decides'], [
         ['about 50 questions a second', '''The peak. Every server count, GPU count and provider
          limit is sized for it.'''],
         ['about 120 GB of vectors', '''One byte a number in RAM, full vectors on SSD for rescoring.
          4 shards × 3 copies, so 12 nodes.'''],
         ['300,000 tokens a second', '''Far above one provider's default limit. So we negotiate the
-         limit, cache the prompt's opening, and keep a second provider ready.'''],
+         limit, cache the fixed start of the prompt, and keep a fallback provider ready.'''],
         ['about 2.5 ¢ an answer, three quarters of it input', '''Rent the model, do not host it. Cap
          the prompt at 8 chunks. Every saving is about fewer input tokens.'''],
     ], 'calc'))
-    B.append(fold('The rest follows by proportion', 'servers, GPUs, workers', calc('''<b>Answers in progress</b>  (Little's law: in progress = arrivals a second × seconds each lasts)
-  50 a second × about 7 seconds an answer      = about 350 open streams
-  they mostly wait on the provider             → 6 orchestrators, 2 a zone, is plenty
-
-<b>Reranker GPUs</b>
-  50 a second × 100 candidate chunks           = 5,000 (question, chunk) pairs a second
-  one GPU scores about 500 pairs a second      → 10 GPUs, call it <b>12</b>, 4 a zone
-
-<b>Ingest workers</b>
-  1% of 10 M documents change a day            = 100,000 a day, about 1 a second
-  bursts of 20 a second × 5 seconds each       = 100 in progress → <b>about 150 workers</b>
-
-<b>Storage</b>
-  10 M documents × about 20 KB of text         = 200 GB of text; the raw files are about 10× → a few TB
-  100 M chunk rows × about 200 bytes           = 20 GB → the metadata database is about 30 GB''')))
+    B.append(tx('''The server, GPU and worker counts follow from these by proportion. They are in Part 3,
+        <a href="#s-scale">How each part scales</a>, once every part has a name.'''))
 
     # ================================================================ Part 1
     B.append(band('Part 1', 'The design'))
     B.append(h2('s-derive', 'Building it, one push at a time'))
     B.append(tx('''A RAG assistant looks like one model call. But nearly every requirement is about what
         surrounds that call. So we build it the way you would at the whiteboard. For each step: the
-        first idea, what goes wrong, and what we do. Twelve pushes build the design. The strip under
-        each push shows the design so far, with the new parts lit. This section says why each part
-        exists. Part 2 says how the hard ones work.'''))
+        first idea, what goes wrong, and what we do.'''))
+    B.append(tx('''Twelve pushes build the design. The strip under each push shows the design so far, with
+        the new parts highlighted. This section says why each part exists. Part 2 says how the hard
+        ones work.'''))
 
     B.append(push(1, 'Answer from the company\'s own documents',
         '''Paste the documents into the prompt, or fine-tune a model on them.''',
-        '''10 million documents are about 45 billion tokens. A prompt holds a few hundred thousand. A fine-tuned model knows the documents only as they were on its training day. It cannot say
+        '''10 million documents of about 5,000 tokens each are about 50 billion tokens. A prompt holds a
+        few hundred thousand. A fine-tuned model knows the documents only as they were on its training day. It cannot say
         where a fact came from, and it tells anyone what it learned.''',
         '''<b>Retrieval-augmented generation.</b> An <b>orchestrator</b>, a stateless service, runs
         every step of a <b>turn</b> (one question and its answer). It searches a <b>search index</b>
         of the documents, puts the best few pieces into the prompt, and a rented model answers from
         them. A deleted document stops being found. Every fact has a source.''',
-        '''<b>Rent the model, do not host it.</b> Hosting an open model needs about 120 GPUs at our
-        peak, about $50,000 a week against $60,000 rented. We save little and gain a team to run
-        it.'''))
+        '''<b>Rent the model, do not host it.</b> Hosting an open model needs about 120 GPUs, paid
+        for all week: about $50,000. Renting costs $12,000 a working day, about $60,000 a week. We
+        save little and gain a team to run it.'''))
 
     B.append(push(2, 'Cut documents into pieces a search can match and a prompt can afford',
         '''Index whole documents and send the best few to the model.''',
         '''A 40-page document matches every question about its subject, weakly. The paragraph that
-        answers is buried. And eight average documents are about 36,000 tokens, six times our
-        budget.''',
+        answers is buried. And eight average documents are about 40,000 tokens, more than six times
+        our budget.''',
         '''Cut each document into <b>chunks</b> of up to 480 tokens, along its headings and
         paragraphs. Store each chunk with its <b>title line</b>, the title and headings above it
         ("Key rotation runbook › Rotating the key"). Then a chunk is found even when its own text
@@ -159,31 +151,30 @@ def body(fig):
         '''Take the top 8 of the merged list. Or, to be safe, send 20, or 200 to a model with a huge
         context.''',
         '''The merged list is fast but rough. The chunk that answers is often 15th or 30th. Sending more
-        is no cure. 20 chunks raise the bill by three quarters. And a model reads the middle of a long
+        does not help. 20 chunks raise the bill by three quarters. And a model reads the middle of a long
         prompt less carefully than its ends.''',
         '''A <b>reranker</b>, a cross-encoder model on the GPU pool, reads each (question, chunk) pair
         together, for up to 100 candidates. It scores how well the chunk answers. The best 20 go on,
         and 8 reach the prompt.''',
-        '''<b>A cross-encoder, not the large model, picks the 8.</b> The large model would judge a
-        little better, but reading 100 chunks costs 50,000 tokens and seconds. The cross-encoder takes
-        about 100 ms.'''))
+        '''<b>A reranker, not the large model, picks the 8.</b> The large model would judge a little
+        better, but reading 100 chunks costs 50,000 tokens and seconds. The reranker takes about 100
+        ms.'''))
 
     B.append(push(5, 'Show each employee only what she may read',
         '''Search everything, then drop what she cannot open. Or tell the model not to reveal it.''',
         '''Someone who may read 4% of the index keeps 2 or 3 of the best 50, often none that answers.
         And a model repeats what it is given, whatever it is told.''',
-        '''Copy each document's permissions onto its chunks as <b>principals</b>. An employee's
-        principals are her own id plus every group she is in, about 200. Both searches filter by her
-        principal list while they search. Her list comes from a database query, so <b>Redis</b>, an
-        in-memory store, caches it for 60 seconds. Copies lag. So the 20 chunks the reranker keeps
-        pass the <b>final check</b>, one query on the <b>metadata database</b>. That is the Postgres
-        database where every permission change is committed first. This is gate 1. An <b>identity sync</b>
-        writes the identity provider's group changes into that database.''',
+        '''Copy each document's permissions onto its chunks as <b>principals</b>: user, group and folder
+        ids. Both searches filter by her principal list, about 200 ids, while they search.
+        <b>Redis</b>, an in-memory store, caches that list for 60 seconds. Copies lag, so the
+        reranker's 20 chunks then pass the <b>final check</b> (gate 1), one query on the <b>metadata
+        database</b>. That is the Postgres database where we commit every permission change first.
+        An <b>identity sync</b> writes the identity provider's group changes into it.''',
         '''<b>Groups and folders on the chunk, not people.</b> With people listed, one employee leaving
         a group that reads 500,000 chunks rewrites 500,000 index records. With groups, it is one
         database row.''',
         '''<b>A copy of the permissions, not a live check with each source.</b> 100 calls a question
-        to rate-limited APIs are slow and fragile. The final check closes the copy's lag.'''))
+        to rate-limited APIs are slow and fragile.'''))
 
     B.append(push(6, 'Notice every change, and apply it once, in order',
         '''Re-crawl everything every night. Or trust each source's <b>webhooks</b>, the calls it makes
@@ -195,8 +186,9 @@ def body(fig):
         anyway, they read the source's change list. A <b>cursor</b> marks how far they have read. Each change goes on an <b>ingest queue</b>, a Kafka topic keyed by document id, so one
         document's changes reach one worker, in order. A <b>fetch ticket</b>, a number taken before
         each fetch, stops an older fetch from overwriting a newer one. A daily sweep catches what change lists never show.''',
-        '''<b>Kafka, not a job queue.</b> Kafka hands one document's burst of edits to one worker,
-        which fetches once, not once per edit. Fetches are what the sources' quotas limit.'''))
+        '''<b>Kafka, not a job queue.</b> Kafka keeps one document's edits in order on one worker. So
+        the worker skips edits its last fetch already covers. Fetches are what the sources' quotas
+        limit.'''))
 
     B.append(push(7, 'Follow-up questions, without a prompt that keeps growing',
         '''Search for the new message as typed, and send the whole conversation with it.''',
@@ -220,9 +212,7 @@ def body(fig):
         may name only a chunk we sent: gate 2. A <b>citation checker</b>, a small model, scores whether the cited chunk supports each
         sentence as it ends. When the reranker's best score says nothing she may read answers, we
         skip the model and say so.''',
-        '''<b>SSE, not WebSocket.</b> An answer flows one way for a few seconds. SSE is plain HTTP.''',
-        '''<b>A small checker, not a second call to the large model.</b> The large model doubles every
-        answer's cost and adds seconds. The checker takes about 15 ms a sentence.'''))
+                '''<b>SSE, not WebSocket.</b> An answer flows one way for a few seconds. SSE is plain HTTP.'''))
 
     B.append(push(9, 'Documents that give orders',
         '''Put the retrieved text into the prompt as it is.''',
@@ -243,10 +233,11 @@ def body(fig):
         retries run out, she gets an error anyway.''',
         '''A <b>model router</b> inside each orchestrator makes every provider call. It keeps a
         <b>token bucket</b> per provider, a running count of the tokens we may still send. So we slow
-        down before the provider refuses us. It gives up on a call with no first word in 3 seconds.
+        down before the provider refuses us. It cancels a call with no first word in 3 seconds.
         Its <b>circuit breaker</b> stops calling a provider that keeps failing. A <b>fallback
-        provider</b>, sized for the whole peak, then answers. It takes 5% of questions every day, so
-        it is known to work before an outage needs it.'''))
+        provider</b>, sized for the whole peak, then answers.''',
+        '''<b>A fallback in daily use, not one kept cold.</b> It takes 5% of questions every day, so it
+        is known to work before an outage needs it.'''))
 
     B.append(push(11, 'Notice when answers quietly get worse',
         '''Try a few questions by hand after each change.''',
@@ -275,7 +266,9 @@ def body(fig):
         path, which runs all the time. The two paths never call each other. They meet only in the
         middle band, the stores and our models.'''))
     B.append(fig(1, '''One cell. Mauve: the two gates, the metadata database the final check reads and the
-        orchestrator's citation rule. Yellow: outside parties. Blue: logs and queues. Dashed: replies.'''))
+        orchestrator's citation rule. Yellow: outside parties. Blue: logs and queues. Dashed: replies.
+        The small labels (nightly audit, weekly crawl, backfill topics, <code>retrieval_target</code>)
+        are housekeeping that Part 3 covers.'''))
     B.append(tx('''Now follow Asha's first question, "How do I rotate the API signing key?", with real
         timings. The approximate part ends at the reranker. The exact part begins at the final check.
         Everything of ours before the model takes about 150 ms. The rest of the first second is the
@@ -304,10 +297,11 @@ event: done       {"mode": "answer", "usage": {"input_tokens": 5200, "output_tok
     B.append(how(
         '''<b>Who she is comes from her session, never from the request.</b> Her principals come from
         our records. Once the identity provider deactivates her, every call gets 401.''',
-        '''<b>The browser makes the turn's id</b> before it sends. If the stream drops, the browser
+        '''<b>The browser makes the turn's id</b> (<code>message_id</code>) before it sends. If the stream drops, the browser
         asks for the turn by that id. It does not resend the question, which would start, and pay
         for, a second answer.''',
-        '''<b>Ids are random</b>, so no one can guess another employee's.'''))
+        '''<b>Every call checks that the conversation is hers.</b> Ids are also random, so no one can
+        guess another employee's.'''))
     B.append(fold('The other calls, and the events', 'reference', table(
         ['call or event', 'what it does'], [
             ['<code>GET .../messages/{id}</code>', '''Read a turn, for a dropped stream. 404 if the
@@ -317,8 +311,9 @@ event: done       {"mode": "answer", "usage": {"input_tokens": 5200, "output_tok
             ['<code>PATCH /scim/v2/Groups/{id}</code>, <code>/Users/{id}</code>', '''From the identity
              provider: change members, deactivate a user. We answer 200 only after the commit.'''],
             ['a source\'s webhook', '''200 at once, because it is only a doorbell.'''],
-            ['<code>done.mode</code>', '''How the turn ended: <code>answer</code>,
-             <code>abstained</code>, <code>search_only</code> or <code>refused</code>.'''],
+            ['<code>done.mode</code>', '''How the turn ended: <code>answer</code>, <code>abstained</code>
+             (nothing she may read answers), <code>search_only</code> (no provider answered) or
+             <code>refused</code> (the final check could not run).'''],
         ])))
     B.append(tx('''<b>The data.</b> Each store is placed by what it would cost to lose. The metadata
         database is the truth about who may read which live chunk. Only the sources can rebuild it,
@@ -341,18 +336,18 @@ event: done       {"mode": "answer", "usage": {"input_tokens": 5200, "output_tok
          '''Nothing that cannot be rebuilt.'''],
     ]))
     B.append(tx('''<b>How the index is split.</b> Chunks go to the 4 shards by a hash of their document's
-        id. So a delete or a sharing change touches one shard. Every question visits all 4. On each
-        shard, the vector search walks the graph over one-byte vectors in RAM for its best 100. It
-        rescores them with full vectors from SSD and returns its best 50. One byte a number loses
-        about a point of recall. Rescoring wins it back.'''))
-    B.append(fig(2))
+        id. So a delete or a sharing change touches one shard. Every question visits all 4.'''))
+    B.append(tx('''On each shard, the vector search walks the graph over one-byte vectors in RAM for its
+        best 100. It rescores them with full vectors from SSD and returns its best 50. One byte a
+        number loses about a point of <b>recall</b>, the share of right chunks a search finds.
+        Rescoring wins it back.'''))
+    B.append(fig(2, '''One record of the index. <code>acl_allow_1..4</code> and <code>acl_deny</code> are
+        the chunk's allow sets and deny list, its principals.'''))
     B.append(vs('''<b>HNSW at one byte a number, not four bytes, and not IVF-PQ.</b> Four bytes a number
-        needs 18 nodes instead of 12. IVF-PQ fits on one machine, but it loses more recall and its
-        clusters go stale until a rebuild. HNSW takes inserts and deletes as they come.'''))
+        needs four times the RAM, about 48 nodes instead of 12. IVF-PQ, which clusters and compresses
+        the vectors, fits on one machine, but it loses more recall and its clusters go stale until a
+        rebuild. HNSW takes inserts and deletes as they come.'''))
     B.append(fu(
         ('The connection drops after 60 words. What happens?',
-         '''The turn runs on and is saved. The browser polls <code>GET .../messages/m_77</code> until the turn is done.'''),
-        ('Why only 30 GB of vectors on a 128 GB node?',
-         '''The rest holds the engine's heap, the keyword index, room for merges, and a cache of the
-         full vectors.''')))
+         '''The turn runs on and is saved. The browser polls <code>GET .../messages/m_77</code> until the turn is done.''')))
     return B

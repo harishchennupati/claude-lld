@@ -128,7 +128,7 @@ CSS = '''<style>
 .grow .c.new{background:#a6e3a1;border-color:#a6e3a1;color:#1e1e2e;font-weight:600}
 p.rem{margin:14px 0 12px;padding:8px 14px;border:1px solid #a6e3a1;border-radius:8px;background:#181825;max-width:90ch;line-height:1.65}
 p.rem b{color:#a6e3a1}
-pre.sum{margin:10px 0 14px;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:#181825;max-width:92ch;font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:1.7;color:var(--txt);overflow-x:auto;white-space:pre}
+pre.sum{margin:10px 0 14px;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:#181825;max-width:102ch;font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:1.7;color:var(--txt);overflow-x:auto;white-space:pre}
 pre.sum b{color:#f9e2af;font-weight:600}
 .plan{margin:8px 0 14px;padding-left:0;list-style:none;max-width:92ch}
 .plan li{display:grid;grid-template-columns:6.5em 1fr;gap:12px;padding:6px 0;border-top:1px dashed var(--line);line-height:1.6}
@@ -141,6 +141,8 @@ pre.sum b{color:#f9e2af;font-weight:600}
 .map p:first-child{border-top:0}
 .map p b{color:var(--acc);font-family:"IBM Plex Mono",monospace;font-weight:500;display:inline-block;min-width:9em}
 ul.how{margin:8px 0 14px;max-width:92ch}
+ul.pi{margin:6px 0 0;padding-left:1.2em;max-width:92ch}
+ul.pi li{line-height:1.7;margin:2px 0}
 p code,li code,td code{background:var(--sur);padding:0 4px;border-radius:4px;color:#f5c2e7;font-size:.92em}
 @media (max-width:760px){.fwd{grid-template-columns:1fr}.fwd p.h{padding-top:8px}
 .grow .bl{width:100%}.card{grid-template-columns:1fr}.plan li{grid-template-columns:1fr;gap:2px}.map p b{display:block}}
@@ -151,23 +153,23 @@ PROBLEM = '''<p class="plab">The problem, as the interviewer puts it</p><p class
 answers employees' questions from their company's own documents. Think of the assistants Glean sells.
 A large company has about 10 million documents in its wiki, shared drives, ticket tracker and chat.
 About 100,000 employees each ask a few questions a day. An employee types a question in plain English
-and asks follow-ups in the same conversation. Within a few seconds, the employee gets an answer with
-links to the documents it came from. Every document has permissions in its source system. The
+and asks follow-ups in the same conversation.</p><p class="pq">Within a few seconds, the employee gets an
+answer with links to the documents it came from. Every document has permissions in its source system. The
 assistant must never show a document that the employee could not open there. An edited document must
 be searchable within about five minutes. A deleted document must disappear. You rent the language
 model from a provider.”</p><p class="pi"><b>What this is.</b> This is retrieval-augmented generation
-(RAG). A RAG system is a search engine whose results a model reads, not a person. For each question
-we do three things. We find the few pieces of text that answer it and that this employee may read. We
-put them in front of a rented model. We stream the answer back, with a link for each sentence. The
-model is rented, slow and sometimes wrong, and every token in or out costs money. So the design is
-everything around the model.
-<b>In scope:</b> finding and permission-checking the pieces, keeping our copy of the documents fresh,
-the streamed answer with checked citations, keeping quality measured, and running it.
-<b>Out of scope:</b> training models, an assistant that takes actions such as filing tickets, search
-in images and audio, and billing.</p>'''
+(RAG). A RAG system is a search engine whose results a model reads, not a person.</p><p class="pi">For each
+question we do three things. We find the few <b>chunks</b>, pieces of a few hundred words, that answer it and
+that this employee may read. We put them in front of a rented model. We stream the answer back, with
+a link for each sentence. The model is rented, slow and sometimes wrong, and every token in or out
+costs money. So the design is everything around the model.</p>
+<ul class="pi"><li><b>In scope:</b> finding and permission-checking the chunks, keeping our copy of
+the documents fresh, the streamed answer with checked citations, keeping quality measured, and
+running it.</li><li><b>Out of scope:</b> training models, an assistant that takes actions such as
+filing tickets, search in images and audio, and billing.</li></ul>'''
 
 TOC = [
-    ('Start', [('s-who', 'Who is who, and the one idea to hold on to'),
+    ('Start', [('s-who', 'Who is who, and the one idea to remember'),
                ('s-req', 'What it must do, and the numbers')]),
     ('Part 1 · The design', [('s-derive', 'Building it, one push at a time'),
                              ('s-design', 'The whole design, and one question through it'),
